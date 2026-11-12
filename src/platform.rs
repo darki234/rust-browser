@@ -27,7 +27,7 @@ use webview2_com::{
     ZoomFactorChangedEventHandler,
 };
 use windows::{
-    core::{Interface, BOOL, HSTRING, PWSTR},
+    core::{Interface, BOOL, HSTRING, PCWSTR, PWSTR},
     Win32::{
         Foundation::{HANDLE, HGLOBAL, HWND},
         Graphics::Dwm::{
@@ -47,8 +47,8 @@ use windows::{
                 VK_MENU, VK_OEM_PERIOD, VK_SHIFT,
             },
             Shell::{
-                FileOpenDialog, IFileOpenDialog, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS,
-                SIGDN_FILESYSPATH,
+                Common::COMDLG_FILTERSPEC, FileOpenDialog, IFileOpenDialog, FOS_FILEMUSTEXIST,
+                FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
             },
             WindowsAndMessaging::{
                 SetWindowPos, HWND_TOP, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
@@ -624,6 +624,26 @@ pub fn pick_folder(owner: isize) -> Option<String> {
             CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
         let options = dialog.GetOptions().ok()?;
         dialog.SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM).ok()?;
+        dialog.Show(Some(HWND(owner as *mut c_void))).ok()?;
+        let item = dialog.GetResult().ok()?;
+        let path = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let text = path.to_string().ok();
+        CoTaskMemFree(Some(path.0 as *const c_void));
+        text
+    }
+}
+
+/// Стандартный диалог выбора изображения. None — пользователь отменил выбор.
+pub fn pick_image(owner: isize) -> Option<String> {
+    unsafe {
+        let dialog: IFileOpenDialog =
+            CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        let name = HSTRING::from("Изображения");
+        let spec = HSTRING::from("*.jpg;*.jpeg;*.png;*.webp;*.gif;*.bmp");
+        let filter = COMDLG_FILTERSPEC { pszName: PCWSTR(name.as_ptr()), pszSpec: PCWSTR(spec.as_ptr()) };
+        dialog.SetFileTypes(&[filter]).ok()?;
+        let options = dialog.GetOptions().ok()?;
+        dialog.SetOptions(options | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST).ok()?;
         dialog.Show(Some(HWND(owner as *mut c_void))).ok()?;
         let item = dialog.GetResult().ok()?;
         let path = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;

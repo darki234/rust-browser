@@ -367,6 +367,8 @@ fn build_ui(
     let ipc = proxy.clone();
     let ui = WebViewBuilder::new_with_web_context(web_context)
         .with_bounds(rect(0.0, 0.0, width, height))
+        // Своё фото для обоев: интерфейс берёт его по адресу http://rb.localhost/wallpaper.
+        .with_custom_protocol("rb".into(), |_, request| serve_local(request.uri().path()))
         .with_initialization_script(format!("window.__BOOT__ = {boot};"))
         .with_html(html)
         // Цвет до первой отрисовки, чтобы окно не вспыхивало белым в тёмной теме.
@@ -1137,8 +1139,41 @@ impl App {
                     settings.sleep_minutes = minutes.min(24 * 60) as u32;
                 }
             }
+            "wallpaper" => match value.as_str() {
+                // своё фото можно выбрать, только если оно уже загружено
+                Some("image") if wallpaper_file().is_none() => return,
+                Some(name) if WALLPAPERS.contains(&name) => settings.wallpaper = name.to_string(),
+                _ => return,
+            },
+            "wallpaper_dim" => {
+                if let Some(dim) = value.as_u64() {
+                    settings.wallpaper_dim = dim.min(85) as u32;
+                }
+            }
             _ => return,
         }
+        self.store.save_settings();
+        self.dirty = true;
+    }
+
+    /// Копирует выбранное фото в папку данных: обои не пропадут, если исходник удалят.
+    fn set_wallpaper_image(&mut self, source: &Path) {
+        let ext = source
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        if !IMAGE_TYPES.iter().any(|(known, _)| *known == ext) {
+            return;
+        }
+        if let Some((old, _)) = wallpaper_file() {
+            let _ = std::fs::remove_file(old);
+        }
+        if std::fs::copy(source, data_dir().join(format!("wallpaper.{ext}"))).is_err() {
+            return;
+        }
+        let settings = &mut self.store.settings;
+        settings.wallpaper = "image".into();
+        settings.wallpaper_version += 1;
         self.store.save_settings();
         self.dirty = true;
     }
@@ -1358,6 +1393,21 @@ impl App {
                 }
             }
             "reset_download_dir" => self.set_download_dir(String::new()),
+            "pick_wallpaper" => {
+                if let Some(path) = platform::pick_image(self.window.hwnd()) {
+                    self.set_wallpaper_image(Path::new(&path));
+                }
+            }
+            "remove_wallpaper" => {
+                if let Some((file, _)) = wallpaper_file() {
+                    let _ = std::fs::remove_file(file);
+                }
+                if self.store.settings.wallpaper == "image" {
+                    self.store.settings.wallpaper = "aurora".into();
+                }
+                self.store.save_settings();
+                self.dirty = true;
+            }
             "open_download_dir" => {
                 let mut dir = self.store.settings.download_dir.clone();
                 if dir.is_empty() {
@@ -1488,6 +1538,10 @@ impl App {
                 "passwords": settings.passwords,
                 "downloadDir": settings.download_dir,
                 "defaultDownloadDir": default_download_dir(),
+                "wallpaper": settings.wallpaper,
+                "wallpaperDim": settings.wallpaper_dim,
+                "wallpaperUrl": format!("http://rb.localhost/wallpaper?v={}", settings.wallpaper_version),
+                "hasImage": wallpaper_file().is_some(),
             },
             "dark": self.dark(),
             "maximized": self.maximized,
@@ -1536,6 +1590,44 @@ fn rest_action(
         Rest::Suspend
     } else {
         Rest::Keep
+    }
+}
+
+/// Готовые обои; "image" — своё фото.
+const WALLPAPERS: [&str; 7] = ["aurora", "sunset", "ocean", "forest", "night", "mono", "image"];
+const IMAGE_TYPES: [(&str, &str); 6] = [
+    ("jpg", "image/jpeg"),
+    ("jpeg", "image/jpeg"),
+    ("png", "image/png"),
+    ("webp", "image/webp"),
+    ("gif", "image/gif"),
+    ("bmp", "image/bmp"),
+];
+
+/// Файл своих обоев в папке данных, если он есть.
+fn wallpaper_file() -> Option<(PathBuf, &'static str)> {
+    IMAGE_TYPES.iter().find_map(|(ext, mime)| {
+        let path = data_dir().join(format!("wallpaper.{ext}"));
+        path.exists().then_some((path, *mime))
+    })
+}
+
+/// Отвечает на запросы интерфейса к http://rb.localhost/…
+fn serve_local(path: &str) -> wry::http::Response<std::borrow::Cow<'static, [u8]>> {
+    let found = (path == "/wallpaper")
+        .then(wallpaper_file)
+        .flatten()
+        .and_then(|(file, mime)| std::fs::read(file).ok().map(|bytes| (bytes, mime)));
+    match found {
+        Some((bytes, mime)) => wry::http::Response::builder()
+            .header("Content-Type", mime)
+            .header("Cache-Control", "max-age=31536000")
+            .body(bytes.into())
+            .unwrap_or_default(),
+        None => wry::http::Response::builder()
+            .status(404)
+            .body(Vec::new().into())
+            .unwrap_or_default(),
     }
 }
 
@@ -1642,6 +1734,12 @@ mod tests {
         assert_eq!(rest_action(long, 0, false, false, true), Rest::Keep); // сон выключен
         assert_eq!(rest_action(long, 15, true, false, false), Rest::Keep); // уже выгружена
         assert_eq!(rest_action(None, 15, false, false, true), Rest::Keep); // активная
+    }
+
+    #[test]
+    fn local_server_answers_404_for_unknown_paths() {
+        assert_eq!(serve_local("/nothing").status(), 404);
+        assert_eq!(serve_local("/../settings.json").status(), 404);
     }
 
     #[test]

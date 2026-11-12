@@ -57,6 +57,7 @@ const ICONS = {
   speaker: '<path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16.5 8.5a5 5 0 0 1 0 7"/><path d="M19 6a8.5 8.5 0 0 1 0 12"/>',
   muted: '<path d="M4 9v6h4l5 4V5L8 9z"/><path d="m17 9 5 6"/><path d="m22 9-5 6"/>',
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+  image: '<rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-9 9"/>',
   smile: '<circle cx="12" cy="12" r="9.5"/><path d="M8 14.5a5 5 0 0 0 8 0"/><path d="M9 9.5h.01M15 9.5h.01" stroke-width="2.6"/>',
   mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/>',
   undo: '<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>',
@@ -700,8 +701,42 @@ $('#searchbox').addEventListener('click', (event) => {
   if (event.target.id === 'searchbox') el.startq.focus();
 });
 
+// ----- обои -----
+
+const WALLS = [
+  ['aurora', 'Аврора'], ['sunset', 'Закат'], ['ocean', 'Океан'],
+  ['forest', 'Лес'], ['night', 'Ночь'], ['mono', 'Без узора'],
+];
+let wallKey = null;
+
+function renderWallpaper() {
+  const s = S.settings;
+  const kind = s.wallpaper === 'image' && s.hasImage ? 'image' : (s.wallpaper || 'aurora');
+  const key = kind + '|' + s.wallpaperUrl + '|' + s.wallpaperDim;
+  if (key === wallKey) return;
+  wallKey = key;
+  document.body.dataset.wall = kind;
+  const wall = $('#wall');
+  wall.style.setProperty('--dim', (s.wallpaperDim ?? 35) / 100);
+  if (kind === 'image') {
+    // показываем фото, только когда оно загрузилось, — без мигания пустого фона
+    const img = new Image();
+    img.onload = () => {
+      wall.style.backgroundImage = `url("${s.wallpaperUrl}")`;
+      wall.classList.add('show');
+    };
+    img.src = s.wallpaperUrl;
+  } else {
+    wall.classList.remove('show');
+    wall.style.backgroundImage = '';
+  }
+}
+
+$('#wallbtn').addEventListener('click', () => openHub('settings'));
+
 function renderStart() {
   renderEngines();
+  renderWallpaper();
   const key = JSON.stringify(S.bookmarks);
   if (key !== tilesKey) {
     tilesKey = key;
@@ -1243,6 +1278,33 @@ function confirmButton(label, confirmLabel, onConfirm) {
 
 const set = (key, value) => send('set', { key, value });
 
+function wallpaperSetting() {
+  const tiles = WALLS.map(([id, name]) =>
+    h('button', { class: `walltile w-${id}`, title: name, onclick: () => set('wallpaper', id) },
+      h('span', {}, name)));
+  const photo = h('button', { class: 'walltile w-photo', title: 'Своё фото', onclick: () => send('pick_wallpaper') },
+    h('i'), h('span', {}, 'Своё фото'));
+  const dim = h('input', { type: 'range', min: 0, max: 85, step: 5, class: 'range' });
+  dim.addEventListener('input', () => set('wallpaper_dim', Number(dim.value)));
+  const dimRow = setting('Затемнение фото', 'Чтобы часы и поиск хорошо читались',
+    dim, h('button', { class: 'text-btn outline', onclick: () => send('remove_wallpaper') }, 'Убрать фото'));
+  settingsUpdaters.push(() => {
+    const s = S.settings;
+    const current = s.wallpaper === 'image' && s.hasImage ? 'image' : s.wallpaper;
+    tiles.forEach((tile, i) => tile.classList.toggle('on', WALLS[i][0] === current));
+    photo.classList.toggle('on', current === 'image');
+    photo.querySelector('i').style.backgroundImage = s.hasImage ? `url("${s.wallpaperUrl}")` : '';
+    photo.querySelector('span').textContent = s.hasImage ? 'Своё фото' : 'Загрузить фото';
+    dim.value = s.wallpaperDim ?? 35;
+    dimRow.style.display = s.hasImage ? '' : 'none';
+  });
+  return h('div', {},
+    h('div', { class: 'set wallset' },
+      h('div', { class: 'label' }, 'Обои новой вкладки', h('small', {}, 'Готовый узор или ваше фото')),
+      h('div', { class: 'walls' }, ...tiles, photo)),
+    dimRow);
+}
+
 function settingsPage() {
   settingsUpdaters = [];
   const cards = [
@@ -1251,7 +1313,8 @@ function settingsPage() {
         segmented([['system', 'Как в системе'], ['light', 'Светлая'], ['dark', 'Тёмная']],
           () => S.settings.theme, (value) => set('theme', value))),
       setting('Панель избранного', 'Сайты из избранного под адресной строкой · Ctrl+Shift+B',
-        toggle(() => S.settings.favbar, (value) => set('favbar', value)))),
+        toggle(() => S.settings.favbar, (value) => set('favbar', value))),
+      wallpaperSetting()),
 
     h('div', { class: 'card' }, h('h2', {}, 'Поиск'),
       setting('Поисковая система', 'Для адресной строки и строки поиска на новой вкладке',

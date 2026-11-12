@@ -44,6 +44,12 @@ pub struct Settings {
     pub download_dir: String,
     /// Предлагать сохранять пароли.
     pub passwords: bool,
+    /// Обои новой вкладки: имя готового варианта или "image" — своё фото.
+    pub wallpaper: String,
+    /// Затемнение своего фото, 0–85 %, чтобы текст на нём читался.
+    pub wallpaper_dim: u32,
+    /// Растёт при каждой смене фото: интерфейс не возьмёт старую картинку из кэша.
+    pub wallpaper_version: u64,
 }
 
 impl Default for Settings {
@@ -58,6 +64,9 @@ impl Default for Settings {
             sleep_minutes: 15,
             download_dir: String::new(),
             passwords: true,
+            wallpaper: "aurora".to_string(),
+            wallpaper_dim: 35,
+            wallpaper_version: 0,
         }
     }
 }
