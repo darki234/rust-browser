@@ -57,6 +57,9 @@ const ICONS = {
   speaker: '<path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16.5 8.5a5 5 0 0 1 0 7"/><path d="M19 6a8.5 8.5 0 0 1 0 12"/>',
   muted: '<path d="M4 9v6h4l5 4V5L8 9z"/><path d="m17 9 5 6"/><path d="m22 9-5 6"/>',
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+  pause: '<path d="M8 5v14"/><path d="M16 5v14"/>',
+  play: '<path d="M7 4.5v15l12-7.5z"/>',
+  cookie: '<path d="M12 3a9 9 0 1 0 9 9 3 3 0 0 1-3-3 3 3 0 0 1-3-3 3 3 0 0 1-3-3z"/><path d="M8.5 11.5h.01M12 16h.01M15.5 13h.01" stroke-width="2.6"/>',
   window: '<rect x="3" y="5" width="18" height="15" rx="2"/><path d="M3 9h18"/>',
   image: '<rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-9 9"/>',
   smile: '<circle cx="12" cy="12" r="9.5"/><path d="M8 14.5a5 5 0 0 0 8 0"/><path d="M9 9.5h.01M15 9.5h.01" stroke-width="2.6"/>',
@@ -466,7 +469,7 @@ function renderToolbar() {
 }
 
 function renderDownloadRing() {
-  const running = S.downloads.filter((d) => d.state === 'progress');
+  const running = S.downloads.filter((d) => d.state === 'progress' || d.state === 'paused');
   el.downloads.classList.toggle('active', running.length > 0);
   const total = running.reduce((sum, d) => sum + Math.max(d.total, 0), 0);
   const received = running.reduce((sum, d) => sum + d.received, 0);
@@ -477,6 +480,47 @@ function renderDownloadRing() {
   } else {
     el.downloads.style.removeProperty('--offset');
   }
+}
+
+el.siteicon.addEventListener('mousedown', (event) => event.preventDefault());
+el.siteicon.addEventListener('click', () => {
+  const tab = activeTab();
+  if (tab && !tab.start && /^https?:/.test(tab.url)) send('site_info');
+});
+
+function showSiteInfo(info) {
+  const tab = activeTab();
+  const zoom = Math.round(info.zoom * 100);
+  const row = (name, text) => h('div', { class: 'si-row' }, h('span', { class: 'ic' }, icon(name, 16)), h('span', { class: 'lbl' }, text));
+  const nodes = [
+    h('div', { class: 'si-head ' + (info.secure ? 'ok' : 'bad') },
+      h('span', { class: 'si-icon' }, icon(info.secure ? 'lock' : 'alert', 20)),
+      h('div', {},
+        h('b', {}, info.secure ? 'Подключение защищено' : 'Подключение не защищено'),
+        h('small', {}, info.host))),
+    h('div', { class: 'si-note' }, info.secure
+      ? 'Данные между вами и сайтом шифруются: их не прочитать по пути.'
+      : 'Не вводите на этом сайте пароли и данные карт — их могут перехватить.'),
+    sep(),
+    row('shield', S.adblock
+      ? (info.ubol ? `Реклама и трекеры блокируются uBlock Origin Lite${info.blocked ? ` · по списку доменов: ${info.blocked}` : ''}` : `Заблокировано на странице: ${info.blocked}`)
+      : 'Блокировка рекламы выключена'),
+    h('div', { class: 'si-row' },
+      h('span', { class: 'ic' }, icon('cookie', 16)),
+      h('span', { class: 'lbl' }, `Файлы cookie сайта: ${info.cookies}`),
+      info.cookies > 0 && h('button', { class: 'text-btn outline', onclick: () => send('site_clear_cookies') }, 'Удалить')),
+    zoom !== 100 && h('div', { class: 'si-row' },
+      h('span', { class: 'ic' }, icon('zoom', 16)),
+      h('span', { class: 'lbl' }, `Масштаб для этого сайта: ${zoom}%`),
+      h('button', { class: 'text-btn outline', onclick: () => { send('zoom', { dir: 'reset' }); closeMenu(); } }, 'Сбросить')),
+  ].filter(Boolean);
+  if (!tab) return;
+  showMenu('site', nodes, () => {
+    const anchor = el.siteicon.getBoundingClientRect();
+    el.menu.style.left = Math.max(8, anchor.left - 10) + 'px';
+    el.menu.style.top = anchor.bottom + 10 + 'px';
+    el.menu.style.transformOrigin = 'top left';
+  });
 }
 
 el.back.addEventListener('click', () => send('back'));
@@ -1198,27 +1242,43 @@ function bookmarkRows() {
 
 function downloadRows() {
   const query = el.hubq.value.trim().toLowerCase();
+  const control = (d, action) => () => send('download_control', { id: d.id, action });
   return [...S.downloads].reverse()
     .filter((d) => !query || d.name.toLowerCase().includes(query))
     .map((d, index) => {
       const known = d.total > 0;
+      const size = known ? `${formatBytes(d.received)} из ${formatBytes(d.total)}` : `${formatBytes(d.received)}…`;
       const meta =
         d.state === 'done' ? `${formatBytes(d.received)} · ${hostOf(d.url)}`
         : d.state === 'failed' ? 'Загрузка не удалась'
-        : known ? `${formatBytes(d.received)} из ${formatBytes(d.total)}`
-        : `${formatBytes(d.received)}…`;
-      return h('div', { class: `row dl ${d.state}`, style: `--i:${index}` },
-        h('span', { class: 'fileicon' }, icon(d.state === 'failed' ? 'alert' : 'file', 18)),
+        : d.state === 'canceled' ? 'Загрузка отменена'
+        : d.state === 'paused' ? `Пауза · ${size}`
+        : size;
+      const running = d.state === 'progress' || d.state === 'paused';
+      const bad = d.state === 'failed' || d.state === 'canceled';
+      const acts =
+        d.state === 'done' ? [
+          actionButton('open', 'Открыть файл', () => send('download_open', { id: d.id })),
+          actionButton('folder', 'Показать в папке', () => send('download_reveal', { id: d.id })),
+        ]
+        : d.state === 'progress' ? [
+          actionButton('pause', 'Пауза', control(d, 'pause')),
+          actionButton('x', 'Отменить', control(d, 'cancel')),
+        ]
+        : d.state === 'paused' ? [
+          actionButton('play', 'Продолжить', control(d, 'resume')),
+          actionButton('x', 'Отменить', control(d, 'cancel')),
+        ]
+        : [actionButton('trash', 'Убрать из списка', () => send('download_forget', { id: d.id }))];
+      return h('div', { class: `row dl ${d.state}${running ? ' running' : ''}`, style: `--i:${index}` },
+        h('span', { class: 'fileicon' }, icon(bad ? 'alert' : 'file', 18)),
         h('div', { class: 'body' },
           h('div', { class: 'name' }, d.name),
           h('div', { class: 'meta' }, meta),
-          d.state === 'progress' && h('div', { class: known ? 'bar' : 'bar unknown' },
+          running && h('div', { class: (known ? 'bar' : 'bar unknown') + (d.state === 'paused' ? ' paused' : '') },
             h('i', { style: known ? `--pct:${(100 * d.received / d.total).toFixed(1)}%` : '' })),
         ),
-        d.state === 'done' && h('span', { class: 'acts' },
-          actionButton('open', 'Открыть файл', () => send('download_open', { id: d.id })),
-          actionButton('folder', 'Показать в папке', () => send('download_reveal', { id: d.id })),
-        ),
+        h('span', { class: 'acts' }, ...acts),
       );
     });
 }
@@ -1535,6 +1595,8 @@ window.ui = {
   downloadStarted: () => replay(el.downloads, 'bounce'),
   dataCleared: () => toast('Данные сайтов удалены'),
   pasteText,
+  showSiteInfo,
+  cookiesCleared: (count) => { closeMenu(); toast(`Удалено файлов cookie: ${count}`); },
   imported: (count) => toast(count ? `Перенесено в избранное: ${count}` : 'Новых сайтов для избранного не нашлось'),
 };
 

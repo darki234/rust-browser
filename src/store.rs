@@ -1,7 +1,7 @@
 //! Закладки, история и настройки: хранение в JSON-файлах.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fs,
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
@@ -108,6 +108,8 @@ pub struct Store {
     /// только они: так удалённое в другом окне не возвращается.
     pending: Vec<Visit>,
     pub settings: Settings,
+    /// Масштаб по сайтам, как в Edge: сайт → коэффициент (100 % не храним).
+    pub site_zoom: BTreeMap<String, f64>,
 }
 
 impl Store {
@@ -118,6 +120,7 @@ impl Store {
             history: read_json(&dir.join("history.json")),
             pending: Vec::new(),
             settings: read_json(&dir.join("settings.json")),
+            site_zoom: read_json(&dir.join("zoom.json")),
             dir: Some(dir),
         }
     }
@@ -130,6 +133,7 @@ impl Store {
             history: Vec::new(),
             pending: Vec::new(),
             settings: Settings::default(),
+            site_zoom: BTreeMap::new(),
         }
     }
 
@@ -160,6 +164,35 @@ impl Store {
         self.save_bookmarks();
         self.save_history();
         self.save_settings();
+    }
+
+    /// Запоминает масштаб сайта; true — значение изменилось.
+    pub fn set_site_zoom(&mut self, host: &str, zoom: f64) -> bool {
+        let changed = if (zoom - 1.0).abs() < 0.005 {
+            self.site_zoom.remove(host).is_some()
+        } else {
+            self.site_zoom.insert(host.to_string(), zoom) != Some(zoom)
+        };
+        if changed {
+            self.write("zoom.json", &self.site_zoom);
+        }
+        changed
+    }
+
+    pub fn zoom_for(&self, host: &str) -> f64 {
+        self.site_zoom.get(host).copied().unwrap_or(1.0)
+    }
+
+    /// Произвольный JSON-файл в папке данных (например, список загрузок).
+    pub fn read_named<T: DeserializeOwned + Default>(&self, name: &str) -> T {
+        match &self.dir {
+            Some(dir) => read_json(&dir.join(name)),
+            None => T::default(),
+        }
+    }
+
+    pub fn write_named<T: Serialize>(&self, name: &str, value: &T) {
+        self.write(name, value);
     }
 
     pub fn load_session(&self) -> Session {
@@ -381,7 +414,8 @@ fn merge_history(disk: Vec<Visit>, memory: Vec<Visit>) -> Vec<Visit> {
 fn read_json<T: DeserializeOwned + Default>(path: &PathBuf) -> T {
     fs::read_to_string(path)
         .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
+        // Блокнот и PowerShell пишут UTF-8 с меткой BOM — без её снятия файл не прочитать
+        .and_then(|text| serde_json::from_str(text.trim_start_matches('\u{feff}')).ok())
         .unwrap_or_default()
 }
 
@@ -420,6 +454,26 @@ mod tests {
         assert!(store.is_bookmarked("https://a.com/"));
         assert!(!store.toggle_bookmark("https://a.com/", "A"));
         assert!(store.bookmarks.is_empty());
+    }
+
+    #[test]
+    fn reads_files_saved_with_bom() {
+        let dir = std::env::temp_dir().join(format!("rust-browser-bom-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("settings.json"), "\u{feff}{\"search\":\"yandex\"}").unwrap();
+        assert_eq!(Store::load(dir.clone()).settings.search, "yandex");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn site_zoom_is_remembered_and_100_is_not_stored() {
+        let mut store = Store::in_memory();
+        assert_eq!(store.zoom_for("a.com"), 1.0);
+        assert!(store.set_site_zoom("a.com", 1.25));
+        assert!(!store.set_site_zoom("a.com", 1.25), "то же значение — без записи");
+        assert_eq!(store.zoom_for("a.com"), 1.25);
+        assert!(store.set_site_zoom("a.com", 1.0));
+        assert!(store.site_zoom.is_empty());
     }
 
     #[test]

@@ -3,7 +3,8 @@
 //! усыпление вкладок, снимок страницы, оформление окна и выбор папки.
 
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
+    collections::HashMap,
     ffi::c_void,
     os::windows::process::CommandExt,
     path::{Path, PathBuf},
@@ -46,7 +47,7 @@ use windows::{
         },
         UI::{
             Input::KeyboardAndMouse::{
-                keybd_event, GetKeyState, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_CONTROL, VK_LWIN,
+                keybd_event, GetAsyncKeyState, GetKeyState, VK_MBUTTON, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_CONTROL, VK_LWIN,
                 VK_MENU, VK_OEM_PERIOD, VK_SHIFT,
             },
             Shell::{
@@ -559,19 +560,51 @@ pub fn find_stop(webview: &WebView) {
 
 // ---------- загрузки ----------
 
+thread_local! {
+    /// Идущие загрузки: нужны, чтобы ставить их на паузу и отменять.
+    static DOWNLOADS: RefCell<HashMap<u64, ICoreWebView2DownloadOperation>> = RefCell::new(HashMap::new());
+}
+
+static NEXT_DOWNLOAD_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Номера новых загрузок продолжают сохранённый список, чтобы не совпасть с ним.
+pub fn continue_download_ids(after: u64) {
+    NEXT_DOWNLOAD_ID.fetch_max(after + 1, Ordering::Relaxed);
+}
+
+/// "pause" | "resume" | "cancel" для идущей загрузки.
+pub fn control_download(id: u64, action: &str) -> bool {
+    DOWNLOADS.with(|map| {
+        let map = map.borrow();
+        let Some(operation) = map.get(&id) else { return false };
+        unsafe {
+            match action {
+                "pause" => operation.Pause().is_ok(),
+                "resume" => operation.Resume().is_ok(),
+                "cancel" => operation.Cancel().is_ok(),
+                _ => false,
+            }
+        }
+    })
+}
+
+/// Ссылку открыли с Ctrl или колёсиком — такая вкладка открывается в фоне, как в Edge.
+pub fn background_click() -> bool {
+    unsafe { GetAsyncKeyState(VK_CONTROL.0 as i32) < 0 || GetAsyncKeyState(VK_MBUTTON.0 as i32) < 0 }
+}
+
 /// Следит за загрузками: начало, прогресс и завершение.
 /// `folder` — папка из настроек; пустая строка оставляет выбор WebView2.
 pub fn hook_downloads(webview: &WebView, folder: Arc<Mutex<String>>, proxy: Proxy) {
-    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-
     let Ok(core) = webview.webview().cast::<ICoreWebView2_4>() else {
         return;
     };
     let handler = DownloadStartingEventHandler::create(Box::new(move |_, args| {
         let Some(args) = args else { return Ok(()) };
-        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let id = NEXT_DOWNLOAD_ID.fetch_add(1, Ordering::Relaxed);
         unsafe {
             let operation = args.DownloadOperation()?;
+            DOWNLOADS.with(|map| map.borrow_mut().insert(id, operation.clone()));
 
             let mut uri = PWSTR::null();
             operation.Uri(&mut uri)?;
@@ -623,15 +656,25 @@ pub fn hook_downloads(webview: &WebView, folder: Arc<Mutex<String>>, proxy: Prox
                     let Some(operation) = operation else { return Ok(()) };
                     let mut state = COREWEBVIEW2_DOWNLOAD_STATE::default();
                     operation.State(&mut state)?;
-                    if state != COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS {
-                        let mut received = 0i64;
-                        let _ = operation.BytesReceived(&mut received);
-                        let _ = finished.send_event(UserEvent::Download(DownloadEvent::Finished {
-                            id,
-                            ok: state == COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED,
-                            received,
-                        }));
+                    let mut reason = COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON::default();
+                    let _ = operation.InterruptReason(&mut reason);
+                    let mut received = 0i64;
+                    let _ = operation.BytesReceived(&mut received);
+                    let status = match state {
+                        COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS => "progress",
+                        COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED => "done",
+                        _ if reason == COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_PAUSED => "paused",
+                        _ if reason == COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_CANCELED => "canceled",
+                        _ => "failed",
+                    };
+                    if matches!(status, "done" | "canceled" | "failed") {
+                        DOWNLOADS.with(|map| map.borrow_mut().remove(&id));
                     }
+                    let _ = finished.send_event(UserEvent::Download(DownloadEvent::State {
+                        id,
+                        state: status,
+                        received,
+                    }));
                     Ok(())
                 })),
                 &mut 0i64,

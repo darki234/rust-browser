@@ -69,7 +69,8 @@ pub enum UserEvent {
     TitleChanged(u32, String),
     Loading(u32, bool),
     HistoryChanged(u32),
-    NewTabRequested(String),
+    /// Ссылка «в новом окне»; true — открыть в фоне (Ctrl или колёсико).
+    NewTabRequested(String, bool),
     Blocked(u32),
     Hotkey(Hotkey),
     Download(DownloadEvent),
@@ -87,6 +88,8 @@ pub enum UserEvent {
     ExtensionInstalled(Option<String>),
     /// Другой запуск браузера передал адреса (пусто — просьба открыть новое окно).
     Remote(Vec<String>),
+    /// Прокрутка вкладки в момент ухода в фон.
+    Scrolled(u32, f64),
     /// Страница не загрузилась: (вкладка, вид ошибки для своей страницы ошибки).
     LoadFailed(u32, &'static str),
 }
@@ -94,7 +97,8 @@ pub enum UserEvent {
 pub enum DownloadEvent {
     Started { id: u64, url: String, path: String },
     Progress { id: u64, received: i64, total: i64 },
-    Finished { id: u64, ok: bool, received: i64 },
+    /// "progress" | "paused" | "done" | "canceled" | "failed"
+    State { id: u64, state: &'static str, received: i64 },
 }
 
 struct Tab {
@@ -118,6 +122,10 @@ struct Tab {
     sleeping: bool,
     /// Когда вкладка ушла в фон — для усыпления.
     hidden_since: Option<Instant>,
+    /// Прокрутка на момент ухода в фон: вернём её, если вкладку выгрузят.
+    scroll: Option<f64>,
+    /// Прокрутить сюда после повторной загрузки выгруженной вкладки.
+    restore_scroll: Option<f64>,
     /// Показана своя страница ошибки: в журнал такое не пишем.
     failed: bool,
 }
@@ -141,6 +149,8 @@ impl Tab {
             muted: false,
             sleeping: false,
             hidden_since: None,
+            scroll: None,
+            restore_scroll: None,
             failed: false,
         }
     }
@@ -154,7 +164,7 @@ impl Tab {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, serde::Deserialize, Clone)]
 struct Download {
     id: u64,
     url: String,
@@ -162,9 +172,11 @@ struct Download {
     path: String,
     received: i64,
     total: i64,
-    /// "progress" | "done" | "failed"
-    state: &'static str,
+    /// "progress" | "paused" | "done" | "canceled" | "failed"
+    state: String,
 }
+
+const MAX_SAVED_DOWNLOADS: usize = 100;
 
 /// Сколько места под панелью интерфейс занимает поверх страницы.
 #[derive(Clone, Copy, PartialEq)]
@@ -316,6 +328,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         quit: false,
     };
     app.apply_theme();
+    app.load_downloads();
     // Пустую новую вкладку открываем, только если не пришло ни сеанса, ни адресов.
     app.restore_session(urls.is_empty());
     // Распаковка uBlock Origin Lite (31 МБ при первом запуске) — в фоне, чтобы не тормозить старт.
@@ -486,7 +499,8 @@ fn build_tab(app: &mut App, id: u32, bounds: Rect) -> wry::Result<WebView> {
         })
         // Ссылки «в новом окне» открываем новой вкладкой.
         .with_new_window_req_handler(move |url, _| {
-            let _ = popup.send_event(UserEvent::NewTabRequested(url));
+            let background = platform::background_click();
+            let _ = popup.send_event(UserEvent::NewTabRequested(url, background));
             NewWindowResponse::Deny
         })
         .build_as_child(&app.window)?;
@@ -725,11 +739,19 @@ impl App {
     /// Делает вкладку активной без загрузки и фокуса.
     fn set_active(&mut self, id: u32) {
         let previous = self.active;
+        let scroll_proxy = self.proxy.clone();
         if let Some(old) = self.tab_mut(previous) {
             if previous != id {
                 old.hidden_since = Some(Instant::now());
                 if let Some(webview) = &old.webview {
                     platform::set_background(webview, true);
+                    // запоминаем прокрутку: если вкладку потом выгрузят, вернём её
+                    let proxy = scroll_proxy;
+                    let _ = webview.evaluate_script_with_callback("Math.round(scrollY)", move |y| {
+                        if let Ok(y) = y.trim_matches('"').parse::<f64>() {
+                            let _ = proxy.send_event(UserEvent::Scrolled(previous, y));
+                        }
+                    });
                 }
             }
         }
@@ -872,6 +894,8 @@ impl App {
                 self.dirty = true;
                 if !loading {
                     self.sync_location(id);
+                    self.apply_site_zoom(id);
+                    self.restore_scroll(id);
                     let Some(tab) = self.tab(id) else { return };
                     if tab.url.starts_with("http") && !self.inprivate && !tab.failed {
                         let (url, title) = (tab.url.clone(), tab.title.clone());
@@ -881,7 +905,8 @@ impl App {
                 }
             }
             UserEvent::HistoryChanged(id) => self.sync_location(id),
-            UserEvent::NewTabRequested(url) => self.new_tab(Some(url)),
+            UserEvent::NewTabRequested(url, true) => self.new_background_tab(&url),
+            UserEvent::NewTabRequested(url, false) => self.new_tab(Some(url)),
             UserEvent::Blocked(id) => {
                 if let Some(tab) = self.tab_mut(id) {
                     tab.blocked += 1;
@@ -903,12 +928,7 @@ impl App {
                     self.dirty = true;
                 }
             }
-            UserEvent::Zoom(id, factor) => {
-                if let Some(tab) = self.tab_mut(id) {
-                    tab.zoom = factor;
-                    self.dirty = true;
-                }
-            }
+            UserEvent::Zoom(id, factor) => self.remember_zoom(id, factor),
             UserEvent::PageFullscreen(id, full) => {
                 if id == self.active {
                     self.page_fullscreen = full;
@@ -922,6 +942,11 @@ impl App {
                 }
             }
             UserEvent::Captured(bytes) => self.finish_overlay(bytes),
+            UserEvent::Scrolled(id, y) => {
+                if let Some(tab) = self.tab_mut(id) {
+                    tab.scroll = (y > 0.0).then_some(y);
+                }
+            }
             UserEvent::LoadFailed(id, kind) => {
                 if self.last_download.is_some_and(|t| t.elapsed() < Duration::from_secs(3)) {
                     return;
@@ -1082,6 +1107,51 @@ impl App {
         }
     }
 
+    /// Масштаб, который выбрал человек (кнопки, Ctrl+колёсико): запоминается для
+    /// сайта и сразу применяется к его другим вкладкам.
+    fn remember_zoom(&mut self, id: u32, factor: f64) {
+        let Some(tab) = self.tab_mut(id) else { return };
+        tab.zoom = factor;
+        let host = adblock::host_of(&tab.url).map(str::to_string);
+        self.dirty = true;
+        let Some(host) = host else { return };
+        if !self.store.set_site_zoom(&host, factor) {
+            return;
+        }
+        for other in &mut self.tabs {
+            let same = other.id != id && adblock::host_of(&other.url) == Some(host.as_str());
+            if let (true, Some(webview)) = (same, &other.webview) {
+                let _ = webview.zoom(factor);
+                other.zoom = factor;
+            }
+        }
+    }
+
+    /// После перехода на другой сайт — его масштаб (или 100 %), как в Edge.
+    fn apply_site_zoom(&mut self, id: u32) {
+        let Some(tab) = self.tab(id) else { return };
+        let Some(host) = adblock::host_of(&tab.url) else { return };
+        let target = self.store.zoom_for(host);
+        if (tab.zoom - target).abs() > 0.005 {
+            if let Some(webview) = &tab.webview {
+                let _ = webview.zoom(target);
+            }
+            // сама программа меняет масштаб без события — запоминаем значение здесь
+            if let Some(tab) = self.tab_mut(id) {
+                tab.zoom = target;
+            }
+            self.dirty = true;
+        }
+    }
+
+    fn restore_scroll(&mut self, id: u32) {
+        let Some(tab) = self.tab_mut(id) else { return };
+        let Some(y) = tab.restore_scroll.take() else { return };
+        if let Some(webview) = &tab.webview {
+            let _ = webview.evaluate_script(&format!("scrollTo(0, {y})"));
+        }
+    }
+
     fn reload(&self) {
         if let Some(webview) = self.active_webview() {
             let _ = webview.reload();
@@ -1100,10 +1170,7 @@ impl App {
         .unwrap_or(current);
         let _ = webview.zoom(next);
         let id = tab.id;
-        if let Some(tab) = self.tab_mut(id) {
-            tab.zoom = next;
-        }
-        self.dirty = true;
+        self.remember_zoom(id, next);
         let _ = self.ui.evaluate_script("ui.zoomChanged()");
     }
 
@@ -1157,7 +1224,7 @@ impl App {
                     path,
                     received: 0,
                     total: 0,
-                    state: "progress",
+                    state: "progress".into(),
                 });
                 let _ = self.ui.evaluate_script("ui.downloadStarted()");
             }
@@ -1167,17 +1234,42 @@ impl App {
                     download.total = total;
                 }
             }
-            DownloadEvent::Finished { id, ok, received } => {
+            DownloadEvent::State { id, state, received } => {
                 if let Some(download) = self.downloads.iter_mut().find(|d| d.id == id) {
-                    download.state = if ok { "done" } else { "failed" };
+                    download.state = state.into();
                     download.received = received;
-                    if ok {
+                    if state == "done" {
                         download.total = received;
                     }
+                }
+                if matches!(state, "done" | "canceled" | "failed") {
+                    self.save_downloads();
                 }
             }
         }
         self.dirty = true;
+    }
+
+    /// Список загрузок переживает перезапуск; незаконченные считаются прерванными.
+    fn save_downloads(&self) {
+        let finished: Vec<&Download> = self
+            .downloads
+            .iter()
+            .filter(|d| !matches!(d.state.as_str(), "progress" | "paused"))
+            .collect();
+        let start = finished.len().saturating_sub(MAX_SAVED_DOWNLOADS);
+        self.store.write_named("downloads.json", &finished[start..].to_vec());
+    }
+
+    fn load_downloads(&mut self) {
+        let mut list: Vec<Download> = self.store.read_named("downloads.json");
+        for download in &mut list {
+            if matches!(download.state.as_str(), "progress" | "paused") {
+                download.state = "failed".into();
+            }
+        }
+        platform::continue_download_ids(list.iter().map(|d| d.id).max().unwrap_or(0));
+        self.downloads = list;
     }
 
     // ---------- меню и библиотека поверх страницы ----------
@@ -1524,8 +1616,37 @@ impl App {
                 }
             }
             "downloads_clear" => {
-                self.downloads.retain(|d| d.state == "progress");
+                self.downloads.retain(|d| matches!(d.state.as_str(), "progress" | "paused"));
+                self.save_downloads();
                 self.dirty = true;
+            }
+            "download_control" => {
+                let (id, action) = (number("id"), text("action"));
+                if platform::control_download(id, &action) {
+                    if let Some(download) = self.downloads.iter_mut().find(|d| d.id == id) {
+                        match action.as_str() {
+                            "pause" => download.state = "paused".into(),
+                            "resume" => download.state = "progress".into(),
+                            _ => {}
+                        }
+                    }
+                    self.dirty = true;
+                }
+            }
+            "download_forget" => {
+                self.downloads.retain(|d| d.id != number("id"));
+                self.save_downloads();
+                self.dirty = true;
+            }
+            "site_info" => self.send_site_info(),
+            "site_clear_cookies" => {
+                let Some(webview) = self.active_webview() else { return };
+                let url = self.active_tab().map(|t| t.url.clone()).unwrap_or_default();
+                let cookies = webview.cookies_for_url(&url).unwrap_or_default();
+                for cookie in &cookies {
+                    let _ = webview.delete_cookie(cookie);
+                }
+                let _ = self.ui.evaluate_script(&format!("ui.cookiesCleared({})", cookies.len()));
             }
 
             // настройки
@@ -1571,6 +1692,22 @@ impl App {
         }
     }
 
+    /// Сведения для окошка по щелчку на замок: соединение, трекеры, cookie, масштаб.
+    fn send_site_info(&self) {
+        let Some(tab) = self.active_tab() else { return };
+        let Some(webview) = &tab.webview else { return };
+        let cookies = webview.cookies_for_url(&tab.url).map(|c| c.len()).unwrap_or(0);
+        let info = json!({
+            "host": adblock::host_of(&tab.url).unwrap_or(""),
+            "secure": tab.url.starts_with("https://"),
+            "blocked": tab.blocked,
+            "cookies": cookies,
+            "zoom": tab.zoom,
+            "ubol": self.ubol_id.is_some(),
+        });
+        let _ = self.ui.evaluate_script(&format!("ui.showSiteInfo({info})"));
+    }
+
     fn send_history(&self, query: &str) {
         let visits = self.store.search_history(query, 400);
         let json = serde_json::to_string(&visits).unwrap_or_else(|_| "[]".into());
@@ -1611,7 +1748,7 @@ impl App {
     fn sleep_background_tabs(&mut self) {
         let minutes = self.store.settings.sleep_minutes;
         // Выгрузка отменила бы загрузку, поэтому пока что-то качается — только сон.
-        let downloading = self.downloads.iter().any(|d| d.state == "progress");
+        let downloading = self.downloads.iter().any(|d| d.state == "progress" || d.state == "paused");
         for tab in &mut self.tabs {
             let hidden_for = tab.hidden_since.map(|since| since.elapsed());
             let action = rest_action(hidden_for, minutes, tab.sleeping, tab.audio, tab.webview.is_some());
@@ -1624,6 +1761,7 @@ impl App {
                 }
                 Rest::Discard if !downloading => {
                     tab.webview = None; // уничтожает webview и процесс страницы
+                    tab.restore_scroll = tab.scroll;
                     tab.sleeping = true;
                     tab.loading = false;
                 }
