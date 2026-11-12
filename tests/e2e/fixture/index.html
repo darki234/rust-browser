@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Тестовая страница</title>
+<style>
+  body { margin: 0; font: 16px/1.6 "Segoe UI", sans-serif; background: #f6f7fb; color: #1b1c22; }
+  header { padding: 48px 10vw; background: linear-gradient(120deg, #4f5bf5, #e04a9a); color: #fff; }
+  main { padding: 32px 10vw; columns: 2 320px; column-gap: 40px; }
+  p { margin: 0 0 16px; }
+</style>
+</head>
+<body>
+<header><h1>Тестовая страница</h1><p>Локальный файл для замеров запуска и памяти, без сети.</p></header>
+<main id="text"></main>
+<script>
+  // Немного текста, чтобы странице было что раскладывать и рисовать.
+  const words = 'браузер вкладка память процессор страница движок окно панель поиск загрузка'.split(' ');
+  let html = '';
+  for (let p = 0; p < 60; p++) {
+    let line = '';
+    for (let w = 0; w < 60; w++) line += words[(p * 7 + w * 3) % words.length] + ' ';
+    html += '<p>' + line + '</p>';
+  }
+  document.getElementById('text').innerHTML = html;
+</script>
+</body>
+</html>
