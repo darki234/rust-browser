@@ -5,6 +5,7 @@ mod adblock;
 mod extension;
 mod platform;
 mod store;
+mod system;
 
 use std::{
     path::{Path, PathBuf},
@@ -83,6 +84,8 @@ pub enum UserEvent {
     ExtensionReady(PathBuf),
     /// uBlock Origin Lite установлен в профиль; id нужен для включения и настроек.
     ExtensionInstalled(Option<String>),
+    /// Другой запуск браузера передал адреса (пусто — просьба открыть новое окно).
+    Remote(Vec<String>),
 }
 
 pub enum DownloadEvent {
@@ -175,6 +178,9 @@ struct App {
     web_context: WebContext,
     store: Store,
     inprivate: bool,
+    /// Основное окно: восстанавливает и сохраняет сеанс, принимает ссылки от Windows.
+    primary: bool,
+    is_default: bool,
     /// id установленного uBlock Origin Lite.
     ubol_id: Option<String>,
     tabs: Vec<Tab>,
@@ -212,9 +218,29 @@ struct App {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let inprivate = std::env::args().any(|arg| arg == "--inprivate");
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let inprivate = args.iter().any(|arg| arg == "--inprivate");
+    let new_window = args.iter().any(|arg| arg == "--new-window");
+    let urls: Vec<String> = args
+        .iter()
+        .filter(|arg| !arg.starts_with("--"))
+        .map(|arg| system::arg_to_address(arg))
+        .collect();
+
+    // Браузер уже открыт — отдаём ему адреса (ссылку из Telegram и т. п.) и выходим.
+    let pipe = system::pipe_name(&data_dir());
+    if !inprivate && !new_window && system::forward_to_running(&pipe, &urls) {
+        return Ok(());
+    }
+
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
+    let remote = proxy.clone();
+    let primary = !inprivate
+        && !new_window
+        && system::serve(&pipe, move |urls| {
+            let _ = remote.send_event(UserEvent::Remote(urls));
+        });
 
     let title = if inprivate { format!("InPrivate — {APP_NAME}") } else { APP_NAME.to_string() };
     let window = WindowBuilder::new()
@@ -251,6 +277,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         web_context,
         store,
         inprivate,
+        primary,
+        is_default: system::is_default(),
         ubol_id: None,
         tabs: Vec::new(),
         active: 0,
@@ -275,7 +303,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         quit: false,
     };
     app.apply_theme();
-    app.restore_session();
+    // Пустую новую вкладку открываем, только если не пришло ни сеанса, ни адресов.
+    app.restore_session(urls.is_empty());
     // Распаковка uBlock Origin Lite (31 МБ при первом запуске) — в фоне, чтобы не тормозить старт.
     let unpacked = app.proxy.clone();
     std::thread::spawn(move || match extension::ensure_unpacked(&data_dir()) {
@@ -285,9 +314,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(error) => eprintln!("не удалось распаковать uBlock Origin Lite: {error}"),
     });
     // Адреса из командной строки (например, ссылка, открытая этим браузером) — новыми вкладками.
-    for url in std::env::args().skip(1).filter(|arg| !arg.starts_with("--")) {
+    for url in urls {
         let url = to_url(&url, search_url(&app.store.settings.search));
         app.new_tab(Some(url));
+    }
+    if app.primary && system::is_registered() {
+        // exe могли перенести — обновляем путь в регистрации Windows
+        std::thread::spawn(system::register);
     }
 
     event_loop.run(move |event, _, control_flow| {
@@ -304,7 +337,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         app.dirty = true;
                     }
                 }
-                WindowEvent::Focused(true) => app.focus_content(),
+                WindowEvent::Focused(true) => {
+                    app.focus_content();
+                    // пользователь мог вернуться из Параметров Windows
+                    let is_default = system::is_default();
+                    if is_default != app.is_default {
+                        app.is_default = is_default;
+                        app.dirty = true;
+                    }
+                }
                 WindowEvent::ThemeChanged(_) => app.apply_theme(),
                 _ => {}
             },
@@ -567,14 +608,16 @@ impl App {
 
     // ---------- сеанс ----------
 
-    fn restore_session(&mut self) {
-        let session = if self.inprivate || !self.store.settings.restore_session {
+    fn restore_session(&mut self, open_start_tab: bool) {
+        let session = if !self.primary || !self.store.settings.restore_session {
             Session::default()
         } else {
             self.store.load_session()
         };
         if session.tabs.is_empty() {
-            self.new_tab(None);
+            if open_start_tab {
+                self.new_tab(None);
+            }
             return;
         }
         for saved in &session.tabs {
@@ -589,7 +632,7 @@ impl App {
 
     fn save_session(&mut self) {
         self.session_dirty = false;
-        if self.inprivate {
+        if !self.primary {
             return;
         }
         let saved: Vec<&Tab> = self.tabs.iter().filter(|t| !t.url.is_empty()).collect();
@@ -864,6 +907,18 @@ impl App {
                 }
             }
             UserEvent::Captured(bytes) => self.finish_overlay(bytes),
+            UserEvent::Remote(urls) => {
+                if urls.is_empty() {
+                    system::open_new_window(&[]); // повторный запуск ярлыком — новое окно
+                    return;
+                }
+                for url in urls {
+                    let url = to_url(&url, search_url(&self.store.settings.search));
+                    self.new_tab(Some(url));
+                }
+                self.window.set_minimized(false);
+                self.window.set_focus();
+            }
             UserEvent::ExtensionReady(path) => {
                 let reinstall = self.store.settings.ubol_version != extension::VERSION;
                 let proxy = self.proxy.clone();
@@ -913,6 +968,7 @@ impl App {
                 }
             }
             Hotkey::InPrivate => platform::open_inprivate(),
+            Hotkey::NewWindow => system::open_new_window(&[]),
             Hotkey::FocusUrl => self.focus_url(),
             Hotkey::NextTab => self.cycle_tab(1),
             Hotkey::PrevTab => self.cycle_tab(-1),
@@ -1268,6 +1324,20 @@ impl App {
             }
             "fullscreen" => self.handle_hotkey(Hotkey::Fullscreen),
             "inprivate" => platform::open_inprivate(),
+            "new_window" => system::open_new_window(&[]),
+            "detach" => {
+                // вкладка уезжает в новое окно: там она откроется заново
+                let Some(url) = self.tab(id).map(|t| t.url.clone()).filter(|u| !u.is_empty()) else {
+                    return;
+                };
+                system::open_new_window(&[url]);
+                self.close_tab(id);
+            }
+            "make_default" => {
+                if system::register() {
+                    system::open_default_apps_settings();
+                }
+            }
 
             // вкладки
             "new_tab" => self.new_tab(None),
@@ -1586,6 +1656,7 @@ impl App {
                 "hasImage": wallpaper_file().is_some(),
             },
             "ubolId": self.ubol_id,
+            "isDefault": self.is_default,
             "dark": self.dark(),
             "maximized": self.maximized,
             "fullscreen": self.is_fullscreen(),

@@ -104,6 +104,9 @@ pub struct Store {
     pub bookmarks: Vec<Bookmark>,
     /// От старых посещений к новым.
     pub history: Vec<Visit>,
+    /// Посещения, ещё не записанные на диск. При сохранении с диском сливаются
+    /// только они: так удалённое в другом окне не возвращается.
+    pending: Vec<Visit>,
     pub settings: Settings,
 }
 
@@ -113,6 +116,7 @@ impl Store {
         Self {
             bookmarks: read_json(&dir.join("bookmarks.json")),
             history: read_json(&dir.join("history.json")),
+            pending: Vec::new(),
             settings: read_json(&dir.join("settings.json")),
             dir: Some(dir),
         }
@@ -120,14 +124,31 @@ impl Store {
 
     #[cfg(test)]
     pub fn in_memory() -> Self {
-        Self { dir: None, bookmarks: Vec::new(), history: Vec::new(), settings: Settings::default() }
+        Self {
+            dir: None,
+            bookmarks: Vec::new(),
+            history: Vec::new(),
+            pending: Vec::new(),
+            settings: Settings::default(),
+        }
     }
 
     pub fn save_bookmarks(&self) {
         self.write("bookmarks.json", &self.bookmarks);
     }
 
-    pub fn save_history(&self) {
+    /// Сохраняет журнал, сливая его с тем, что на диске: в других окнах
+    /// браузера (отдельных процессах) тоже могли появиться посещения.
+    pub fn save_history(&mut self) {
+        if let Some(dir) = &self.dir {
+            let disk: Vec<Visit> = read_json(&dir.join("history.json"));
+            self.history = merge_history(disk, std::mem::take(&mut self.pending));
+        }
+        self.write("history.json", &self.history);
+    }
+
+    /// Перезаписывает журнал на диске ровно тем, что в памяти (после удаления записей).
+    fn overwrite_history(&self) {
         self.write("history.json", &self.history);
     }
 
@@ -135,7 +156,7 @@ impl Store {
         self.write("settings.json", &self.settings);
     }
 
-    pub fn save_all(&self) {
+    pub fn save_all(&mut self) {
         self.save_bookmarks();
         self.save_history();
         self.save_settings();
@@ -194,6 +215,15 @@ impl Store {
     }
 
     fn add_visit_at(&mut self, url: &str, title: &str, time: u64) {
+        match self.pending.last_mut() {
+            Some(last) if last.url == url => {
+                last.time = time;
+                if !title.is_empty() {
+                    last.title = title.to_string();
+                }
+            }
+            _ => self.pending.push(Visit { url: url.to_string(), title: title.to_string(), time }),
+        }
         // Обновление страницы не плодит записи.
         if let Some(last) = self.history.last_mut() {
             if last.url == url {
@@ -213,17 +243,28 @@ impl Store {
 
     /// Заголовок приходит позже адреса — дописываем его в последнее посещение.
     pub fn set_title(&mut self, url: &str, title: &str) {
+        if let Some(visit) = self.pending.iter_mut().rev().find(|v| v.url == url) {
+            visit.title = title.to_string();
+        }
         if let Some(visit) = self.history.iter_mut().rev().find(|v| v.url == url) {
             visit.title = title.to_string();
         }
     }
 
+    /// Удаление сразу пишется на диск: иначе слияние с диском вернуло бы запись.
     pub fn remove_visit(&mut self, url: &str, time: u64) {
+        if let Some(dir) = &self.dir {
+            self.history = read_json(&dir.join("history.json"));
+        }
         self.history.retain(|v| !(v.url == url && v.time == time));
+        self.pending.retain(|v| !(v.url == url && v.time == time));
+        self.overwrite_history();
     }
 
     pub fn clear_history(&mut self) {
         self.history.clear();
+        self.pending.clear();
+        self.overwrite_history();
     }
 
     /// Посещения от новых к старым, отфильтрованные по подстроке.
@@ -288,6 +329,41 @@ impl Store {
             })
             .collect()
     }
+}
+
+/// Объединяет два журнала: без повторов, по времени, обновление той же страницы
+/// в пределах 10 минут считается одним посещением.
+fn merge_history(disk: Vec<Visit>, memory: Vec<Visit>) -> Vec<Visit> {
+    let mut all: Vec<Visit> = disk;
+    for visit in memory {
+        match all.iter_mut().find(|v| v.url == visit.url && v.time == visit.time) {
+            Some(existing) => {
+                if !visit.title.is_empty() {
+                    existing.title = visit.title;
+                }
+            }
+            None => all.push(visit),
+        }
+    }
+    all.sort_by_key(|v| v.time);
+    let mut merged: Vec<Visit> = Vec::with_capacity(all.len());
+    for visit in all {
+        if let Some(last) = merged.last_mut() {
+            if last.url == visit.url && visit.time.saturating_sub(last.time) < 600 {
+                last.time = visit.time;
+                if !visit.title.is_empty() {
+                    last.title = visit.title;
+                }
+                continue;
+            }
+        }
+        merged.push(visit);
+    }
+    if merged.len() > MAX_HISTORY {
+        let extra = merged.len() - MAX_HISTORY;
+        merged.drain(..extra);
+    }
+    merged
 }
 
 fn read_json<T: DeserializeOwned + Default>(path: &PathBuf) -> T {
@@ -407,6 +483,37 @@ mod tests {
         let list = store.suggest("a.com", 5);
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].kind, "bookmark");
+    }
+
+    #[test]
+    fn two_windows_do_not_lose_each_others_history() {
+        let dir = std::env::temp_dir().join(format!("rust-browser-merge-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut first = Store::load(dir.clone());
+        let mut second = Store::load(dir.clone());
+        first.add_visit_at("https://a.com/", "A", 100);
+        second.add_visit_at("https://b.com/", "B", 200);
+        first.save_history();
+        second.save_history();
+        first.add_visit_at("https://c.com/", "C", 300);
+        first.save_history();
+        let urls: Vec<String> = Store::load(dir.clone()).history.into_iter().map(|v| v.url).collect();
+        assert_eq!(urls, ["https://a.com/", "https://b.com/", "https://c.com/"]);
+
+        // удалённое в одном окне не возвращается при сохранении из другого
+        first.remove_visit("https://b.com/", 200);
+        second.save_history();
+        let urls: Vec<String> = Store::load(dir.clone()).history.into_iter().map(|v| v.url).collect();
+        assert!(!urls.contains(&"https://b.com/".to_string()), "{urls:?}");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn merge_folds_reloads_of_the_same_page() {
+        let visit = |url: &str, time| Visit { url: url.into(), title: String::new(), time };
+        let merged = merge_history(vec![visit("a", 100)], vec![visit("a", 300), visit("b", 400)]);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].time, 300);
     }
 
     #[test]

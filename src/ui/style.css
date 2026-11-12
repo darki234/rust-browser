@@ -256,6 +256,7 @@ body.inprivate .tab:not(.active) { color: rgba(242, 239, 255, .75); }
 
 .tab.leave { flex-basis: 0; min-width: 0; padding: 0; opacity: 0; pointer-events: none; }
 .tab.dragging { z-index: 5; transition: none; box-shadow: var(--shadow); border-radius: 10px; }
+.tab.detaching { opacity: .55; transform-origin: center; outline: 2px dashed var(--accent); outline-offset: -3px; }
 .tab.dragging .foot { display: none; }
 .tab.shifting { transition: transform .2s var(--ease), color .18s; }
 @keyframes tab-in {

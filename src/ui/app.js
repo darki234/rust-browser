@@ -57,6 +57,7 @@ const ICONS = {
   speaker: '<path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16.5 8.5a5 5 0 0 1 0 7"/><path d="M19 6a8.5 8.5 0 0 1 0 12"/>',
   muted: '<path d="M4 9v6h4l5 4V5L8 9z"/><path d="m17 9 5 6"/><path d="m22 9-5 6"/>',
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+  window: '<rect x="3" y="5" width="18" height="15" rx="2"/><path d="M3 9h18"/>',
   image: '<rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-9 9"/>',
   smile: '<circle cx="12" cy="12" r="9.5"/><path d="M8 14.5a5 5 0 0 0 8 0"/><path d="M9 9.5h.01M15 9.5h.01" stroke-width="2.6"/>',
   mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/>',
@@ -334,7 +335,12 @@ function startTabDrag(event, id, node) {
   let target = from;
   node.setPointerCapture(event.pointerId);
 
+  let detach = false;
+  const strip = el.tabs.getBoundingClientRect();
   const move = (ev) => {
+    // протянули вниз далеко за полосу вкладок — вкладка уедет в новое окно
+    detach = dragging && ev.clientY > strip.bottom + 70 && !S.tabs.find((t) => t.id === id)?.start;
+    node.classList.toggle('detaching', detach);
     const dx = ev.clientX - startX;
     if (!dragging && Math.abs(dx) < 6) return;
     if (!dragging) {
@@ -373,8 +379,12 @@ function startTabDrag(event, id, node) {
     if (!dragging) return;
     // Сразу ставим вкладку на новое место, чтобы ничего не прыгало до ответа Rust.
     for (const n of nodes) {
-      n.classList.remove('shifting', 'dragging');
+      n.classList.remove('shifting', 'dragging', 'detaching');
       n.style.transform = '';
+    }
+    if (detach) {
+      send('detach', { id });
+      return;
     }
     if (target !== from) {
       const ref = target > from ? nodes[target].nextSibling : nodes[target];
@@ -911,6 +921,7 @@ function mainMenuNodes() {
   const page = tab && !tab.start;
   return [
     item({ icon: 'plus', label: 'Новая вкладка', kb: 'Ctrl+T', onClick: () => send('new_tab') }),
+    item({ icon: 'window', label: 'Новое окно', kb: 'Ctrl+N', onClick: () => send('new_window') }),
     item({ icon: 'mask', label: 'Новое окно InPrivate', kb: 'Ctrl+Shift+N', onClick: () => send('inprivate') }),
     sep(),
     zoomRow(),
@@ -1011,6 +1022,7 @@ function openTabMenu(id, x, y) {
     item({ icon: 'reload', label: 'Обновить', disabled: tab.start, onClick: () => send('reload_tab', { id }) }),
     item({ icon: 'copy', label: 'Дублировать', disabled: tab.start, onClick: () => send('duplicate', { id }) }),
     item({ icon: 'pin', label: tab.pinned ? 'Открепить вкладку' : 'Закрепить вкладку', onClick: () => send('pin', { id }) }),
+    item({ icon: 'window', label: 'Переместить в новое окно', disabled: tab.start, onClick: () => send('detach', { id }) }),
     item({ icon: tab.muted ? 'speaker' : 'muted', label: tab.muted ? 'Включить звук' : 'Выключить звук вкладки',
       disabled: tab.start, onClick: () => send('mute', { id }) }),
     sep(),
@@ -1318,6 +1330,22 @@ function ubolButton() {
   return button;
 }
 
+function defaultBrowserSetting() {
+  const button = h('button', {
+    class: 'text-btn primary',
+    onclick: () => {
+      send('make_default');
+      toast('В Параметрах Windows выберите Rust Browser для ссылок');
+    },
+  }, 'Сделать основным');
+  settingsUpdaters.push(() => { button.style.display = S.isDefault ? 'none' : ''; });
+  return setting('Браузер по умолчанию',
+    () => S.isDefault
+      ? 'Ссылки из других программ открываются в Rust Browser'
+      : 'Сейчас ссылки из Telegram и других программ открывает другой браузер',
+    button);
+}
+
 function settingsPage() {
   settingsUpdaters = [];
   const cards = [
@@ -1334,6 +1362,7 @@ function settingsPage() {
         segmented(S.engines.map((e) => [e.id, e.name]), () => S.search, (value) => set('search', value)))),
 
     h('div', { class: 'card' }, h('h2', {}, 'Запуск'),
+      defaultBrowserSetting(),
       setting('При запуске', BOOT.inprivate ? 'В окне InPrivate вкладки не сохраняются' : 'Что открывать при старте браузера',
         segmented([[true, 'Вкладки прошлого сеанса'], [false, 'Новую вкладку']],
           () => S.settings.restoreSession, (value) => set('restore_session', value)))),
@@ -1366,7 +1395,7 @@ function settingsPage() {
     h('div', { class: 'card' }, h('h2', {}, 'Сочетания клавиш'),
       h('div', { class: 'keys' }, ...[
         ['Новая вкладка / закрыть', 'Ctrl+T / Ctrl+W'], ['Вернуть закрытую вкладку', 'Ctrl+Shift+T'],
-        ['Окно InPrivate', 'Ctrl+Shift+N'], ['Следующая / предыдущая вкладка', 'Ctrl+Tab / Ctrl+Shift+Tab'],
+        ['Новое окно / окно InPrivate', 'Ctrl+N / Ctrl+Shift+N'], ['Следующая / предыдущая вкладка', 'Ctrl+Tab / Ctrl+Shift+Tab'],
         ['Адресная строка', 'Ctrl+L, Alt+D'], ['Найти на странице', 'Ctrl+F'],
         ['Масштаб', 'Ctrl + / Ctrl − / Ctrl+0'], ['Во весь экран', 'F11'],
         ['Избранное / журнал / загрузки', 'Ctrl+Shift+O / Ctrl+H / Ctrl+J'], ['Меню', 'Alt+F'],

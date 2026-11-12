@@ -70,6 +70,7 @@ pub enum Hotkey {
     CloseTab,
     ReopenTab,
     InPrivate,
+    NewWindow,
     FocusUrl,
     NextTab,
     PrevTab,
@@ -130,6 +131,7 @@ impl Hotkey {
             (false, false, true) if letter('D') => Self::FocusUrl,
             (false, false, true) if letter('F') => Self::Menu,
             (true, false, false) if letter('T') => Self::NewTab,
+            (true, false, false) if letter('N') => Self::NewWindow,
             (true, false, false) if letter('W') => Self::CloseTab,
             (true, false, false) if letter('L') => Self::FocusUrl,
             (true, false, false) if letter('R') => Self::Reload,
@@ -812,6 +814,7 @@ mod tests {
         assert_eq!(Hotkey::from_keys(key('T'), true, false, false), Some(Hotkey::NewTab));
         assert_eq!(Hotkey::from_keys(key('T'), true, true, false), Some(Hotkey::ReopenTab));
         assert_eq!(Hotkey::from_keys(key('N'), true, true, false), Some(Hotkey::InPrivate));
+        assert_eq!(Hotkey::from_keys(key('N'), true, false, false), Some(Hotkey::NewWindow));
         assert_eq!(Hotkey::from_keys(key('W'), true, false, false), Some(Hotkey::CloseTab));
         assert_eq!(Hotkey::from_keys(key('D'), true, false, false), Some(Hotkey::Bookmark));
         assert_eq!(Hotkey::from_keys(key('D'), false, false, true), Some(Hotkey::FocusUrl));
