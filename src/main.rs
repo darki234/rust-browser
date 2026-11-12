@@ -4,6 +4,7 @@
 mod adblock;
 mod extension;
 mod platform;
+mod pages;
 mod store;
 mod system;
 
@@ -86,6 +87,8 @@ pub enum UserEvent {
     ExtensionInstalled(Option<String>),
     /// Другой запуск браузера передал адреса (пусто — просьба открыть новое окно).
     Remote(Vec<String>),
+    /// Страница не загрузилась: (вкладка, вид ошибки для своей страницы ошибки).
+    LoadFailed(u32, &'static str),
 }
 
 pub enum DownloadEvent {
@@ -115,6 +118,8 @@ struct Tab {
     sleeping: bool,
     /// Когда вкладка ушла в фон — для усыпления.
     hidden_since: Option<Instant>,
+    /// Показана своя страница ошибки: в журнал такое не пишем.
+    failed: bool,
 }
 
 impl Tab {
@@ -136,6 +141,7 @@ impl Tab {
             muted: false,
             sleeping: false,
             hidden_since: None,
+            failed: false,
         }
     }
 
@@ -181,6 +187,11 @@ struct App {
     /// Основное окно: восстанавливает и сохраняет сеанс, принимает ссылки от Windows.
     primary: bool,
     is_default: bool,
+    /// Браузеры, из которых можно перенести избранное.
+    import_sources: Vec<(&'static str, &'static str)>,
+    /// Ссылка на загрузку файла тоже «не загружается как страница» — в этот момент
+    /// страницу ошибки показывать не нужно.
+    last_download: Option<Instant>,
     /// id установленного uBlock Origin Lite.
     ubol_id: Option<String>,
     tabs: Vec<Tab>,
@@ -279,6 +290,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         inprivate,
         primary,
         is_default: system::is_default(),
+        import_sources: pages::import_sources(),
+        last_download: None,
         ubol_id: None,
         tabs: Vec::new(),
         active: 0,
@@ -483,6 +496,7 @@ fn build_tab(app: &mut App, id: u32, bounds: Rect) -> wry::Result<WebView> {
     platform::hook_history(&webview, id, proxy.clone());
     platform::hook_page_state(&webview, id, proxy.clone());
     platform::hook_find(&webview, id, proxy.clone());
+    platform::hook_load_errors(&webview, id, proxy.clone());
     platform::hook_downloads(&webview, app.download_dir.clone(), proxy);
     platform::set_passwords(&webview, app.store.settings.passwords);
     Ok(webview)
@@ -824,11 +838,12 @@ impl App {
         match event {
             UserEvent::Ui(raw) => self.handle_ui(&raw),
             UserEvent::UrlChanged(id, url) => {
-                if url == "about:blank" {
-                    return; // пустая страница до первой загрузки
+                if url == "about:blank" || url.starts_with("data:") {
+                    return; // пустая страница до первой загрузки или своя страница ошибки
                 }
                 if let Some(tab) = self.tab_mut(id) {
                     tab.url = url;
+                    tab.failed = false;
                     tab.blocked = 0;
                     self.dirty = true;
                     self.session_dirty = true;
@@ -858,7 +873,7 @@ impl App {
                 if !loading {
                     self.sync_location(id);
                     let Some(tab) = self.tab(id) else { return };
-                    if tab.url.starts_with("http") && !self.inprivate {
+                    if tab.url.starts_with("http") && !self.inprivate && !tab.failed {
                         let (url, title) = (tab.url.clone(), tab.title.clone());
                         self.store.add_visit(&url, &title);
                         self.history_dirty = true;
@@ -907,6 +922,17 @@ impl App {
                 }
             }
             UserEvent::Captured(bytes) => self.finish_overlay(bytes),
+            UserEvent::LoadFailed(id, kind) => {
+                if self.last_download.is_some_and(|t| t.elapsed() < Duration::from_secs(3)) {
+                    return;
+                }
+                let dark = self.dark();
+                let Some(tab) = self.tab_mut(id) else { return };
+                let Some(webview) = &tab.webview else { return };
+                tab.failed = true;
+                let _ = webview.load_html(&pages::error_page(&tab.url, kind, dark));
+                self.dirty = true;
+            }
             UserEvent::Remote(urls) => {
                 if urls.is_empty() {
                     system::open_new_window(&[]); // повторный запуск ярлыком — новое окно
@@ -1119,6 +1145,7 @@ impl App {
     fn handle_download(&mut self, event: DownloadEvent) {
         match event {
             DownloadEvent::Started { id, url, path } => {
+                self.last_download = Some(Instant::now());
                 let name = Path::new(&path)
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
@@ -1332,6 +1359,14 @@ impl App {
                 };
                 system::open_new_window(&[url]);
                 self.close_tab(id);
+            }
+            "import_bookmarks" => {
+                let list = pages::read_bookmarks(&text("source"));
+                self.store.reload_bookmarks();
+                let added = self.store.add_bookmarks(list);
+                self.store.save_bookmarks();
+                self.dirty = true;
+                let _ = self.ui.evaluate_script(&format!("ui.imported({added})"));
             }
             "make_default" => {
                 if system::register() {
@@ -1657,6 +1692,7 @@ impl App {
             },
             "ubolId": self.ubol_id,
             "isDefault": self.is_default,
+            "importSources": self.import_sources,
             "dark": self.dark(),
             "maximized": self.maximized,
             "fullscreen": self.is_fullscreen(),

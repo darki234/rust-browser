@@ -1330,6 +1330,17 @@ function ubolButton() {
   return button;
 }
 
+function importCard() {
+  const sources = S.importSources || [];
+  if (!sources.length) return null;
+  return h('div', { class: 'card' }, h('h2', {}, 'Избранное'),
+    setting('Перенести избранное', 'Папки становятся общим списком, повторы пропускаются. Пароли не переносятся — браузеры хранят их зашифрованными',
+      ...sources.map(([id, name]) => h('button', {
+        class: 'text-btn outline',
+        onclick: () => send('import_bookmarks', { source: id }),
+      }, `Из ${name}`))));
+}
+
 function defaultBrowserSetting() {
   const button = h('button', {
     class: 'text-btn primary',
@@ -1356,6 +1367,8 @@ function settingsPage() {
       setting('Панель избранного', 'Сайты из избранного под адресной строкой · Ctrl+Shift+B',
         toggle(() => S.settings.favbar, (value) => set('favbar', value))),
       wallpaperSetting()),
+
+    importCard(),
 
     h('div', { class: 'card' }, h('h2', {}, 'Поиск'),
       setting('Поисковая система', 'Для адресной строки и строки поиска на новой вкладке',
@@ -1403,7 +1416,7 @@ function settingsPage() {
   ];
   // значения выставляем после вставки в документ, когда известны размеры кнопок
   requestAnimationFrame(() => settingsUpdaters.forEach((update) => update()));
-  return cards.map((card, i) => { card.style.setProperty('--i', i); return card; });
+  return cards.filter(Boolean).map((card, i) => { card.style.setProperty('--i', i); return card; });
 }
 
 function renderHubList(animate) {
@@ -1522,6 +1535,7 @@ window.ui = {
   downloadStarted: () => replay(el.downloads, 'bounce'),
   dataCleared: () => toast('Данные сайтов удалены'),
   pasteText,
+  imported: (count) => toast(count ? `Перенесено в избранное: ${count}` : 'Новых сайтов для избранного не нашлось'),
 };
 
 send('ready');

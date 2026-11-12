@@ -206,6 +206,18 @@ impl Store {
         }
     }
 
+    /// Добавляет закладки, которых ещё нет. Возвращает, сколько добавлено.
+    pub fn add_bookmarks(&mut self, list: Vec<Bookmark>) -> usize {
+        let mut added = 0;
+        for bookmark in list {
+            if !self.is_bookmarked(&bookmark.url) {
+                self.bookmarks.push(bookmark);
+                added += 1;
+            }
+        }
+        added
+    }
+
     pub fn remove_bookmark(&mut self, url: &str) {
         self.bookmarks.retain(|b| b.url != url);
     }
@@ -408,6 +420,19 @@ mod tests {
         assert!(store.is_bookmarked("https://a.com/"));
         assert!(!store.toggle_bookmark("https://a.com/", "A"));
         assert!(store.bookmarks.is_empty());
+    }
+
+    #[test]
+    fn import_skips_existing_bookmarks() {
+        let mut store = Store::in_memory();
+        store.toggle_bookmark("https://a.com/", "A");
+        let list = vec![
+            Bookmark { title: "A".into(), url: "https://a.com/".into() },
+            Bookmark { title: "B".into(), url: "https://b.com/".into() },
+            Bookmark { title: "B2".into(), url: "https://b.com/".into() },
+        ];
+        assert_eq!(store.add_bookmarks(list), 1);
+        assert_eq!(store.bookmarks.len(), 2);
     }
 
     #[test]

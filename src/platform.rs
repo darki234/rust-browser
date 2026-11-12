@@ -24,6 +24,7 @@ use webview2_com::{
     FindActiveMatchIndexChangedEventHandler, FindMatchCountChangedEventHandler,
     FindStartCompletedHandler, HistoryChangedEventHandler,
     IsDocumentPlayingAudioChangedEventHandler, Microsoft::Web::WebView2::Win32::*,
+    NavigationCompletedEventHandler,
     ProfileAddBrowserExtensionCompletedHandler, ProfileGetBrowserExtensionsCompletedHandler,
     StateChangedEventHandler, TrySuspendCompletedHandler, WebResourceRequestedEventHandler,
     ZoomFactorChangedEventHandler,
@@ -327,6 +328,52 @@ pub fn hook_page_state(webview: &WebView, tab: u32, proxy: Proxy) {
             Ok(())
         }));
         let _ = webview.controller().add_ZoomFactorChanged(&handler, &mut 0i64);
+    }
+}
+
+/// Вид ошибки загрузки для своей страницы ошибки; None — показывать её не нужно
+/// (человек сам остановил загрузку, сайт просит пароль и т. п.).
+pub fn error_kind(status: COREWEBVIEW2_WEB_ERROR_STATUS) -> Option<&'static str> {
+    Some(match status {
+        COREWEBVIEW2_WEB_ERROR_STATUS_HOST_NAME_NOT_RESOLVED => "dns",
+        COREWEBVIEW2_WEB_ERROR_STATUS_TIMEOUT => "timeout",
+        COREWEBVIEW2_WEB_ERROR_STATUS_DISCONNECTED => "offline",
+        COREWEBVIEW2_WEB_ERROR_STATUS_CANNOT_CONNECT
+        | COREWEBVIEW2_WEB_ERROR_STATUS_CONNECTION_ABORTED
+        | COREWEBVIEW2_WEB_ERROR_STATUS_CONNECTION_RESET
+        | COREWEBVIEW2_WEB_ERROR_STATUS_SERVER_UNREACHABLE
+        | COREWEBVIEW2_WEB_ERROR_STATUS_ERROR_HTTP_INVALID_SERVER_RESPONSE
+        | COREWEBVIEW2_WEB_ERROR_STATUS_REDIRECT_FAILED => "connection",
+        COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_COMMON_NAME_IS_INCORRECT
+        | COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_EXPIRED
+        | COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_IS_INVALID
+        | COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_REVOKED
+        | COREWEBVIEW2_WEB_ERROR_STATUS_CLIENT_CERTIFICATE_CONTAINS_ERRORS => "certificate",
+        COREWEBVIEW2_WEB_ERROR_STATUS_UNEXPECTED_ERROR => "other",
+        _ => return None,
+    })
+}
+
+/// Сообщает о загрузках страницы, которые закончились ошибкой.
+pub fn hook_load_errors(webview: &WebView, tab: u32, proxy: Proxy) {
+    let handler = NavigationCompletedEventHandler::create(Box::new(move |_, args| {
+        let Some(args) = args else { return Ok(()) };
+        unsafe {
+            let mut success = BOOL::default();
+            args.IsSuccess(&mut success)?;
+            if success.as_bool() {
+                return Ok(());
+            }
+            let mut status = COREWEBVIEW2_WEB_ERROR_STATUS::default();
+            args.WebErrorStatus(&mut status)?;
+            if let Some(kind) = error_kind(status) {
+                let _ = proxy.send_event(UserEvent::LoadFailed(tab, kind));
+            }
+        }
+        Ok(())
+    }));
+    unsafe {
+        let _ = webview.webview().add_NavigationCompleted(&handler, &mut 0i64);
     }
 }
 
@@ -847,6 +894,13 @@ mod tests {
         assert_eq!(Hotkey::from_keys(key('C'), true, false, false), None);
         assert_eq!(Hotkey::from_keys(key('V'), true, false, false), None);
         assert_eq!(Hotkey::from_keys(key('T'), true, false, true), None); // AltGr
+    }
+
+    #[test]
+    fn stopping_a_page_is_not_an_error() {
+        assert_eq!(error_kind(COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED), None);
+        assert_eq!(error_kind(COREWEBVIEW2_WEB_ERROR_STATUS_HOST_NAME_NOT_RESOLVED), Some("dns"));
+        assert_eq!(error_kind(COREWEBVIEW2_WEB_ERROR_STATUS_CONNECTION_RESET), Some("connection"));
     }
 
     #[test]
