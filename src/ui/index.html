@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Rust Browser</title>
+<style>/*__CSS__*/</style>
+</head>
+<body>
+
+<header id="chrome">
+  <!-- Верхний край окна: тянуть за него, чтобы изменить высоту -->
+  <div class="rz rz-n" data-dir="n"></div>
+  <div class="rz rz-nw" data-dir="nw"></div>
+  <div class="rz rz-ne" data-dir="ne"></div>
+
+  <div id="titlebar">
+    <div id="privatebadge"><span data-icon="mask"></span>InPrivate</div>
+    <!-- Кнопка «+» внутри полосы вкладок, чтобы стоять сразу за последней вкладкой -->
+    <div id="tabs"><button id="newtab" class="icon-btn" data-icon="plus" title="Новая вкладка (Ctrl+T)"></button></div>
+    <div class="drag"></div>
+    <div id="winctl">
+      <button id="win-min" title="Свернуть" data-icon="win-min"></button>
+      <button id="win-max" title="Развернуть">
+        <span class="max" data-icon="win-max"></span><span class="restore" data-icon="win-restore"></span>
+      </button>
+      <button id="win-close" title="Закрыть" data-icon="win-close"></button>
+    </div>
+  </div>
+
+  <div id="toolbar">
+    <button id="back" class="icon-btn" data-icon="back" title="Назад (Alt+←)"></button>
+    <button id="forward" class="icon-btn" data-icon="forward" title="Вперёд (Alt+→)"></button>
+    <button id="reload" class="icon-btn" title="Обновить (F5)">
+      <span class="swap" data-icon="reload"></span>
+      <span class="swap" data-icon="x"></span>
+    </button>
+
+    <div id="urlbox">
+      <span id="siteicon"></span>
+      <input id="url" type="text" spellcheck="false" autocomplete="off"
+             placeholder="Адрес или поисковый запрос">
+      <button id="zoombadge" title="Сбросить масштаб (Ctrl+0)"></button>
+      <button id="star" class="icon-btn small" data-icon="star"
+              title="Добавить в избранное (Ctrl+D)"></button>
+    </div>
+
+    <button id="shield" class="icon-btn" data-icon="shield">
+      <span class="badge" id="shieldbadge"></span>
+    </button>
+    <button id="downloads" class="icon-btn" data-icon="download" title="Загрузки (Ctrl+J)">
+      <svg class="ring" viewBox="0 0 36 36"><circle cx="18" cy="18" r="16"></circle></svg>
+    </button>
+    <button id="hubbtn" class="icon-btn" data-icon="library" title="Избранное (Ctrl+Shift+O)"></button>
+    <button id="menubtn" class="icon-btn" data-icon="dots" title="Параметры и другое (Alt+F)"></button>
+  </div>
+
+  <div id="favbar"></div>
+
+  <div id="findbar">
+    <label class="findfield">
+      <span data-icon="search"></span>
+      <input id="findq" type="text" spellcheck="false" autocomplete="off" placeholder="Найти на странице">
+      <span id="findcount"></span>
+    </label>
+    <button id="findprev" class="icon-btn" data-icon="up" title="Предыдущее (Shift+Enter)"></button>
+    <button id="findnext" class="icon-btn" data-icon="down" title="Следующее (Enter)"></button>
+    <button id="findclose" class="icon-btn" data-icon="x" title="Закрыть (Esc)"></button>
+  </div>
+
+  <div id="progress"><i></i></div>
+</header>
+
+<section id="sheet"><div id="suggestions"></div></section>
+
+<main id="start">
+  <div class="aurora"><i></i><i></i><i></i></div>
+  <div class="start-inner">
+    <div id="clock">00:00</div>
+    <div id="date"></div>
+    <div class="searchbox" id="searchbox">
+      <span data-icon="search"></span>
+      <input id="startq" type="text" spellcheck="false" autocomplete="off"
+             placeholder="Искать в интернете или ввести адрес">
+      <button id="engine" title="Выбрать поисковую систему">
+        <span id="enginename"></span>
+      </button>
+      <div id="enginemenu"></div>
+    </div>
+    <div id="privatenote">
+      <span data-icon="mask"></span>
+      <div><b>Вы в режиме InPrivate.</b> История, файлы cookie и данные форм этого окна
+        удалятся, когда вы его закроете. Загруженные файлы и избранное сохранятся.</div>
+    </div>
+    <div id="tiles"></div>
+    <div id="stat"></div>
+  </div>
+</main>
+
+<!-- Слой поверх страницы: снимок страницы, библиотека и меню -->
+<section id="layer">
+  <img id="backdrop" alt="">
+  <div id="scrim"></div>
+  <div id="hub">
+    <nav id="hubnav">
+      <div class="hub-items">
+        <i id="hubind"></i>
+        <button data-sec="bookmarks" data-icon="star">Избранное</button>
+        <button data-sec="history" data-icon="clock">Журнал</button>
+        <button data-sec="downloads" data-icon="download">Загрузки</button>
+        <button data-sec="settings" data-icon="gear">Параметры</button>
+      </div>
+      <div class="hub-foot" id="hubfoot"></div>
+    </nav>
+    <div id="hubmain">
+      <div id="hubhead">
+        <h1 id="hubh1"></h1>
+        <label class="hubsearch">
+          <span data-icon="search"></span>
+          <input id="hubq" type="text" spellcheck="false" placeholder="Поиск">
+        </label>
+        <button id="hubaction" class="text-btn"></button>
+        <button id="hubclose" class="icon-btn" data-icon="x" title="Закрыть (Esc)"></button>
+      </div>
+      <div id="hublist"></div>
+    </div>
+  </div>
+</section>
+
+<div id="menucatcher"></div>
+<div id="menu" class="menu"></div>
+<div id="toast"></div>
+
+<script>/*__JS__*/</script>
+</body>
+</html>

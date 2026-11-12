@@ -1,0 +1,1662 @@
+// В release-сборке не открываем консольное окно.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod adblock;
+mod platform;
+mod store;
+
+use std::{
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    time::{Duration, Instant},
+};
+
+use serde::Serialize;
+use serde_json::{json, Value};
+use tao::{
+    event::{Event, WindowEvent},
+    event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
+    platform::windows::{IconExtWindows, WindowBuilderExtWindows, WindowExtWindows},
+    window::{Fullscreen, Icon, ResizeDirection, Theme as WindowTheme, Window, WindowBuilder},
+};
+use wry::{
+    dpi::{LogicalPosition, LogicalSize},
+    http::Request,
+    NewWindowResponse, PageLoadEvent, Rect, Theme, WebContext, WebView, WebViewBuilder,
+    WebViewBuilderExtWindows, WebViewExtWindows,
+};
+
+use platform::{Hotkey, KeyState};
+use store::{Session, SessionTab, Store};
+
+const APP_NAME: &str = "Rust Browser";
+/// Высота панели до того, как интерфейс сообщит настоящую.
+const DEFAULT_CHROME: f64 = 86.0;
+/// Минимальный промежуток между обновлениями интерфейса. На страницах с рекламой
+/// блокировщик срабатывает сотни раз в секунду — перерисовывать панель на каждый раз незачем.
+const PUSH_INTERVAL: Duration = Duration::from_millis(40);
+/// Как часто проверять, не пора ли усыпить фоновые вкладки.
+const SLEEP_CHECK: Duration = Duration::from_secs(30);
+
+/// Поисковые системы: идентификатор, название, адрес запроса. Первая — по умолчанию.
+const ENGINES: [(&str, &str, &str); 4] = [
+    ("google", "Google", "https://www.google.com/search?q="),
+    ("bing", "Bing", "https://www.bing.com/search?q="),
+    ("yandex", "Яндекс", "https://yandex.ru/search/?text="),
+    ("duckduckgo", "DuckDuckGo", "https://duckduckgo.com/?q="),
+];
+
+/// Ступени масштаба, как в Edge.
+const ZOOM_LEVELS: [f64; 15] =
+    [0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
+
+/// Адрес запроса выбранной системы; неизвестный идентификатор даёт систему по умолчанию.
+fn search_url(engine: &str) -> &'static str {
+    ENGINES.iter().find(|(id, ..)| *id == engine).unwrap_or(&ENGINES[0]).2
+}
+
+/// Всё, что приходит в главный цикл от интерфейса и страниц.
+pub enum UserEvent {
+    /// JSON-команда от интерфейса.
+    Ui(String),
+    UrlChanged(u32, String),
+    TitleChanged(u32, String),
+    Loading(u32, bool),
+    HistoryChanged(u32),
+    NewTabRequested(String),
+    Blocked(u32),
+    Hotkey(Hotkey),
+    Download(DownloadEvent),
+    Favicon(u32, String),
+    Audio(u32, bool),
+    Zoom(u32, f64),
+    PageFullscreen(u32, bool),
+    /// (вкладка, номер текущего совпадения с единицы или -1, всего совпадений)
+    Find(u32, i32, i32),
+    /// Снимок страницы для фона меню и библиотеки.
+    Captured(Option<Vec<u8>>),
+}
+
+pub enum DownloadEvent {
+    Started { id: u64, url: String, path: String },
+    Progress { id: u64, received: i64, total: i64 },
+    Finished { id: u64, ok: bool, received: i64 },
+}
+
+struct Tab {
+    id: u32,
+    /// None и пустой url — стартовая страница. None и непустой url — вкладка
+    /// из прошлого сеанса или открытая в фоне: загрузится, когда её откроют.
+    webview: Option<WebView>,
+    url: String,
+    title: String,
+    favicon: String,
+    loading: bool,
+    blocked: u32,
+    can_back: bool,
+    can_forward: bool,
+    pinned: bool,
+    /// Из какой вкладки открыта в фоне — чтобы ставить такие вкладки подряд.
+    opener: Option<u32>,
+    zoom: f64,
+    audio: bool,
+    muted: bool,
+    sleeping: bool,
+    /// Когда вкладка ушла в фон — для усыпления.
+    hidden_since: Option<Instant>,
+}
+
+impl Tab {
+    fn new(id: u32, url: &str, title: &str, pinned: bool) -> Self {
+        Self {
+            id,
+            webview: None,
+            url: url.to_string(),
+            title: title.to_string(),
+            favicon: String::new(),
+            loading: false,
+            blocked: 0,
+            can_back: false,
+            can_forward: false,
+            pinned,
+            opener: None,
+            zoom: 1.0,
+            audio: false,
+            muted: false,
+            sleeping: false,
+            hidden_since: None,
+        }
+    }
+
+    fn is_start(&self) -> bool {
+        self.webview.is_none() && self.url.is_empty()
+    }
+
+    fn snapshot(&self) -> SessionTab {
+        SessionTab { url: self.url.clone(), title: self.title.clone(), pinned: self.pinned }
+    }
+}
+
+#[derive(Serialize)]
+struct Download {
+    id: u64,
+    url: String,
+    name: String,
+    path: String,
+    received: i64,
+    total: i64,
+    /// "progress" | "done" | "failed"
+    state: &'static str,
+}
+
+/// Сколько места под панелью интерфейс занимает поверх страницы.
+#[derive(Clone, Copy, PartialEq)]
+enum Overlay {
+    None,
+    /// Выпадающий список подсказок такой высоты.
+    Sheet(f64),
+    /// Меню или библиотека на всё окно, поверх снимка страницы.
+    Full,
+}
+
+struct App {
+    window: Window,
+    ui: WebView,
+    proxy: EventLoopProxy<UserEvent>,
+    /// Общий профиль WebView2 (куки, кэш, пароли) для всех вкладок.
+    web_context: WebContext,
+    store: Store,
+    inprivate: bool,
+    tabs: Vec<Tab>,
+    active: u32,
+    next_id: u32,
+    /// Закрытые вкладки для Ctrl+Shift+T.
+    closed: Vec<SessionTab>,
+    downloads: Vec<Download>,
+    adblock: Arc<AtomicBool>,
+    download_dir: Arc<Mutex<String>>,
+    keys: Arc<KeyState>,
+    overlay: Overlay,
+    /// Ждём снимок страницы, чтобы показать меню поверх него.
+    overlay_pending: bool,
+    /// Когда запросили снимок: если он не пришёл быстро, меню открывается без него.
+    overlay_requested: Instant,
+    chrome_height: f64,
+    /// Полноэкранный режим по F11.
+    fullscreen: bool,
+    /// Полноэкранный режим, который запросила страница (видео).
+    page_fullscreen: bool,
+    maximized: bool,
+    /// Состояние изменилось, интерфейс надо обновить.
+    dirty: bool,
+    /// Когда интерфейс обновляли последний раз: чаще 25 раз в секунду не нужно.
+    last_push: Instant,
+    /// Последние отправленные редко меняющиеся части состояния (закладки, загрузки…):
+    /// без изменений их не пересылаем и интерфейс их не перерисовывает.
+    sent: std::collections::HashMap<&'static str, String>,
+    history_dirty: bool,
+    session_dirty: bool,
+    last_save: Instant,
+    last_sleep_check: Instant,
+    quit: bool,
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let inprivate = std::env::args().any(|arg| arg == "--inprivate");
+    let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+    let proxy = event_loop.create_proxy();
+
+    let title = if inprivate { format!("InPrivate — {APP_NAME}") } else { APP_NAME.to_string() };
+    let window = WindowBuilder::new()
+        .with_title(title)
+        // Значок из ресурсов exe (номер 1, см. build.rs) — для заголовка и панели задач.
+        .with_window_icon(Icon::from_resource(1, None).ok())
+        .with_inner_size(tao::dpi::LogicalSize::new(1280.0, 820.0))
+        .with_min_inner_size(tao::dpi::LogicalSize::new(560.0, 380.0))
+        // Своя полоса заголовка: вкладки прямо в рамке окна, как в Edge.
+        .with_decorations(false)
+        .with_undecorated_shadow(true)
+        .build(&event_loop)?;
+
+    let store = Store::load(data_dir());
+    let dark = match store.settings.theme.as_str() {
+        "dark" => true,
+        "light" => false,
+        _ => window.theme() == WindowTheme::Dark,
+    };
+    let keys = Arc::new(KeyState::default());
+
+    // Профиль лежит в папке данных, а не рядом с exe: программу можно
+    // переносить и запускать откуда угодно. У InPrivate профиль отдельный.
+    let profile = if inprivate { "WebView2-InPrivate" } else { "WebView2" };
+    let mut web_context = WebContext::new(Some(data_dir().join(profile)));
+    let ui = build_ui(&window, proxy.clone(), &mut web_context, keys.clone(), inprivate, dark)?;
+
+    let mut app = App {
+        adblock: Arc::new(AtomicBool::new(store.settings.adblock)),
+        download_dir: Arc::new(Mutex::new(store.settings.download_dir.clone())),
+        window,
+        ui,
+        proxy,
+        web_context,
+        store,
+        inprivate,
+        tabs: Vec::new(),
+        active: 0,
+        next_id: 1,
+        closed: Vec::new(),
+        downloads: Vec::new(),
+        keys,
+        overlay: Overlay::None,
+        overlay_pending: false,
+        overlay_requested: Instant::now(),
+        chrome_height: DEFAULT_CHROME,
+        fullscreen: false,
+        page_fullscreen: false,
+        maximized: false,
+        dirty: true,
+        last_push: Instant::now(),
+        sent: Default::default(),
+        history_dirty: false,
+        session_dirty: false,
+        last_save: Instant::now(),
+        last_sleep_check: Instant::now(),
+        quit: false,
+    };
+    app.apply_theme();
+    app.restore_session();
+    // Адреса из командной строки (например, ссылка, открытая этим браузером) — новыми вкладками.
+    for url in std::env::args().skip(1).filter(|arg| !arg.starts_with("--")) {
+        let url = to_url(&url, search_url(&app.store.settings.search));
+        app.new_tab(Some(url));
+    }
+
+    event_loop.run(move |event, _, control_flow| {
+        *control_flow = ControlFlow::WaitUntil(Instant::now() + SLEEP_CHECK);
+
+        match event {
+            Event::WindowEvent { event, .. } => match event {
+                WindowEvent::CloseRequested => app.quit = true,
+                WindowEvent::Resized(_) => {
+                    app.layout();
+                    let maximized = app.window.is_maximized();
+                    if maximized != app.maximized {
+                        app.maximized = maximized;
+                        app.dirty = true;
+                    }
+                }
+                WindowEvent::Focused(true) => app.focus_content(),
+                WindowEvent::ThemeChanged(_) => app.apply_theme(),
+                _ => {}
+            },
+            Event::UserEvent(event) => app.handle(event),
+            Event::MainEventsCleared => app.flush(),
+            _ => {}
+        }
+        if app.dirty {
+            // отложенное обновление интерфейса — проснуться, когда оно разрешено
+            *control_flow = ControlFlow::WaitUntil(app.last_push + PUSH_INTERVAL);
+        }
+        if app.overlay_pending {
+            // проснуться вовремя, чтобы открыть меню и без снимка
+            *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(100));
+        }
+
+        if app.quit {
+            app.save_session();
+            app.store.save_all();
+            *control_flow = ControlFlow::Exit;
+        }
+    });
+}
+
+/// Папка с закладками, историей, настройками и профилем.
+/// Переменная RUST_BROWSER_DATA задаёт другую папку — для тестов и переносной версии.
+fn data_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("RUST_BROWSER_DATA") {
+        return PathBuf::from(dir);
+    }
+    std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("RustBrowser")
+}
+
+fn default_download_dir() -> String {
+    std::env::var_os("USERPROFILE")
+        .map(|home| PathBuf::from(home).join("Downloads").to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+fn rect(x: f64, y: f64, width: f64, height: f64) -> Rect {
+    Rect {
+        position: LogicalPosition::new(x, y).into(),
+        size: LogicalSize::new(width.max(0.0), height.max(0.0)).into(),
+    }
+}
+
+fn window_size(window: &Window) -> (f64, f64) {
+    let scale = window.scale_factor();
+    let size = window.inner_size();
+    (size.width as f64 / scale, size.height as f64 / scale)
+}
+
+/// Интерфейс: вкладки, панели, стартовая страница, меню и библиотека в одном webview.
+fn build_ui(
+    window: &Window,
+    proxy: EventLoopProxy<UserEvent>,
+    web_context: &mut WebContext,
+    keys: Arc<KeyState>,
+    inprivate: bool,
+    dark: bool,
+) -> wry::Result<WebView> {
+    let html = include_str!("ui/index.html")
+        .replace("/*__CSS__*/", include_str!("ui/style.css"))
+        .replace("/*__JS__*/", include_str!("ui/app.js"));
+    let engine = wry::webview_version().unwrap_or_default();
+    let boot = json!({
+        "inprivate": inprivate,
+        "version": env!("CARGO_PKG_VERSION"),
+        "engine": engine,
+    });
+    let (width, height) = window_size(window);
+
+    let ipc = proxy.clone();
+    let ui = WebViewBuilder::new_with_web_context(web_context)
+        .with_bounds(rect(0.0, 0.0, width, height))
+        .with_initialization_script(format!("window.__BOOT__ = {boot};"))
+        .with_html(html)
+        // Цвет до первой отрисовки, чтобы окно не вспыхивало белым в тёмной теме.
+        .with_background_color(if dark { (18, 19, 24, 255) } else { (243, 244, 249, 255) })
+        .with_incognito(inprivate)
+        .with_browser_accelerator_keys(false)
+        .with_default_context_menus(false)
+        .with_hotkeys_zoom(false)
+        // Интерфейс не должен уходить на сайты, например от перетаскивания ссылки.
+        .with_navigation_handler(|url| !url.starts_with("http"))
+        .with_ipc_handler(move |request: Request<String>| {
+            let _ = ipc.send_event(UserEvent::Ui(request.into_body()));
+        })
+        .build_as_child(window)?;
+    platform::hook_hotkeys(&ui, keys, proxy);
+    Ok(ui)
+}
+
+/// Webview страницы. Адрес загружается позже, когда все перехватчики уже стоят.
+fn build_tab(app: &mut App, id: u32, bounds: Rect) -> wry::Result<WebView> {
+    let proxy = app.proxy.clone();
+    let (nav, title, load, popup) = (proxy.clone(), proxy.clone(), proxy.clone(), proxy.clone());
+    let theme = app.page_theme();
+    // Пока страница не отрисовалась, под ней цвет темы, а не белая вспышка.
+    let background = if app.dark() { (18, 19, 24, 255) } else { (255, 255, 255, 255) };
+    let webview = WebViewBuilder::new_with_web_context(&mut app.web_context)
+        .with_bounds(bounds)
+        .with_background_color(background)
+        .with_incognito(app.inprivate)
+        .with_devtools(true)
+        .with_theme(theme)
+        .with_navigation_handler(move |url| {
+            let _ = nav.send_event(UserEvent::UrlChanged(id, url));
+            true
+        })
+        .with_document_title_changed_handler(move |text| {
+            let _ = title.send_event(UserEvent::TitleChanged(id, text));
+        })
+        .with_on_page_load_handler(move |event, _| {
+            let started = matches!(event, PageLoadEvent::Started);
+            let _ = load.send_event(UserEvent::Loading(id, started));
+        })
+        // Ссылки «в новом окне» открываем новой вкладкой.
+        .with_new_window_req_handler(move |url, _| {
+            let _ = popup.send_event(UserEvent::NewTabRequested(url));
+            NewWindowResponse::Deny
+        })
+        .build_as_child(&app.window)?;
+
+    platform::hook_hotkeys(&webview, app.keys.clone(), proxy.clone());
+    platform::hook_adblock(&webview, id, app.adblock.clone(), proxy.clone());
+    platform::hook_history(&webview, id, proxy.clone());
+    platform::hook_page_state(&webview, id, proxy.clone());
+    platform::hook_find(&webview, id, proxy.clone());
+    platform::hook_downloads(&webview, app.download_dir.clone(), proxy);
+    platform::set_passwords(&webview, app.store.settings.passwords);
+    Ok(webview)
+}
+
+impl App {
+    fn tab(&self, id: u32) -> Option<&Tab> {
+        self.tabs.iter().find(|t| t.id == id)
+    }
+
+    fn tab_mut(&mut self, id: u32) -> Option<&mut Tab> {
+        self.tabs.iter_mut().find(|t| t.id == id)
+    }
+
+    fn index_of(&self, id: u32) -> Option<usize> {
+        self.tabs.iter().position(|t| t.id == id)
+    }
+
+    fn active_tab(&self) -> Option<&Tab> {
+        self.tab(self.active)
+    }
+
+    fn active_webview(&self) -> Option<&WebView> {
+        self.active_tab().and_then(|t| t.webview.as_ref())
+    }
+
+    fn pinned_count(&self) -> usize {
+        self.tabs.iter().filter(|t| t.pinned).count()
+    }
+
+    fn is_fullscreen(&self) -> bool {
+        self.fullscreen || self.page_fullscreen
+    }
+
+    // ---------- раскладка и фокус ----------
+
+    /// Расставляет webview: интерфейс сверху, под ним активная страница.
+    fn layout(&self) {
+        let (width, height) = window_size(&self.window);
+        let chrome = if self.is_fullscreen() { 0.0 } else { self.chrome_height };
+        let on_start_page = self.active_webview().is_none();
+
+        let ui_height = match self.overlay {
+            _ if on_start_page => height,
+            Overlay::Full => height,
+            Overlay::Sheet(extra) => (chrome + extra).min(height),
+            Overlay::None => chrome,
+        };
+        let _ = self.ui.set_bounds(rect(0.0, 0.0, width, ui_height));
+
+        for tab in &self.tabs {
+            let Some(webview) = &tab.webview else { continue };
+            let active = tab.id == self.active;
+            if active {
+                let _ = webview.set_bounds(rect(0.0, chrome, width, height - chrome));
+            }
+            let _ = webview.set_visible(active);
+        }
+    }
+
+    fn focus_content(&self) {
+        match self.active_webview() {
+            Some(webview) if self.overlay != Overlay::Full => {
+                let _ = webview.focus();
+            }
+            _ => {
+                let _ = self.ui.focus();
+            }
+        }
+    }
+
+    fn focus_url(&mut self) {
+        self.push_state(); // интерфейс должен знать активную вкладку до фокуса
+        let _ = self.ui.focus();
+        let _ = self.ui.evaluate_script("ui.focusUrl()");
+    }
+
+    fn update_title(&self) {
+        let title = self.active_tab().map(|t| t.title.as_str()).unwrap_or("");
+        let suffix = if self.inprivate { format!("InPrivate — {APP_NAME}") } else { APP_NAME.into() };
+        if title.is_empty() {
+            self.window.set_title(&suffix);
+        } else {
+            self.window.set_title(&format!("{title} — {suffix}"));
+        }
+    }
+
+    /// Закрывает меню и библиотеку, если что-то сменило вкладку под ними.
+    fn reset_overlay(&mut self) {
+        if self.overlay != Overlay::None || self.overlay_pending {
+            self.overlay = Overlay::None;
+            self.overlay_pending = false;
+            let _ = self.ui.evaluate_script("ui.closeOverlays()");
+        }
+    }
+
+    // ---------- оформление ----------
+
+    fn dark(&self) -> bool {
+        match self.store.settings.theme.as_str() {
+            "dark" => true,
+            "light" => false,
+            _ => self.window.theme() == WindowTheme::Dark,
+        }
+    }
+
+    fn page_theme(&self) -> Theme {
+        match self.store.settings.theme.as_str() {
+            "dark" => Theme::Dark,
+            "light" => Theme::Light,
+            _ => Theme::Auto,
+        }
+    }
+
+    fn apply_theme(&mut self) {
+        platform::style_window(self.window.hwnd(), self.dark());
+        let theme = self.page_theme();
+        for webview in self.tabs.iter().filter_map(|t| t.webview.as_ref()) {
+            let _ = webview.set_theme(theme);
+        }
+        self.dirty = true;
+    }
+
+    // ---------- сеанс ----------
+
+    fn restore_session(&mut self) {
+        let session = if self.inprivate || !self.store.settings.restore_session {
+            Session::default()
+        } else {
+            self.store.load_session()
+        };
+        if session.tabs.is_empty() {
+            self.new_tab(None);
+            return;
+        }
+        for saved in &session.tabs {
+            let id = self.next_id;
+            self.next_id += 1;
+            self.tabs.push(Tab::new(id, &saved.url, &saved.title, saved.pinned));
+        }
+        // Загружается только активная вкладка, остальные — когда их откроют.
+        let index = session.active.min(self.tabs.len() - 1);
+        self.activate(self.tabs[index].id);
+    }
+
+    fn save_session(&mut self) {
+        self.session_dirty = false;
+        if self.inprivate {
+            return;
+        }
+        let saved: Vec<&Tab> = self.tabs.iter().filter(|t| !t.url.is_empty()).collect();
+        let session = Session {
+            active: saved.iter().position(|t| t.id == self.active).unwrap_or(0),
+            tabs: saved.iter().map(|t| t.snapshot()).collect(),
+        };
+        self.store.save_session(&session);
+    }
+
+    // ---------- вкладки ----------
+
+    fn new_tab(&mut self, url: Option<String>) {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.tabs.push(Tab::new(id, "", "", false));
+        self.reset_overlay();
+        self.dirty = true;
+        self.session_dirty = true;
+
+        match url {
+            Some(url) => {
+                self.set_active(id);
+                self.navigate(id, &url);
+            }
+            None => self.activate(id),
+        }
+    }
+
+    /// Вкладка в фоне: загрузится, когда на неё переключатся.
+    fn new_background_tab(&mut self, url: &str) {
+        let id = self.next_id;
+        self.next_id += 1;
+        // Как в Edge: сразу за текущей вкладкой и за открытыми из неё раньше.
+        let mut insert_at = self.index_of(self.active).map_or(self.tabs.len(), |i| i + 1);
+        while self.tabs.get(insert_at).is_some_and(|t| t.opener == Some(self.active)) {
+            insert_at += 1;
+        }
+        let title = url.split("://").nth(1).unwrap_or(url).split('/').next().unwrap_or(url);
+        let mut tab = Tab::new(id, url, title, false);
+        tab.opener = Some(self.active);
+        self.tabs.insert(insert_at.max(self.pinned_count()), tab);
+        self.dirty = true;
+        self.session_dirty = true;
+    }
+
+    fn close_tab(&mut self, id: u32) {
+        let Some(index) = self.index_of(id) else { return };
+        let tab = self.tabs.remove(index);
+        if !tab.url.is_empty() {
+            self.closed.push(tab.snapshot());
+        }
+        if let Some(webview) = &tab.webview {
+            platform::find_stop(webview);
+        }
+        drop(tab); // уничтожает webview вкладки
+        self.dirty = true;
+        self.session_dirty = true;
+
+        if self.tabs.is_empty() {
+            self.quit = true;
+            return;
+        }
+        if self.active == id {
+            let neighbour = index.min(self.tabs.len() - 1);
+            self.activate(self.tabs[neighbour].id);
+        }
+    }
+
+    fn close_many(&mut self, ids: Vec<u32>) {
+        for id in ids {
+            self.close_tab(id);
+        }
+    }
+
+    /// Делает вкладку активной без загрузки и фокуса.
+    fn set_active(&mut self, id: u32) {
+        let previous = self.active;
+        if let Some(old) = self.tab_mut(previous) {
+            if previous != id {
+                old.hidden_since = Some(Instant::now());
+                if let Some(webview) = &old.webview {
+                    platform::set_background(webview, true);
+                }
+            }
+        }
+        if let Some(tab) = self.tab_mut(id) {
+            tab.hidden_since = None;
+            tab.sleeping = false; // видимая вкладка просыпается сама
+            if let Some(webview) = &tab.webview {
+                platform::set_background(webview, false);
+            }
+        }
+        if previous != id {
+            self.close_find();
+        }
+        self.active = id;
+        self.session_dirty = true;
+    }
+
+    fn activate(&mut self, id: u32) {
+        let Some(tab) = self.tab(id) else { return };
+        let lazy_url = (tab.webview.is_none() && !tab.url.is_empty()).then(|| tab.url.clone());
+        self.set_active(id);
+        self.reset_overlay();
+        self.dirty = true;
+
+        if let Some(url) = lazy_url {
+            self.navigate(id, &url);
+            return;
+        }
+        self.layout();
+        self.update_title();
+        if self.active_webview().is_some() {
+            self.focus_content();
+        } else {
+            self.focus_url(); // на стартовой странице курсор сразу в поиске
+        }
+    }
+
+    /// Переключает на соседнюю вкладку по кругу.
+    fn cycle_tab(&mut self, step: isize) {
+        let Some(index) = self.index_of(self.active) else { return };
+        let count = self.tabs.len() as isize;
+        let next = (index as isize + step).rem_euclid(count) as usize;
+        self.activate(self.tabs[next].id);
+    }
+
+    /// Перемещает вкладку, не смешивая закреплённые и обычные.
+    fn move_tab(&mut self, id: u32, to: usize) {
+        let Some(from) = self.index_of(id) else { return };
+        let tab = self.tabs.remove(from);
+        let pinned = self.pinned_count();
+        let to = if tab.pinned { to.min(pinned) } else { to.clamp(pinned, self.tabs.len()) };
+        self.tabs.insert(to, tab);
+        self.dirty = true;
+        self.session_dirty = true;
+    }
+
+    fn toggle_pin(&mut self, id: u32) {
+        let Some(index) = self.index_of(id) else { return };
+        let mut tab = self.tabs.remove(index);
+        tab.pinned = !tab.pinned;
+        // Закреплённая встаёт в конец закреплённых, откреплённая — в начало обычных.
+        let at = self.pinned_count();
+        self.tabs.insert(at, tab);
+        self.dirty = true;
+        self.session_dirty = true;
+    }
+
+    fn navigate(&mut self, id: u32, url: &str) {
+        let Some(index) = self.index_of(id) else { return };
+
+        if self.tabs[index].webview.is_none() {
+            let (width, height) = window_size(&self.window);
+            let chrome = if self.is_fullscreen() { 0.0 } else { self.chrome_height };
+            let bounds = rect(0.0, chrome, width, height - chrome);
+            match build_tab(self, id, bounds) {
+                Ok(webview) => {
+                    self.tabs[index].webview = Some(webview);
+                    // Новое окно создаётся поверх всех — возвращаем интерфейс наверх.
+                    platform::raise(&self.ui);
+                }
+                Err(error) => {
+                    eprintln!("не удалось создать вкладку: {error}");
+                    return;
+                }
+            }
+        }
+
+        let tab = &mut self.tabs[index];
+        tab.url = url.to_string();
+        tab.title.clear();
+        tab.loading = true;
+        if let Some(webview) = &tab.webview {
+            let _ = webview.load_url(url);
+        }
+        self.reset_overlay();
+        self.dirty = true;
+        self.session_dirty = true;
+        self.layout();
+        self.update_title();
+        self.focus_content();
+    }
+
+    // ---------- события ----------
+
+    fn handle(&mut self, event: UserEvent) {
+        match event {
+            UserEvent::Ui(raw) => self.handle_ui(&raw),
+            UserEvent::UrlChanged(id, url) => {
+                if url == "about:blank" {
+                    return; // пустая страница до первой загрузки
+                }
+                if let Some(tab) = self.tab_mut(id) {
+                    tab.url = url;
+                    tab.blocked = 0;
+                    self.dirty = true;
+                    self.session_dirty = true;
+                }
+            }
+            UserEvent::TitleChanged(id, title) => {
+                if title == "about:blank" {
+                    return;
+                }
+                let Some(tab) = self.tab_mut(id) else { return };
+                tab.title = title.clone();
+                let url = tab.url.clone();
+                if !self.inprivate {
+                    self.store.set_title(&url, &title);
+                    self.history_dirty = true;
+                }
+                self.dirty = true;
+                self.session_dirty = true;
+                if id == self.active {
+                    self.update_title();
+                }
+            }
+            UserEvent::Loading(id, loading) => {
+                let Some(tab) = self.tab_mut(id) else { return };
+                tab.loading = loading;
+                self.dirty = true;
+                if !loading {
+                    self.sync_location(id);
+                    let Some(tab) = self.tab(id) else { return };
+                    if tab.url.starts_with("http") && !self.inprivate {
+                        let (url, title) = (tab.url.clone(), tab.title.clone());
+                        self.store.add_visit(&url, &title);
+                        self.history_dirty = true;
+                    }
+                }
+            }
+            UserEvent::HistoryChanged(id) => self.sync_location(id),
+            UserEvent::NewTabRequested(url) => self.new_tab(Some(url)),
+            UserEvent::Blocked(id) => {
+                if let Some(tab) = self.tab_mut(id) {
+                    tab.blocked += 1;
+                }
+                self.store.settings.blocked_total += 1;
+                self.dirty = true;
+            }
+            UserEvent::Hotkey(hotkey) => self.handle_hotkey(hotkey),
+            UserEvent::Download(event) => self.handle_download(event),
+            UserEvent::Favicon(id, uri) => {
+                if let Some(tab) = self.tab_mut(id) {
+                    tab.favicon = uri;
+                    self.dirty = true;
+                }
+            }
+            UserEvent::Audio(id, playing) => {
+                if let Some(tab) = self.tab_mut(id) {
+                    tab.audio = playing;
+                    self.dirty = true;
+                }
+            }
+            UserEvent::Zoom(id, factor) => {
+                if let Some(tab) = self.tab_mut(id) {
+                    tab.zoom = factor;
+                    self.dirty = true;
+                }
+            }
+            UserEvent::PageFullscreen(id, full) => {
+                if id == self.active {
+                    self.page_fullscreen = full;
+                    self.apply_fullscreen();
+                }
+            }
+            UserEvent::Find(id, index, count) => {
+                if id == self.active {
+                    let script = format!("ui.setFind({index}, {count})");
+                    let _ = self.ui.evaluate_script(&script);
+                }
+            }
+            UserEvent::Captured(bytes) => self.finish_overlay(bytes),
+        }
+    }
+
+    /// Обновляет адрес и доступность «назад/вперёд» по данным самого webview.
+    fn sync_location(&mut self, id: u32) {
+        let Some(tab) = self.tab_mut(id) else { return };
+        let Some(webview) = &tab.webview else { return };
+        if let Ok(url) = webview.url() {
+            if url != "about:blank" {
+                tab.url = url;
+            }
+        }
+        (tab.can_back, tab.can_forward) = platform::nav_state(webview);
+        self.dirty = true;
+    }
+
+    fn handle_hotkey(&mut self, hotkey: Hotkey) {
+        match hotkey {
+            Hotkey::NewTab => self.new_tab(None),
+            Hotkey::CloseTab => self.close_tab(self.active),
+            Hotkey::ReopenTab => {
+                if let Some(saved) = self.closed.pop() {
+                    self.new_tab(Some(saved.url));
+                    if saved.pinned {
+                        self.toggle_pin(self.active);
+                    }
+                }
+            }
+            Hotkey::InPrivate => platform::open_inprivate(),
+            Hotkey::FocusUrl => self.focus_url(),
+            Hotkey::NextTab => self.cycle_tab(1),
+            Hotkey::PrevTab => self.cycle_tab(-1),
+            Hotkey::SelectTab(number) => {
+                let index = match number {
+                    9 => self.tabs.len() - 1,
+                    n => n as usize - 1,
+                };
+                if let Some(tab) = self.tabs.get(index) {
+                    self.activate(tab.id);
+                }
+            }
+            Hotkey::Reload => self.reload(),
+            Hotkey::Back => {
+                if let Some(webview) = self.active_webview() {
+                    platform::go_back(webview);
+                }
+            }
+            Hotkey::Forward => {
+                if let Some(webview) = self.active_webview() {
+                    platform::go_forward(webview);
+                }
+            }
+            Hotkey::Bookmark => self.toggle_bookmark(),
+            Hotkey::Bookmarks => self.open_hub("bookmarks"),
+            Hotkey::History => self.open_hub("history"),
+            Hotkey::Downloads => self.open_hub("downloads"),
+            Hotkey::Settings => self.open_hub("settings"),
+            Hotkey::Find => self.open_find(),
+            Hotkey::PasteGo => self.paste_and_go(),
+            Hotkey::ZoomIn => self.zoom_step(1),
+            Hotkey::ZoomOut => self.zoom_step(-1),
+            Hotkey::ZoomReset => self.zoom_step(0),
+            Hotkey::Print => {
+                if let Some(webview) = self.active_webview() {
+                    let _ = webview.print();
+                }
+            }
+            Hotkey::DevTools => {
+                if let Some(webview) = self.active_webview() {
+                    webview.open_devtools();
+                }
+            }
+            Hotkey::FavBar => self.set_setting("favbar", &json!(!self.store.settings.favbar)),
+            Hotkey::Fullscreen => {
+                self.fullscreen = !self.fullscreen;
+                self.apply_fullscreen();
+            }
+            Hotkey::Menu => {
+                let _ = self.ui.focus();
+                let _ = self.ui.evaluate_script("ui.openMenu()");
+            }
+            Hotkey::Escape => {
+                if self.keys.find_open.load(Ordering::Relaxed) {
+                    self.close_find();
+                    let _ = self.ui.evaluate_script("ui.closeFind()");
+                } else if self.fullscreen {
+                    self.fullscreen = false;
+                    self.apply_fullscreen();
+                }
+            }
+        }
+    }
+
+    fn apply_fullscreen(&mut self) {
+        let full = self.is_fullscreen();
+        self.keys.fullscreen.store(self.fullscreen, Ordering::Relaxed);
+        self.window.set_fullscreen(full.then_some(Fullscreen::Borderless(None)));
+        self.reset_overlay();
+        self.dirty = true;
+        self.layout();
+        self.focus_content();
+    }
+
+    /// «Вставить и перейти»: текст из буфера — адрес или поисковый запрос.
+    fn paste_and_go(&mut self) {
+        let Some(text) = platform::clipboard_text() else { return };
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if text.is_empty() {
+            return;
+        }
+        let url = to_url(&text, search_url(&self.store.settings.search));
+        if self.active_tab().is_some() {
+            self.navigate(self.active, &url);
+        }
+    }
+
+    fn reload(&self) {
+        if let Some(webview) = self.active_webview() {
+            let _ = webview.reload();
+        }
+    }
+
+    fn zoom_step(&mut self, direction: i32) {
+        let Some(tab) = self.active_tab() else { return };
+        let Some(webview) = &tab.webview else { return };
+        let current = tab.zoom;
+        let next = match direction {
+            0 => Some(1.0),
+            d if d > 0 => ZOOM_LEVELS.iter().copied().find(|z| *z > current + 0.001),
+            _ => ZOOM_LEVELS.iter().rev().copied().find(|z| *z < current - 0.001),
+        }
+        .unwrap_or(current);
+        let _ = webview.zoom(next);
+        let id = tab.id;
+        if let Some(tab) = self.tab_mut(id) {
+            tab.zoom = next;
+        }
+        self.dirty = true;
+        let _ = self.ui.evaluate_script("ui.zoomChanged()");
+    }
+
+    fn open_hub(&self, section: &str) {
+        let _ = self.ui.focus();
+        let _ = self.ui.evaluate_script(&format!("ui.openHub({section:?})"));
+    }
+
+    fn open_find(&mut self) {
+        if self.active_webview().is_none() {
+            return;
+        }
+        self.keys.find_open.store(true, Ordering::Relaxed);
+        let _ = self.ui.focus();
+        let _ = self.ui.evaluate_script("ui.openFind()");
+    }
+
+    fn close_find(&mut self) {
+        if !self.keys.find_open.swap(false, Ordering::Relaxed) {
+            return;
+        }
+        if let Some(webview) = self.active_webview() {
+            platform::find_stop(webview);
+        }
+    }
+
+    fn toggle_bookmark(&mut self) {
+        let Some(tab) = self.active_tab() else { return };
+        if tab.url.is_empty() {
+            return;
+        }
+        let (url, title) = (tab.url.clone(), tab.title.clone());
+        self.store.reload_bookmarks(); // их могло изменить другое окно
+        self.store.toggle_bookmark(&url, &title);
+        self.store.save_bookmarks();
+        self.dirty = true;
+    }
+
+    fn handle_download(&mut self, event: DownloadEvent) {
+        match event {
+            DownloadEvent::Started { id, url, path } => {
+                let name = Path::new(&path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.clone());
+                self.downloads.push(Download {
+                    id,
+                    url,
+                    name,
+                    path,
+                    received: 0,
+                    total: 0,
+                    state: "progress",
+                });
+                let _ = self.ui.evaluate_script("ui.downloadStarted()");
+            }
+            DownloadEvent::Progress { id, received, total } => {
+                if let Some(download) = self.downloads.iter_mut().find(|d| d.id == id) {
+                    download.received = received;
+                    download.total = total;
+                }
+            }
+            DownloadEvent::Finished { id, ok, received } => {
+                if let Some(download) = self.downloads.iter_mut().find(|d| d.id == id) {
+                    download.state = if ok { "done" } else { "failed" };
+                    download.received = received;
+                    if ok {
+                        download.total = received;
+                    }
+                }
+            }
+        }
+        self.dirty = true;
+    }
+
+    // ---------- меню и библиотека поверх страницы ----------
+
+    /// Меню рисуется в интерфейсе, а он — отдельное окно над страницей. Чтобы меню
+    /// легло поверх страницы, интерфейс растягивается на всё окно и показывает под
+    /// меню снимок страницы. Снимок делается асинхронно, поэтому растягиваем потом.
+    fn request_full_overlay(&mut self) {
+        if self.overlay == Overlay::Full || self.overlay_pending {
+            let _ = self.ui.evaluate_script("ui.overlayReady()");
+            return;
+        }
+        if self.active_webview().is_none() {
+            self.finish_overlay(None); // стартовая страница и так на всё окно
+            return;
+        }
+        self.overlay_pending = true;
+        self.overlay_requested = Instant::now();
+        let proxy = self.proxy.clone();
+        if let Some(webview) = self.active_webview() {
+            platform::capture(webview, move |bytes| {
+                let _ = proxy.send_event(UserEvent::Captured(bytes));
+            });
+        }
+    }
+
+    fn finish_overlay(&mut self, bytes: Option<Vec<u8>>) {
+        let has_page = self.active_webview().is_some();
+        if has_page && !self.overlay_pending {
+            return; // меню успели закрыть, пока делался снимок
+        }
+        self.overlay_pending = false;
+        let backdrop = match bytes {
+            Some(bytes) if has_page => format!("'data:image/jpeg;base64,{}'", base64(&bytes)),
+            _ => "null".to_string(),
+        };
+        let _ = self.ui.evaluate_script(&format!("ui.setBackdrop({backdrop})"));
+        self.overlay = Overlay::Full;
+        self.layout();
+        let _ = self.ui.focus();
+        let _ = self.ui.evaluate_script("ui.overlayReady()");
+    }
+
+    // ---------- настройки ----------
+
+    fn set_setting(&mut self, key: &str, value: &Value) {
+        let settings = &mut self.store.settings;
+        match key {
+            "theme" => {
+                if let Some(theme @ ("system" | "light" | "dark")) = value.as_str() {
+                    settings.theme = theme.to_string();
+                    self.store.save_settings();
+                    self.apply_theme();
+                }
+                return;
+            }
+            "search" => {
+                if let Some(id) = value.as_str() {
+                    if ENGINES.iter().any(|(engine, ..)| *engine == id) {
+                        settings.search = id.to_string();
+                    }
+                }
+            }
+            "adblock" => {
+                settings.adblock = value.as_bool().unwrap_or(settings.adblock);
+                self.adblock.store(settings.adblock, Ordering::Relaxed);
+            }
+            "restore_session" => {
+                settings.restore_session = value.as_bool().unwrap_or(settings.restore_session)
+            }
+            "favbar" => settings.favbar = value.as_bool().unwrap_or(settings.favbar),
+            "passwords" => {
+                settings.passwords = value.as_bool().unwrap_or(settings.passwords);
+                let enabled = settings.passwords;
+                for webview in self.tabs.iter().filter_map(|t| t.webview.as_ref()) {
+                    platform::set_passwords(webview, enabled);
+                }
+            }
+            "sleep_minutes" => {
+                if let Some(minutes) = value.as_u64() {
+                    settings.sleep_minutes = minutes.min(24 * 60) as u32;
+                }
+            }
+            _ => return,
+        }
+        self.store.save_settings();
+        self.dirty = true;
+    }
+
+    fn set_download_dir(&mut self, dir: String) {
+        if let Ok(mut shared) = self.download_dir.lock() {
+            shared.clone_from(&dir);
+        }
+        self.store.settings.download_dir = dir;
+        self.store.save_settings();
+        self.dirty = true;
+    }
+
+    // ---------- команды интерфейса ----------
+
+    fn handle_ui(&mut self, raw: &str) {
+        let Ok(message) = serde_json::from_str::<Value>(raw) else { return };
+        let text = |key: &str| message[key].as_str().unwrap_or("").to_string();
+        let number = |key: &str| message[key].as_u64().unwrap_or(0);
+        let id = number("id") as u32;
+
+        match message["cmd"].as_str().unwrap_or("") {
+            "ready" => {
+                self.sent.clear(); // интерфейс перезагрузился — нужно всё состояние
+                self.dirty = true;
+            }
+            "chrome" => {
+                let height = message["height"].as_f64().unwrap_or(DEFAULT_CHROME);
+                if (height - self.chrome_height).abs() > 0.5 {
+                    self.chrome_height = height;
+                    self.layout();
+                }
+            }
+
+            // окно
+            "minimize" => self.window.set_minimized(true),
+            "maximize" => self.window.set_maximized(!self.window.is_maximized()),
+            "close" => self.quit = true,
+            "drag" => {
+                let _ = self.window.drag_window();
+            }
+            "resize" => {
+                let direction = match message["dir"].as_str().unwrap_or("") {
+                    "n" => ResizeDirection::North,
+                    "ne" => ResizeDirection::NorthEast,
+                    "nw" => ResizeDirection::NorthWest,
+                    _ => return,
+                };
+                let _ = self.window.drag_resize_window(direction);
+            }
+            "fullscreen" => self.handle_hotkey(Hotkey::Fullscreen),
+            "inprivate" => platform::open_inprivate(),
+
+            // вкладки
+            "new_tab" => self.new_tab(None),
+            "close_tab" => self.close_tab(id),
+            "activate" => self.activate(id),
+            "move_tab" => self.move_tab(id, number("index") as usize),
+            "pin" => self.toggle_pin(id),
+            "duplicate" => {
+                if let Some(url) = self.tab(id).map(|t| t.url.clone()).filter(|u| !u.is_empty()) {
+                    self.new_tab(Some(url));
+                }
+            }
+            "close_others" => {
+                let others = self.tabs.iter().filter(|t| t.id != id && !t.pinned).map(|t| t.id);
+                let others: Vec<u32> = others.collect();
+                self.activate(id);
+                self.close_many(others);
+            }
+            "close_right" => {
+                let Some(index) = self.index_of(id) else { return };
+                let right: Vec<u32> = self.tabs[index + 1..].iter().map(|t| t.id).collect();
+                self.close_many(right);
+            }
+            "reload_tab" => {
+                if let Some(webview) = self.tab(id).and_then(|t| t.webview.as_ref()) {
+                    let _ = webview.reload();
+                }
+            }
+            "mute" => {
+                if let Some(tab) = self.tab_mut(id) {
+                    tab.muted = !tab.muted;
+                    if let Some(webview) = &tab.webview {
+                        platform::set_muted(webview, tab.muted);
+                    }
+                    self.dirty = true;
+                }
+            }
+
+            // навигация
+            "navigate" => {
+                let input = text("text");
+                if !input.trim().is_empty() {
+                    let url = to_url(&input, search_url(&self.store.settings.search));
+                    self.navigate(self.active, &url);
+                }
+            }
+            "open" => {
+                let url = text("url");
+                if message["background"].as_bool().unwrap_or(false) {
+                    self.new_background_tab(&url);
+                } else if message["newTab"].as_bool().unwrap_or(false) {
+                    self.new_tab(Some(url));
+                } else {
+                    self.navigate(self.active, &url);
+                }
+            }
+            "back" => self.handle_hotkey(Hotkey::Back),
+            "forward" => self.handle_hotkey(Hotkey::Forward),
+            "reload" => self.reload(),
+            "stop" => {
+                if let Some(webview) = self.active_webview() {
+                    platform::stop(webview);
+                }
+            }
+            "focus_content" => self.focus_content(),
+            "clipboard" => {
+                let text = platform::clipboard_text().unwrap_or_default();
+                let text = serde_json::to_string(&text).unwrap_or_else(|_| "\"\"".into());
+                let _ = self.ui.evaluate_script(&format!("ui.pasteText({text})"));
+            }
+            "paste_go" => self.paste_and_go(),
+            "system_keys" => {
+                let _ = self.ui.focus();
+                platform::press_system_keys(&text("keys"));
+            }
+
+            // страница
+            "zoom" => match text("dir").as_str() {
+                "in" => self.zoom_step(1),
+                "out" => self.zoom_step(-1),
+                _ => self.zoom_step(0),
+            },
+            "print" => self.handle_hotkey(Hotkey::Print),
+            "devtools" => self.handle_hotkey(Hotkey::DevTools),
+            "find" => {
+                self.keys.find_open.store(true, Ordering::Relaxed);
+                if let Some(webview) = self.active_webview() {
+                    platform::find_start(webview, &text("term"));
+                }
+            }
+            "find_next" | "find_prev" => {
+                if let Some(webview) = self.active_webview() {
+                    platform::find_step(webview, message["cmd"] == "find_next");
+                }
+            }
+            "find_close" => {
+                self.close_find();
+                self.focus_content();
+            }
+
+            // слои поверх страницы
+            "overlay" => match message["mode"].as_str() {
+                Some("full") => self.request_full_overlay(),
+                Some("sheet") => {
+                    self.overlay = Overlay::Sheet(message["height"].as_f64().unwrap_or(0.0));
+                    self.layout();
+                }
+                _ => {
+                    self.overlay = Overlay::None;
+                    self.overlay_pending = false;
+                    self.layout();
+                }
+            },
+
+            // адресная строка
+            "suggest" => {
+                let list = self.store.suggest(&text("text"), 6);
+                let json = serde_json::to_string(&list).unwrap_or_else(|_| "[]".into());
+                let script = format!("ui.setSuggestions({}, {json})", number("seq"));
+                let _ = self.ui.evaluate_script(&script);
+            }
+
+            // библиотека
+            "history" => self.send_history(&text("q")),
+            "history_remove" => {
+                self.store.remove_visit(&text("url"), number("time"));
+                self.store.save_history();
+            }
+            "history_clear" => {
+                self.store.clear_history();
+                self.store.save_history();
+                self.send_history("");
+            }
+            "bookmark_toggle" => self.toggle_bookmark(),
+            "bookmark_remove" => {
+                self.store.reload_bookmarks();
+                self.store.remove_bookmark(&text("url"));
+                self.store.save_bookmarks();
+                self.dirty = true;
+            }
+            "download_open" => {
+                if let Some(download) = self.downloads.iter().find(|d| d.id == number("id")) {
+                    platform::open_path(&download.path);
+                }
+            }
+            "download_reveal" => {
+                if let Some(download) = self.downloads.iter().find(|d| d.id == number("id")) {
+                    platform::reveal_path(&download.path);
+                }
+            }
+            "downloads_clear" => {
+                self.downloads.retain(|d| d.state == "progress");
+                self.dirty = true;
+            }
+
+            // настройки
+            "set" => self.set_setting(&text("key"), &message["value"]),
+            "adblock_toggle" => {
+                let enabled = !self.store.settings.adblock;
+                self.set_setting("adblock", &json!(enabled));
+            }
+            "pick_download_dir" => {
+                if let Some(dir) = platform::pick_folder(self.window.hwnd()) {
+                    self.set_download_dir(dir);
+                }
+            }
+            "reset_download_dir" => self.set_download_dir(String::new()),
+            "open_download_dir" => {
+                let mut dir = self.store.settings.download_dir.clone();
+                if dir.is_empty() {
+                    dir = default_download_dir();
+                }
+                platform::open_path(&dir);
+            }
+            "clear_data" => {
+                // Профиль общий для всех вкладок, поэтому хватает одного вызова.
+                let _ = self.ui.clear_all_browsing_data();
+                let _ = self.ui.evaluate_script("ui.dataCleared()");
+            }
+            _ => {}
+        }
+    }
+
+    fn send_history(&self, query: &str) {
+        let visits = self.store.search_history(query, 400);
+        let json = serde_json::to_string(&visits).unwrap_or_else(|_| "[]".into());
+        let _ = self.ui.evaluate_script(&format!("ui.setHistory({json})"));
+    }
+
+    // ---------- обновление интерфейса и фоновые задачи ----------
+
+    /// Вызывается после каждой пачки событий: передаёт накопленные изменения,
+    /// сохраняет данные и усыпляет давно скрытые вкладки.
+    fn flush(&mut self) {
+        if self.dirty && self.last_push.elapsed() >= PUSH_INTERVAL {
+            self.push_state();
+        }
+        if self.overlay_pending && self.overlay_requested.elapsed() > Duration::from_millis(600) {
+            self.finish_overlay(None);
+        }
+        let since_save = self.last_save.elapsed();
+        if self.session_dirty && since_save > Duration::from_secs(3) {
+            self.save_session();
+            self.last_save = Instant::now();
+        }
+        if self.history_dirty && since_save > Duration::from_secs(20) {
+            self.store.save_history();
+            self.store.save_settings(); // счётчик заблокированного
+            self.history_dirty = false;
+            self.last_save = Instant::now();
+        }
+        if self.last_sleep_check.elapsed() >= SLEEP_CHECK {
+            self.last_sleep_check = Instant::now();
+            self.sleep_background_tabs();
+        }
+    }
+
+    /// Фоновые вкладки сначала засыпают (WebView2 замораживает страницу), а через
+    /// втрое больший срок выгружаются целиком: процесс страницы закрывается и
+    /// память возвращается системе. Выгруженная вкладка загрузится заново при открытии.
+    fn sleep_background_tabs(&mut self) {
+        let minutes = self.store.settings.sleep_minutes;
+        // Выгрузка отменила бы загрузку, поэтому пока что-то качается — только сон.
+        let downloading = self.downloads.iter().any(|d| d.state == "progress");
+        for tab in &mut self.tabs {
+            let hidden_for = tab.hidden_since.map(|since| since.elapsed());
+            let action = rest_action(hidden_for, minutes, tab.sleeping, tab.audio, tab.webview.is_some());
+            match action {
+                Rest::Suspend => {
+                    if let Some(webview) = &tab.webview {
+                        platform::suspend(webview);
+                    }
+                    tab.sleeping = true;
+                }
+                Rest::Discard if !downloading => {
+                    tab.webview = None; // уничтожает webview и процесс страницы
+                    tab.sleeping = true;
+                    tab.loading = false;
+                }
+                _ => continue,
+            }
+            self.dirty = true;
+        }
+    }
+
+    fn push_state(&mut self) {
+        self.dirty = false;
+        self.last_push = Instant::now();
+        let tabs: Vec<Value> = self
+            .tabs
+            .iter()
+            .map(|tab| {
+                json!({
+                    "id": tab.id,
+                    "title": tab.title,
+                    "url": tab.url,
+                    "favicon": tab.favicon,
+                    "loading": tab.loading,
+                    "blocked": tab.blocked,
+                    "canBack": tab.can_back,
+                    "canForward": tab.can_forward,
+                    "start": tab.is_start(),
+                    "pinned": tab.pinned,
+                    "zoom": tab.zoom,
+                    "audio": tab.audio,
+                    "muted": tab.muted,
+                    "sleeping": tab.sleeping || (tab.webview.is_none() && !tab.url.is_empty()),
+                })
+            })
+            .collect();
+        let bookmarked = self.active_tab().is_some_and(|t| self.store.is_bookmarked(&t.url));
+        let engines: Vec<Value> =
+            ENGINES.iter().map(|(id, name, _)| json!({ "id": id, "name": name })).collect();
+        let settings = &self.store.settings;
+        let search = if ENGINES.iter().any(|(id, ..)| *id == settings.search) {
+            settings.search.as_str()
+        } else {
+            ENGINES[0].0
+        };
+        let state = json!({
+            "tabs": tabs,
+            "active": self.active,
+            "bookmarked": bookmarked,
+            "bookmarks": self.store.bookmarks,
+            "downloads": self.downloads,
+            "adblock": settings.adblock,
+            "blockedTotal": settings.blocked_total,
+            "engines": engines,
+            "search": search,
+            "settings": {
+                "theme": settings.theme,
+                "restoreSession": settings.restore_session,
+                "favbar": settings.favbar,
+                "sleepMinutes": settings.sleep_minutes,
+                "passwords": settings.passwords,
+                "downloadDir": settings.download_dir,
+                "defaultDownloadDir": default_download_dir(),
+            },
+            "dark": self.dark(),
+            "maximized": self.maximized,
+            "fullscreen": self.is_fullscreen(),
+        });
+        let mut state = state;
+        if let Value::Object(fields) = &mut state {
+            for key in ["bookmarks", "downloads", "engines", "settings"] {
+                let Some(value) = fields.get(key) else { continue };
+                let text = value.to_string();
+                if self.sent.get(key) == Some(&text) {
+                    fields.remove(key); // не менялось — интерфейс оставит прежнее
+                } else {
+                    self.sent.insert(key, text);
+                }
+            }
+        }
+        let _ = self.ui.evaluate_script(&format!("ui.setState({state})"));
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum Rest {
+    Keep,
+    Suspend,
+    Discard,
+}
+
+/// Что сделать с фоновой вкладкой, скрытой `hidden_for`, при пороге сна `limit_minutes`.
+fn rest_action(
+    hidden_for: Option<Duration>,
+    limit_minutes: u32,
+    sleeping: bool,
+    audio: bool,
+    loaded: bool,
+) -> Rest {
+    // Вкладку со звуком не трогаем: на ней может играть музыка.
+    let Some(hidden_for) = hidden_for else { return Rest::Keep };
+    if limit_minutes == 0 || audio || !loaded {
+        return Rest::Keep;
+    }
+    let limit = Duration::from_secs(limit_minutes as u64 * 60);
+    if hidden_for >= limit * 3 {
+        Rest::Discard
+    } else if hidden_for >= limit && !sleeping {
+        Rest::Suspend
+    } else {
+        Rest::Keep
+    }
+}
+
+/// Превращает ввод из адресной строки в URL: адрес открываем, остальное ищем.
+fn to_url(input: &str, search: &str) -> String {
+    let input = input.trim();
+    if input.contains("://") || input.starts_with("about:") {
+        input.to_string()
+    } else if !input.contains(' ') && (input.contains('.') || input.starts_with("localhost")) {
+        format!("https://{input}")
+    } else {
+        format!("{search}{}", percent_encode(input))
+    }
+}
+
+fn percent_encode(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = (chunk[0] as u32) << 16
+            | (*chunk.get(1).unwrap_or(&0) as u32) << 8
+            | *chunk.get(2).unwrap_or(&0) as u32;
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DDG: &str = "https://duckduckgo.com/?q=";
+
+    #[test]
+    fn address_gets_https() {
+        assert_eq!(to_url("example.com", DDG), "https://example.com");
+        assert_eq!(to_url("localhost:3000", DDG), "https://localhost:3000");
+    }
+
+    #[test]
+    fn full_url_is_kept() {
+        assert_eq!(to_url(" http://example.com/a b ", DDG), "http://example.com/a b");
+    }
+
+    #[test]
+    fn text_becomes_search() {
+        assert_eq!(to_url("rust lang", DDG), "https://duckduckgo.com/?q=rust%20lang");
+        assert_eq!(to_url("кот", DDG), "https://duckduckgo.com/?q=%D0%BA%D0%BE%D1%82");
+    }
+
+    #[test]
+    fn search_uses_chosen_engine() {
+        assert_eq!(
+            to_url("кот", search_url("yandex")),
+            "https://yandex.ru/search/?text=%D0%BA%D0%BE%D1%82"
+        );
+        assert_eq!(to_url("a b", search_url("google")), "https://www.google.com/search?q=a%20b");
+        // Адреса от выбора поисковика не зависят.
+        assert_eq!(to_url("example.com", search_url("bing")), "https://example.com");
+    }
+
+    #[test]
+    fn unknown_engine_falls_back_to_default() {
+        let google = "https://www.google.com/search?q=";
+        assert_eq!(search_url("nope"), google);
+        assert_eq!(search_url(""), google);
+        assert_eq!(search_url(&store::Settings::default().search), google);
+        assert_eq!(search_url("duckduckgo"), DDG);
+    }
+
+    #[test]
+    fn background_tabs_sleep_then_unload() {
+        let min = |m: u64| Some(Duration::from_secs(m * 60));
+        assert_eq!(rest_action(min(5), 15, false, false, true), Rest::Keep);
+        assert_eq!(rest_action(min(15), 15, false, false, true), Rest::Suspend);
+        assert_eq!(rest_action(min(20), 15, true, false, true), Rest::Keep); // уже спит
+        assert_eq!(rest_action(min(45), 15, true, false, true), Rest::Discard);
+    }
+
+    #[test]
+    fn some_tabs_are_never_unloaded() {
+        let long = Some(Duration::from_secs(10 * 3600));
+        assert_eq!(rest_action(long, 15, false, true, true), Rest::Keep); // играет звук
+        assert_eq!(rest_action(long, 0, false, false, true), Rest::Keep); // сон выключен
+        assert_eq!(rest_action(long, 15, true, false, false), Rest::Keep); // уже выгружена
+        assert_eq!(rest_action(None, 15, false, false, true), Rest::Keep); // активная
+    }
+
+    #[test]
+    fn base64_matches_reference() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+        assert_eq!(base64(&[0xFF, 0xD8, 0xFF]), "/9j/");
+    }
+
+    #[test]
+    fn zoom_levels_are_sorted() {
+        assert!(ZOOM_LEVELS.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(ZOOM_LEVELS.contains(&1.0));
+    }
+}
