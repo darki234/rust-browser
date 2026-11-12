@@ -23,7 +23,7 @@ use windows::{
             },
             Registry::{
                 RegCloseKey, RegCreateKeyExW, RegGetValueW, RegSetValueExW, HKEY,
-                HKEY_CURRENT_USER, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_SZ,
+                HKEY_CURRENT_USER, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_DWORD, RRF_RT_REG_SZ,
             },
         },
         UI::{
@@ -179,6 +179,25 @@ fn get_value(path: &str, name: &str) -> Option<String> {
         }
         let len = (size as usize / 2).saturating_sub(1);
         Some(String::from_utf16_lossy(&buffer[..len]))
+    }
+}
+
+/// Тёмная ли тема приложений в Windows (параметр «Режим приложений»).
+pub fn system_prefers_dark() -> bool {
+    let personalize = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
+    unsafe {
+        let mut value = 1u32;
+        let mut size = 4u32;
+        let read = RegGetValueW(
+            HKEY_CURRENT_USER,
+            &HSTRING::from(personalize),
+            &HSTRING::from("AppsUseLightTheme"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some(&mut value as *mut u32 as *mut c_void),
+            Some(&mut size),
+        );
+        read == ERROR_SUCCESS && value == 0
     }
 }
 

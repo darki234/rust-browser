@@ -52,6 +52,12 @@ const ENGINES: [(&str, &str, &str); 4] = [
     ("duckduckgo", "DuckDuckGo", "https://duckduckgo.com/?q="),
 ];
 
+/// Цвет под страницами, пока они не отрисовались: тёмный в тёмной теме.
+/// Без него при переключении вкладок мелькает белое окно.
+fn backdrop_color(dark: bool) -> (u8, u8, u8, u8) {
+    if dark { (18, 19, 24, 255) } else { (255, 255, 255, 255) }
+}
+
 /// Ступени масштаба, как в Edge.
 const ZOOM_LEVELS: [f64; 15] =
     [0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
@@ -275,6 +281,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Своя полоса заголовка: вкладки прямо в рамке окна, как в Edge.
         .with_decorations(false)
         .with_undecorated_shadow(true)
+        // фон самого окна виден в щелях между вкладками при переключении — не белый
+        .with_background_color(backdrop_color(window_dark_hint()))
         .build(&event_loop)?;
 
     let store = Store::load(data_dir());
@@ -396,6 +404,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 }
 
+/// Тёмная ли тема, ещё до создания окна: по настройке, а «как в системе» — по Windows.
+fn window_dark_hint() -> bool {
+    let settings: store::Settings = Store::load(data_dir()).settings;
+    match settings.theme.as_str() {
+        "dark" => true,
+        "light" => false,
+        _ => system::system_prefers_dark(),
+    }
+}
+
 /// Папка с закладками, историей, настройками и профилем.
 /// Переменная RUST_BROWSER_DATA задаёт другую папку — для тестов и переносной версии.
 fn data_dir() -> PathBuf {
@@ -455,7 +473,7 @@ fn build_ui(
         .with_initialization_script(format!("window.__BOOT__ = {boot};"))
         .with_html(html)
         // Цвет до первой отрисовки, чтобы окно не вспыхивало белым в тёмной теме.
-        .with_background_color(if dark { (18, 19, 24, 255) } else { (243, 244, 249, 255) })
+        .with_background_color(backdrop_color(dark))
         .with_incognito(inprivate)
         .with_browser_accelerator_keys(false)
         .with_default_context_menus(false)
@@ -478,7 +496,7 @@ fn build_tab(app: &mut App, id: u32, bounds: Rect) -> wry::Result<WebView> {
     let (nav, title, load, popup) = (proxy.clone(), proxy.clone(), proxy.clone(), proxy.clone());
     let theme = app.page_theme();
     // Пока страница не отрисовалась, под ней цвет темы, а не белая вспышка.
-    let background = if app.dark() { (18, 19, 24, 255) } else { (255, 255, 255, 255) };
+    let background = backdrop_color(app.dark());
     let webview = WebViewBuilder::new_with_web_context(&mut app.web_context)
         .with_bounds(bounds)
         .with_background_color(background)
@@ -561,13 +579,19 @@ impl App {
         };
         let _ = self.ui.set_bounds(rect(0.0, 0.0, width, ui_height));
 
+        // Сначала показываем новую вкладку и только потом прячем остальные: иначе
+        // на миг не видно ни одной, и сквозь щель мелькает фон окна.
+        if let Some(webview) = self.active_webview() {
+            let _ = webview.set_bounds(rect(0.0, chrome, width, height - chrome));
+            let _ = webview.set_visible(true);
+        }
         for tab in &self.tabs {
-            let Some(webview) = &tab.webview else { continue };
-            let active = tab.id == self.active;
-            if active {
-                let _ = webview.set_bounds(rect(0.0, chrome, width, height - chrome));
+            if tab.id == self.active {
+                continue;
             }
-            let _ = webview.set_visible(active);
+            if let Some(webview) = &tab.webview {
+                let _ = webview.set_visible(false);
+            }
         }
     }
 
@@ -626,10 +650,15 @@ impl App {
     }
 
     fn apply_theme(&mut self) {
-        platform::style_window(self.window.hwnd(), self.dark());
+        let dark = self.dark();
+        platform::style_window(self.window.hwnd(), dark);
+        let backdrop = backdrop_color(dark);
+        self.window.set_background_color(Some(backdrop));
+        let _ = self.ui.set_background_color(backdrop);
         let theme = self.page_theme();
         for webview in self.tabs.iter().filter_map(|t| t.webview.as_ref()) {
             let _ = webview.set_theme(theme);
+            let _ = webview.set_background_color(backdrop);
         }
         self.dirty = true;
     }
