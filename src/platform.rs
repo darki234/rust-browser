@@ -18,11 +18,13 @@ use std::{
 use tao::event_loop::EventLoopProxy;
 use webview2_com::{
     take_pwstr, AcceleratorKeyPressedEventHandler, BytesReceivedChangedEventHandler,
+    BrowserExtensionEnableCompletedHandler, BrowserExtensionRemoveCompletedHandler,
     CapturePreviewCompletedHandler, ContainsFullScreenElementChangedEventHandler,
     DownloadStartingEventHandler, FaviconChangedEventHandler,
     FindActiveMatchIndexChangedEventHandler, FindMatchCountChangedEventHandler,
     FindStartCompletedHandler, HistoryChangedEventHandler,
     IsDocumentPlayingAudioChangedEventHandler, Microsoft::Web::WebView2::Win32::*,
+    ProfileAddBrowserExtensionCompletedHandler, ProfileGetBrowserExtensionsCompletedHandler,
     StateChangedEventHandler, TrySuspendCompletedHandler, WebResourceRequestedEventHandler,
     ZoomFactorChangedEventHandler,
 };
@@ -346,6 +348,95 @@ pub fn set_passwords(webview: &WebView, enabled: bool) {
             let _ = profile.SetIsPasswordAutosaveEnabled(enabled);
             let _ = profile.SetIsGeneralAutofillEnabled(true);
         }
+    }
+}
+
+// ---------- расширения ----------
+
+fn profile7(webview: &WebView) -> Option<ICoreWebView2Profile7> {
+    unsafe {
+        webview
+            .webview()
+            .cast::<ICoreWebView2_13>()
+            .and_then(|core| core.Profile())
+            .and_then(|profile| profile.cast::<ICoreWebView2Profile7>())
+            .ok()
+    }
+}
+
+unsafe fn extension_text(
+    get: impl FnOnce(*mut PWSTR) -> windows::core::Result<()>,
+) -> Option<String> {
+    let mut text = PWSTR::null();
+    get(&mut text).ok()?;
+    Some(take_pwstr(text))
+}
+
+/// Ставит распакованное расширение в профиль, если его там ещё нет, и сообщает его id.
+/// `reinstall` — сначала убрать прежнюю версию (её узнаём по части имени).
+pub fn install_extension(
+    webview: &WebView,
+    folder: &Path,
+    name_part: &'static str,
+    reinstall: bool,
+    done: impl FnOnce(Option<String>) + 'static,
+) {
+    let Some(profile) = profile7(webview) else { return done(None) };
+    let folder = HSTRING::from(folder.as_os_str());
+    let adder = profile.clone();
+    let handler = ProfileGetBrowserExtensionsCompletedHandler::create(Box::new(move |result, list| unsafe {
+        let mut existing = Vec::new();
+        if let (Ok(()), Some(list)) = (result, list) {
+            let mut count = 0u32;
+            list.Count(&mut count)?;
+            for index in 0..count {
+                let ext = list.GetValueAtIndex(index)?;
+                if extension_text(|p| ext.Name(p)).is_some_and(|name| name.contains(name_part)) {
+                    existing.push(ext);
+                }
+            }
+        }
+        if !reinstall {
+            if let Some(ext) = existing.first() {
+                done(extension_text(|p| ext.Id(p)));
+                return Ok(());
+            }
+        }
+        for ext in &existing {
+            let _ = ext.Remove(&BrowserExtensionRemoveCompletedHandler::create(Box::new(|_| Ok(()))));
+        }
+        let added = ProfileAddBrowserExtensionCompletedHandler::create(Box::new(move |result, ext| {
+            let id = result.ok().and(ext).and_then(|ext| extension_text(|p| ext.Id(p)));
+            done(id);
+            Ok(())
+        }));
+        adder.AddBrowserExtension(&folder, &added)?;
+        Ok(())
+    }));
+    unsafe {
+        let _ = profile.GetBrowserExtensions(&handler);
+    }
+}
+
+/// Включает или выключает расширение с этим id.
+pub fn enable_extension(webview: &WebView, id: &str, enabled: bool) {
+    let Some(profile) = profile7(webview) else { return };
+    let id = id.to_string();
+    let handler = ProfileGetBrowserExtensionsCompletedHandler::create(Box::new(move |result, list| unsafe {
+        let (Ok(()), Some(list)) = (result, list) else { return Ok(()) };
+        let mut count = 0u32;
+        list.Count(&mut count)?;
+        for index in 0..count {
+            let ext = list.GetValueAtIndex(index)?;
+            if extension_text(|p| ext.Id(p)).as_deref() == Some(id.as_str()) {
+                let done = BrowserExtensionEnableCompletedHandler::create(Box::new(|_| Ok(())));
+                ext.Enable(enabled, &done)?;
+            }
+        }
+        Ok(())
+    }));
+    unsafe {
+        let _ = profile.GetBrowserExtensions(&handler);
     }
 }
 

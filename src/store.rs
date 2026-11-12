@@ -50,6 +50,8 @@ pub struct Settings {
     pub wallpaper_dim: u32,
     /// Растёт при каждой смене фото: интерфейс не возьмёт старую картинку из кэша.
     pub wallpaper_version: u64,
+    /// Какая версия uBlock Origin Lite установлена в профиль.
+    pub ubol_version: String,
 }
 
 impl Default for Settings {
@@ -67,6 +69,7 @@ impl Default for Settings {
             wallpaper: "aurora".to_string(),
             wallpaper_dim: 35,
             wallpaper_version: 0,
+            ubol_version: String::new(),
         }
     }
 }

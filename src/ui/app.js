@@ -1305,6 +1305,19 @@ function wallpaperSetting() {
     dimRow);
 }
 
+/** Кнопка настроек uBlock Origin Lite: его собственная страница во вкладке. */
+function ubolButton() {
+  const button = h('button', {
+    class: 'text-btn outline',
+    onclick: () => {
+      send('open', { url: `chrome-extension://${S.ubolId}/dashboard.html`, newTab: true });
+      closeHub();
+    },
+  }, 'Фильтры');
+  settingsUpdaters.push(() => { button.style.display = S.ubolId ? '' : 'none'; });
+  return button;
+}
+
 function settingsPage() {
   settingsUpdaters = [];
   const cards = [
@@ -1330,7 +1343,10 @@ function settingsPage() {
         segmented([[5, '5 мин'], [15, '15 мин'], [30, '30 мин'], [60, '1 ч'], [0, 'Никогда']],
           () => S.settings.sleepMinutes, (value) => set('sleep_minutes', value))),
       setting('Блокировка рекламы и трекеров',
-        () => `Около 3 600 рекламных доменов · заблокировано запросов: ${S.blockedTotal.toLocaleString('ru-RU')}`,
+        () => S.ubolId
+          ? 'uBlock Origin Lite: фильтры uBlock, EasyList, EasyPrivacy и другие'
+          : `Около 3 600 рекламных доменов · заблокировано запросов: ${S.blockedTotal.toLocaleString('ru-RU')}`,
+        ubolButton(),
         toggle(() => S.adblock, (value) => set('adblock', value)))),
 
     h('div', { class: 'card' }, h('h2', {}, 'Загрузки'),

@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod adblock;
+mod extension;
 mod platform;
 mod store;
 
@@ -78,6 +79,10 @@ pub enum UserEvent {
     Find(u32, i32, i32),
     /// Снимок страницы для фона меню и библиотеки.
     Captured(Option<Vec<u8>>),
+    /// uBlock Origin Lite распакован в эту папку.
+    ExtensionReady(PathBuf),
+    /// uBlock Origin Lite установлен в профиль; id нужен для включения и настроек.
+    ExtensionInstalled(Option<String>),
 }
 
 pub enum DownloadEvent {
@@ -170,6 +175,8 @@ struct App {
     web_context: WebContext,
     store: Store,
     inprivate: bool,
+    /// id установленного uBlock Origin Lite.
+    ubol_id: Option<String>,
     tabs: Vec<Tab>,
     active: u32,
     next_id: u32,
@@ -244,6 +251,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         web_context,
         store,
         inprivate,
+        ubol_id: None,
         tabs: Vec::new(),
         active: 0,
         next_id: 1,
@@ -268,6 +276,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     app.apply_theme();
     app.restore_session();
+    // Распаковка uBlock Origin Lite (31 МБ при первом запуске) — в фоне, чтобы не тормозить старт.
+    let unpacked = app.proxy.clone();
+    std::thread::spawn(move || match extension::ensure_unpacked(&data_dir()) {
+        Ok(path) => {
+            let _ = unpacked.send_event(UserEvent::ExtensionReady(path));
+        }
+        Err(error) => eprintln!("не удалось распаковать uBlock Origin Lite: {error}"),
+    });
     // Адреса из командной строки (например, ссылка, открытая этим браузером) — новыми вкладками.
     for url in std::env::args().skip(1).filter(|arg| !arg.starts_with("--")) {
         let url = to_url(&url, search_url(&app.store.settings.search));
@@ -377,6 +393,8 @@ fn build_ui(
         .with_browser_accelerator_keys(false)
         .with_default_context_menus(false)
         .with_hotkeys_zoom(false)
+        // Расширения включаются на уровне всего профиля: у всех webview одинаково.
+        .with_browser_extensions_enabled(true)
         // Интерфейс не должен уходить на сайты, например от перетаскивания ссылки.
         .with_navigation_handler(|url| !url.starts_with("http"))
         .with_ipc_handler(move |request: Request<String>| {
@@ -398,6 +416,7 @@ fn build_tab(app: &mut App, id: u32, bounds: Rect) -> wry::Result<WebView> {
         .with_bounds(bounds)
         .with_background_color(background)
         .with_incognito(app.inprivate)
+        .with_browser_extensions_enabled(true)
         .with_devtools(true)
         .with_theme(theme)
         .with_navigation_handler(move |url| {
@@ -845,6 +864,26 @@ impl App {
                 }
             }
             UserEvent::Captured(bytes) => self.finish_overlay(bytes),
+            UserEvent::ExtensionReady(path) => {
+                let reinstall = self.store.settings.ubol_version != extension::VERSION;
+                let proxy = self.proxy.clone();
+                platform::install_extension(&self.ui, &path, "uBlock", reinstall, move |id| {
+                    let _ = proxy.send_event(UserEvent::ExtensionInstalled(id));
+                });
+            }
+            UserEvent::ExtensionInstalled(id) => {
+                let Some(id) = id else {
+                    eprintln!("uBlock Origin Lite не установился, работает только свой список доменов");
+                    return;
+                };
+                if self.store.settings.ubol_version != extension::VERSION {
+                    self.store.settings.ubol_version = extension::VERSION.to_string();
+                    self.store.save_settings();
+                }
+                platform::enable_extension(&self.ui, &id, self.store.settings.adblock);
+                self.ubol_id = Some(id);
+                self.dirty = true;
+            }
         }
     }
 
@@ -1122,6 +1161,9 @@ impl App {
             "adblock" => {
                 settings.adblock = value.as_bool().unwrap_or(settings.adblock);
                 self.adblock.store(settings.adblock, Ordering::Relaxed);
+                if let Some(id) = &self.ubol_id {
+                    platform::enable_extension(&self.ui, id, settings.adblock);
+                }
             }
             "restore_session" => {
                 settings.restore_session = value.as_bool().unwrap_or(settings.restore_session)
@@ -1543,6 +1585,7 @@ impl App {
                 "wallpaperUrl": format!("http://rb.localhost/wallpaper?v={}", settings.wallpaper_version),
                 "hasImage": wallpaper_file().is_some(),
             },
+            "ubolId": self.ubol_id,
             "dark": self.dark(),
             "maximized": self.maximized,
             "fullscreen": self.is_fullscreen(),
