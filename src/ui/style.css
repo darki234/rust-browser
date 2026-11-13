@@ -1689,8 +1689,11 @@ body.glass .setcats { background: transparent; }
 
 /* «Компас»: значок выпрыгивает, кольцо дорисовывается, стрелка докручивается до севера */
 .s-compass .sq { transform-origin: 50px 50px; animation: s-pop .6s var(--spring) backwards; }
-.s-compass .ring { stroke-dasharray: 100; animation: s-draw .7s .15s var(--ease) backwards; transform: rotate(-90deg); transform-origin: 50px 50px; }
-.s-compass .needle { transform-origin: 50px 50px; animation: s-spin 1s .2s cubic-bezier(.15, .9, .25, 1.15) backwards; }
+.s-compass .ring { stroke-dasharray: 100; animation: s-draw .8s .3s var(--ease) backwards; }
+.s-compass .needle { transform-origin: 50px 52px; animation: s-planet .8s .15s var(--spring) backwards; }
+.s-compass .spark { transform-origin: 80px 28px; animation: s-twinkle .7s .75s var(--spring) backwards; }
+@keyframes s-planet { from { opacity: 0; transform: scale(.2); } }
+@keyframes s-twinkle { from { opacity: 0; transform: scale(0) rotate(-90deg); } }
 .s-compass .slogo::before {
   content: "";
   position: absolute;
@@ -1844,7 +1847,7 @@ body.glass .setcats { background: transparent; }
 
 /* ---------- «Остров»: панель — компактная капсула по центру ---------- */
 /* ширину (--island-w, проценты окна) и скругление (--island-r) задают параметры */
-body.bar-island { --island-w: 62; --island-r: 23px; }
+:root { --island-w: 62; --island-r: 23px; } /* настоящие значения ставит app.js на :root — на body они бы их перекрыли */
 body.bar-island #chrome {
   padding-bottom: 8px;
   background: radial-gradient(120% 220% at 0% 0%, var(--frame-glow), transparent 55%), var(--frame);
@@ -1971,3 +1974,7 @@ body.island-float #hub { top: calc(var(--bar-h) - var(--page-top) + 14px); }
 body.island-float #chrome { background: transparent; }
 body.island-float #titlebar { background: radial-gradient(120% 220% at 0% 0%, var(--frame-glow), transparent 55%), var(--frame); }
 body.glass.island-float #titlebar { background: radial-gradient(120% 220% at 0% 0%, var(--frame-glow), transparent 55%), var(--glass-frame); }
+
+#translatebtn, #pipbtn { display: none; color: var(--muted); }
+#translatebtn.show, #pipbtn.show { display: grid; }
+#translatebtn.on { color: var(--accent); }

@@ -20,7 +20,8 @@ use tao::event_loop::EventLoopProxy;
 use webview2_com::{
     take_pwstr, AcceleratorKeyPressedEventHandler, BytesReceivedChangedEventHandler,
     BrowserExtensionEnableCompletedHandler, BrowserExtensionRemoveCompletedHandler,
-    CallDevToolsProtocolMethodCompletedHandler, CapturePreviewCompletedHandler,
+    AddScriptToExecuteOnDocumentCreatedCompletedHandler, CallDevToolsProtocolMethodCompletedHandler,
+    CapturePreviewCompletedHandler, ProcessFailedEventHandler,
     ContainsFullScreenElementChangedEventHandler,
     DownloadStartingEventHandler, FaviconChangedEventHandler,
     FindActiveMatchIndexChangedEventHandler, FindMatchCountChangedEventHandler,
@@ -94,6 +95,7 @@ pub enum Hotkey {
     TaskManager,
     /// Ctrl+Shift+E — боковая панель.
     Panel,
+    Pip,
     Find,
     ZoomIn,
     ZoomOut,
@@ -140,6 +142,7 @@ impl Hotkey {
             (false, false, true) if key == RIGHT => Self::Forward,
             (false, false, true) if letter('D') => Self::FocusUrl,
             (false, false, true) if letter('F') => Self::Menu,
+            (false, false, true) if letter('P') => Self::Pip,
             (true, false, false) if letter('T') => Self::NewTab,
             (true, false, false) if letter('N') => Self::NewWindow,
             (true, false, false) if letter('W') => Self::CloseTab,
@@ -341,6 +344,70 @@ pub fn hook_messages(webview: &WebView, tab: u32, proxy: Proxy) {
     }));
     unsafe {
         let _ = webview.webview().add_WebMessageReceived(&handler, &mut 0i64);
+    }
+}
+
+/// Упал процесс страницы — показываем свою страницу «Вкладка аварийно закрылась».
+/// Упал весь движок — браузер перезапускается сам, вкладки вернутся из сеанса.
+pub fn hook_crashes(webview: &WebView, tab: u32, proxy: Proxy) {
+    let handler = ProcessFailedEventHandler::create(Box::new(move |_, args| {
+        let Some(args) = args else { return Ok(()) };
+        let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
+        unsafe { args.ProcessFailedKind(&mut kind)? };
+        let event = match kind {
+            COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED => UserEvent::LoadFailed(tab, "crash"),
+            COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE => UserEvent::LoadFailed(tab, "hang"),
+            COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED => UserEvent::EngineCrashed,
+            _ => return Ok(()), // упавшие рамки и служебные процессы движок поднимает сам
+        };
+        let _ = proxy.send_event(event);
+        Ok(())
+    }));
+    unsafe {
+        let _ = webview.webview().add_ProcessFailed(&handler, &mut 0i64);
+    }
+}
+
+/// Скрипт, который выполняется в каждом новом документе вкладки. Прежний (если был)
+/// снимается: так тёмную тему для сайтов можно включать и выключать на лету.
+pub fn set_document_script(webview: &WebView, slot: &Arc<std::sync::Mutex<Option<String>>>, script: Option<&str>) {
+    let core = webview.webview();
+    unsafe {
+        if let Some(old) = slot.lock().ok().and_then(|mut s| s.take()) {
+            let _ = core.RemoveScriptToExecuteOnDocumentCreated(&HSTRING::from(old));
+        }
+        let Some(script) = script else { return };
+        let slot = slot.clone();
+        let handler = AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(move |result, id| {
+            if result.is_ok() {
+                if let Ok(mut s) = slot.lock() {
+                    *s = Some(id);
+                }
+            }
+            Ok(())
+        }));
+        let _ = core.AddScriptToExecuteOnDocumentCreated(&HSTRING::from(script), &handler);
+    }
+}
+
+/// Заголовок документа во вкладке.
+pub fn document_title(webview: &WebView) -> String {
+    let mut title = PWSTR::null();
+    unsafe {
+        if webview.webview().DocumentTitle(&mut title).is_err() {
+            return String::new();
+        }
+    }
+    take_pwstr(title)
+}
+
+/// Выполняет скрипт так, будто его запустил щелчок пользователя: без этого
+/// «картинку в картинке» и полноэкранный режим страница не разрешит.
+pub fn run_with_gesture(webview: &WebView, script: &str) {
+    let params = serde_json::json!({ "expression": script, "userGesture": true, "awaitPromise": false }).to_string();
+    let handler = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|_, _| Ok(())));
+    unsafe {
+        let _ = webview.webview().CallDevToolsProtocolMethod(w!("Runtime.evaluate"), &HSTRING::from(params), &handler);
     }
 }
 

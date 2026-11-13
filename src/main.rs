@@ -139,6 +139,10 @@ pub enum UserEvent {
     ExtChanged,
     ExtPopupMeasure,
     ExtPopupSize(f64, f64),
+    /// Упал весь движок WebView2 — перезапуск браузера.
+    EngineCrashed,
+    /// Язык открытой страницы (lang у html).
+    PageLang(u32, String),
     /// Появился новый значок сайта — перерисовать плитки.
     IconSaved,
     /// Ключ аккаунта посчитан и проверен (или ошибка).
@@ -192,6 +196,10 @@ struct Tab {
     failed: bool,
     /// На странице есть поле пароля — показываем ключ, если для сайта есть пароли.
     pw_form: bool,
+    /// Язык страницы — чтобы предложить перевод.
+    lang: String,
+    /// id скрипта тёмной темы для сайтов в этой вкладке (его снимают при смене настройки).
+    dark_script: Arc<Mutex<Option<String>>>,
 }
 
 impl Tab {
@@ -217,6 +225,8 @@ impl Tab {
             restore_scroll: None,
             failed: false,
             pw_form: false,
+            lang: String::new(),
+            dark_script: Default::default(),
         }
     }
 
@@ -291,6 +301,8 @@ struct App {
     ext_browsers: Vec<(String, usize)>,
     /// Расширения, которые ставит синхронизация: об ошибках не сообщаем.
     ext_quiet: std::collections::HashSet<String>,
+    /// Предзагрузка с плитки: (вкладка, адрес, скрытый webview, который уже грузит сайт).
+    prewarm: Option<(u32, String, WebView)>,
     /// Аккаунт для синхронизации (None — не вошли).
     account: Option<sync::Account>,
     account_busy: bool,
@@ -446,6 +458,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ext_popup: None,
         ext_browsers: Vec::new(),
         ext_quiet: Default::default(),
+        prewarm: None,
         account: None,
         account_busy: false,
         account_folder: None,
@@ -749,6 +762,7 @@ fn build_tab(app: &mut App, id: u32, bounds: Rect) -> wry::Result<WebView> {
         .with_initialization_script(passwords::PAGE_SCRIPT)
         .with_initialization_script(webstore::STORE_SCRIPT)
         .with_initialization_script(SCROLL_SCRIPT)
+        .with_initialization_script(PREFETCH_SCRIPT)
         .with_navigation_handler(move |url| {
             let _ = nav.send_event(UserEvent::UrlChanged(id, url));
             true
@@ -772,10 +786,14 @@ fn build_tab(app: &mut App, id: u32, bounds: Rect) -> wry::Result<WebView> {
     platform::hook_adblock(&webview, id, app.adblock.clone(), proxy.clone());
     platform::hook_history(&webview, id, proxy.clone());
     platform::hook_messages(&webview, id, proxy.clone());
+    platform::hook_crashes(&webview, id, proxy.clone());
     platform::hook_page_state(&webview, id, proxy.clone());
     platform::hook_find(&webview, id, proxy.clone());
     platform::hook_load_errors(&webview, id, proxy.clone());
     platform::hook_downloads(&webview, app.download_dir.clone(), proxy);
+    if let Some(tab) = app.tab(id) {
+        platform::set_document_script(&webview, &tab.dark_script, Some(&dark_sites_script(&app.store.settings)));
+    }
     // встроенное сохранение паролей WebView2 выключено: пароли хранит свой менеджер
     platform::set_passwords(&webview, false);
     Ok(webview)
@@ -1251,6 +1269,33 @@ impl App {
     fn navigate(&mut self, id: u32, url: &str) {
         let Some(index) = self.index_of(id) else { return };
 
+        // наведение на плитку уже начало грузить этот сайт — просто показываем его
+        if self.tabs[index].webview.is_none() {
+            if let Some((new_id, _, webview)) = self.prewarm.take_if(|(_, address, _)| address == url) {
+                // у заранее созданной вкладки свой номер (её события не путались с новой
+                // вкладкой) — она просто встаёт на место новой вкладки
+                let mut tab = Tab::new(new_id, url, "", false);
+                tab.url = webview.url().unwrap_or_else(|_| url.to_string());
+                tab.title = platform::document_title(&webview);
+                tab.webview = Some(webview);
+                self.tabs[index] = tab;
+                if self.active == id {
+                    self.active = new_id;
+                }
+                self.sync_location(new_id);
+                self.detect_language(new_id);
+                self.collect_site_icon(new_id);
+                platform::raise(&self.ui);
+                self.reset_overlay();
+                self.dirty = true;
+                self.session_dirty = true;
+                self.layout();
+                self.update_title();
+                self.focus_content();
+                return;
+            }
+        }
+        self.prewarm = None; // заготовка была под другой сайт
         if self.tabs[index].webview.is_none() {
             let bounds = self.page_rect();
             match build_tab(self, id, bounds) {
@@ -1331,6 +1376,7 @@ impl App {
                         self.history_dirty = true;
                     }
                     self.collect_site_icon(id);
+                    self.detect_language(id);
                 }
             }
             UserEvent::HistoryChanged(id) => self.sync_location(id),
@@ -1375,6 +1421,21 @@ impl App {
             UserEvent::Page(id, url, raw) => self.handle_page(id, &url, &raw),
             UserEvent::ExtReady(result, tab) => self.extension_ready(result, tab),
             UserEvent::AccountReady(result) => self.account_ready(result),
+            UserEvent::EngineCrashed => {
+                // движок упал целиком: все вкладки мертвы — перезапускаемся, сеанс восстановится
+                self.save_session();
+                self.store.save_all();
+                system::restart(None);
+                self.quit = true;
+            }
+            UserEvent::PageLang(id, lang) => {
+                if let Some(tab) = self.tab_mut(id) {
+                    if tab.lang != lang {
+                        tab.lang = lang;
+                        self.dirty = true;
+                    }
+                }
+            }
             UserEvent::IconSaved => {
                 let _ = self.ui.evaluate_script("ui.iconsUpdated()");
             }
@@ -1508,6 +1569,11 @@ impl App {
             Hotkey::PasteGo => self.paste_and_go(),
             Hotkey::TaskManager => self.open_hub("tasks"),
             Hotkey::Panel => self.toggle_panel(),
+            Hotkey::Pip => {
+                if let Some(webview) = self.active_webview() {
+                    platform::run_with_gesture(webview, PIP_SCRIPT);
+                }
+            }
             Hotkey::ZoomIn => self.zoom_step(1),
             Hotkey::ZoomOut => self.zoom_step(-1),
             Hotkey::ZoomReset => self.zoom_step(0),
@@ -1863,6 +1929,13 @@ impl App {
                 }
             }
             "island_tabs" => settings.island_tabs = value.as_bool().unwrap_or(settings.island_tabs),
+            "dark_all" => {
+                settings.dark_all = value.as_bool().unwrap_or(settings.dark_all);
+                self.store.save_settings();
+                self.apply_dark_sites();
+                self.dirty = true;
+                return;
+            }
             "buttons" => {
                 // только http(s), не больше 12 кнопок, короткие названия
                 let Ok(list) = serde_json::from_value::<Vec<store::CustomButton>>(value.clone()) else { return };
@@ -2144,6 +2217,61 @@ impl App {
             }
 
             // слои поверх страницы
+            "pip" => {
+                if let Some(webview) = self.active_webview() {
+                    platform::run_with_gesture(webview, PIP_SCRIPT);
+                }
+            }
+            "translate" => {
+                let Some(tab) = self.active_tab() else { return };
+                let target = if message["original"].as_bool().unwrap_or(false) {
+                    untranslate_url(&tab.url)
+                } else {
+                    translate_url(&tab.url)
+                };
+                if let Some(target) = target {
+                    self.navigate(self.active, &target);
+                }
+            }
+            "dark_site" => {
+                // тёмная тема для сайта во вкладке: включить или выключить
+                let Some(host) = self.active_tab().and_then(|t| adblock::host_of(&t.url)).map(|h| h.trim_start_matches("www.").to_string()) else { return };
+                let list = &mut self.store.settings.dark_sites;
+                if let Some(at) = list.iter().position(|h| *h == host) {
+                    list.remove(at);
+                } else {
+                    list.push(host);
+                }
+                self.store.save_settings();
+                self.apply_dark_sites();
+            }
+            "dark_site_remove" => {
+                let host = text("host");
+                self.store.settings.dark_sites.retain(|h| *h != host);
+                self.store.save_settings();
+                self.apply_dark_sites();
+            }
+            "prewarm" => {
+                // наведение на плитку новой вкладки: начинаем грузить сайт заранее
+                let url = text("url");
+                if self.active_tab().is_none_or(|t| !t.is_start()) {
+                    return;
+                }
+                if !url.starts_with("http") || self.prewarm.as_ref().is_some_and(|(_, u, _)| *u == url) {
+                    return;
+                }
+                self.prewarm = None;
+                let id = self.next_id;
+                self.next_id += 1;
+                let bounds = self.page_rect();
+                if let Ok(webview) = build_tab(self, id, bounds) {
+                    let _ = webview.set_visible(false);
+                    let _ = webview.load_url(&url);
+                    platform::raise(&self.ui);
+                    self.prewarm = Some((id, url, webview));
+                }
+            }
+            "prewarm_cancel" => self.prewarm = None,
             "my_button" => {
                 // уже открыт этот сайт — переключаемся на его вкладку, иначе открываем новую
                 let url = text("url");
@@ -2621,6 +2749,8 @@ impl App {
                     "audio": tab.audio,
                     "muted": tab.muted,
                     "sleeping": tab.sleeping || (tab.webview.is_none() && !tab.url.is_empty()),
+                    "lang": tab.lang,
+                    "dark": adblock::host_of(&tab.url).is_some_and(|h| self.store.settings.dark_sites.iter().any(|d| d == h.trim_start_matches("www."))),
                 })
             })
             .collect();
@@ -2657,6 +2787,8 @@ impl App {
                 "islandWidth": settings.island_width,
                 "islandRadius": settings.island_radius,
                 "islandTabs": settings.island_tabs,
+                "darkAll": settings.dark_all,
+                "darkSites": settings.dark_sites,
                 "buttons": settings.buttons,
                 "splash": settings.splash,
                 "motion": settings.motion,
@@ -2711,6 +2843,33 @@ impl App {
 }
 
 impl App {
+    // ---------- тёмные сайты, перевод ----------
+
+    /// Перерегистрирует скрипт тёмной темы во всех вкладках и сразу применяет его.
+    fn apply_dark_sites(&mut self) {
+        let script = dark_sites_script(&self.store.settings);
+        for tab in &self.tabs {
+            if let Some(webview) = &tab.webview {
+                platform::set_document_script(webview, &tab.dark_script, Some(&script));
+                let _ = webview.evaluate_script(&script);
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Язык страницы: если он не русский, на панели появится кнопка перевода.
+    fn detect_language(&self, id: u32) {
+        let Some(webview) = self.tab(id).and_then(|t| t.webview.as_ref()) else { return };
+        let proxy = self.proxy.clone();
+        let _ = webview.evaluate_script_with_callback(
+            "(document.documentElement.lang || document.querySelector('meta[http-equiv=content-language]')?.content || '').slice(0, 12)",
+            move |json| {
+                let lang: String = serde_json::from_str(&json).unwrap_or_default();
+                let _ = proxy.send_event(UserEvent::PageLang(id, lang.to_ascii_lowercase()));
+            },
+        );
+    }
+
     // ---------- значки сайтов ----------
 
     /// Открытая страница сама говорит, где её значки: берём их, если для сайта ещё нет картинки.
@@ -3183,6 +3342,96 @@ fn register_icons(list: &[webstore::Installed], ubol: Option<(&str, &Path)>) {
 fn extension_icon(id: &str) -> Option<PathBuf> {
     let guard = EXT_ICONS.lock().ok()?;
     guard.iter().find(|(k, _)| k == id).map(|(_, p)| p.clone())
+}
+
+/// Предзагрузка ссылок: при наведении на ссылку своего сайта Chromium начинает грузить
+/// её заранее (правила speculation rules, «moderate» — после короткой задержки наведения).
+const PREFETCH_SCRIPT: &str = r#"(() => {
+  if (window.top !== window || !HTMLScriptElement.supports || !HTMLScriptElement.supports('speculationrules')) return;
+  const add = () => {
+    if (!document.head || document.getElementById('__rb_prefetch')) return;
+    const s = document.createElement('script');
+    s.type = 'speculationrules';
+    s.id = '__rb_prefetch';
+    s.textContent = JSON.stringify({ prefetch: [{ source: 'document', eagerness: 'moderate',
+      where: { and: [{ href_matches: '/*' }, { not: { selector_matches: '[rel~=nofollow], [href*=logout], [href*=signout], [href*=exit]' } }] } }] });
+    document.head.append(s);
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', add); else add();
+})();"#;
+
+/// «Картинка в картинке»: самое крупное видео на странице; повторно — вернуть обратно.
+const PIP_SCRIPT: &str = r#"(async () => {
+  if (document.pictureInPictureElement) return document.exitPictureInPicture();
+  const all = [...document.querySelectorAll('video')].filter((v) => v.readyState > 0 && !v.disablePictureInPicture);
+  all.sort((a, b) => (!b.paused - !a.paused) || (b.clientWidth * b.clientHeight - a.clientWidth * a.clientHeight));
+  if (all[0]) await all[0].requestPictureInPicture();
+})()"#;
+
+/// Тёмная тема для сайтов: инверсия цветов страницы с возвратом картинок и видео.
+/// Срабатывает для сайтов из списка или для всех; уже тёмные сайты при «для всех» не трогаем.
+fn dark_sites_script(settings: &store::Settings) -> String {
+    let sites = serde_json::to_string(&settings.dark_sites).unwrap_or_else(|_| "[]".into());
+    format!(
+        r#"(() => {{
+  const SITES = {sites}, ALL = {all};
+  const host = location.hostname.replace(/^www\./, '');
+  const on = SITES.includes(host) || (ALL && /^https?:/.test(location.protocol));
+  const apply = () => {{
+    let style = document.getElementById('__rb_dark');
+    if (!on) {{ style?.remove(); return true; }}
+    if (!document.documentElement) return false;
+    if (!style) {{
+      style = document.createElement('style');
+      style.id = '__rb_dark';
+      style.textContent = 'html{{filter:invert(.92) hue-rotate(180deg)!important;background:#fff!important}}' +
+        'img,video,picture,canvas,iframe,embed,object,svg image,[style*="background-image"]{{filter:invert(1) hue-rotate(180deg)!important}}';
+      document.documentElement.append(style);
+    }}
+    return true;
+  }};
+  if (!apply()) new MutationObserver((_, o) => {{ if (apply()) o.disconnect(); }}).observe(document, {{ childList: true }});
+  // «для всех сайтов»: у сайта уже тёмный фон — свою тему снимаем
+  if (on && ALL && !SITES.includes(host)) addEventListener('load', () => {{
+    const style = document.getElementById('__rb_dark');
+    if (!style) return;
+    style.disabled = true;
+    const bg = getComputedStyle(document.body || document.documentElement).backgroundColor;
+    const [r, g, b] = (bg.match(/\d+/g) || [255, 255, 255]).map(Number);
+    const transparent = /rgba\(.*,\s*0\)$/.test(bg);
+    style.disabled = !transparent && (r * .3 + g * .59 + b * .11) < 110;
+  }});
+}})();"#,
+        all = settings.dark_all
+    )
+}
+
+/// Адрес страницы через переводчик Google (https://сайт-ru.translate.goog/…): страница
+/// остаётся живой — ссылки, кнопки и прокрутка работают, а текст уже по-русски.
+fn translate_url(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
+    let (host, path) = rest.split_once('/').map(|(h, p)| (h, format!("/{p}"))).unwrap_or((rest, "/".into()));
+    if host.ends_with(".translate.goog") || host.contains(':') {
+        return None;
+    }
+    let encoded = host.replace('-', "--").replace('.', "-");
+    let (path, fragment) = path.split_once('#').map(|(p, f)| (p.to_string(), format!("#{f}"))).unwrap_or((path, String::new()));
+    let joiner = if path.contains('?') { '&' } else { '?' };
+    Some(format!("https://{encoded}.translate.goog{path}{joiner}_x_tr_sl=auto&_x_tr_tl=ru&_x_tr_hl=ru{fragment}"))
+}
+
+/// Обратно к оригиналу с переведённой страницы.
+fn untranslate_url(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://")?;
+    let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let encoded = host.strip_suffix(".translate.goog")?;
+    // «--» — дефис, «-» — точка
+    let original = encoded.replace("--", "\u{0}").replace('-', ".").replace('\u{0}', "-");
+    let (path, fragment) = path.split_once('#').map(|(p, f)| (p, format!("#{f}"))).unwrap_or((path, String::new()));
+    let (path, query) = path.split_once('?').unwrap_or((path, ""));
+    let query: Vec<&str> = query.split('&').filter(|p| !p.is_empty() && !p.starts_with("_x_tr_")).collect();
+    let query = if query.is_empty() { String::new() } else { format!("?{}", query.join("&")) };
+    Some(format!("https://{original}/{path}{query}{fragment}"))
 }
 
 /// Сообщает браузеру, куда листают страницу: «Остров» прячется при прокрутке вниз.
@@ -3978,6 +4227,17 @@ mod tests {
         assert!(!is_hex_color("#4f5bf"));
         assert!(!is_hex_color("#4f5bfz"));
         assert!(!is_hex_color("red;}body{"));
+    }
+
+    #[test]
+    fn translate_round_trip() {
+        let url = "https://my-site.example.com/path/a?q=1#top";
+        let t = translate_url(url).unwrap();
+        assert_eq!(t, "https://my--site-example-com.translate.goog/path/a?q=1&_x_tr_sl=auto&_x_tr_tl=ru&_x_tr_hl=ru#top");
+        assert_eq!(untranslate_url(&t).as_deref(), Some(url));
+        assert_eq!(translate_url("https://a.com").unwrap(), "https://a-com.translate.goog/?_x_tr_sl=auto&_x_tr_tl=ru&_x_tr_hl=ru");
+        assert_eq!(untranslate_url("https://a-com.translate.goog/?_x_tr_sl=auto&_x_tr_tl=ru").as_deref(), Some("https://a.com/"));
+        assert!(translate_url("file:///C:/a.html").is_none());
     }
 
     #[test]

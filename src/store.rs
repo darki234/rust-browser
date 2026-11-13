@@ -64,6 +64,9 @@ pub struct Settings {
     pub island_width: u32,
     pub island_radius: u32,
     pub island_tabs: bool,
+    /// Тёмная тема для сайтов: список сайтов и «для всех».
+    pub dark_sites: Vec<String>,
+    pub dark_all: bool,
     /// Свои кнопки на панели: сайт одним нажатием.
     pub buttons: Vec<CustomButton>,
     /// Когда журнал очищали (секунды Unix) — чтобы очистка дошла до других компьютеров.
@@ -116,6 +119,8 @@ impl Default for Settings {
             island_width: 62,
             island_radius: 100,
             island_tabs: false,
+            dark_sites: Vec::new(),
+            dark_all: false,
             buttons: Vec::new(),
             history_cleared: 0,
             splash: "compass".to_string(),

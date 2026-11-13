@@ -75,6 +75,9 @@ const ICONS = {
   eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
   eyeoff: '<path d="M10.6 5.1A10 10 0 0 1 12 5c6.5 0 10 7 10 7a17 17 0 0 1-2.2 3.1"/><path d="M6.6 6.6C3.7 8.4 2 12 2 12s3.5 7 10 7a9.7 9.7 0 0 0 5.4-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/><path d="m3 3 18 18"/>',
   puzzle: '<path d="M10 3.5a2 2 0 0 1 4 0V6h4a1 1 0 0 1 1 1v4h-2.5a2 2 0 0 0 0 4H19v4a1 1 0 0 1-1 1h-4v-2.5a2 2 0 0 0-4 0V20H6a1 1 0 0 1-1-1v-4h2.5a2 2 0 0 0 0-4H5V7a1 1 0 0 1 1-1h4z"/>',
+  translate: '<path d="M4 5h8"/><path d="M8 3v2"/><path d="M5.5 5c.8 3 3.3 5.6 6 6.5"/><path d="M10.5 5c-.7 3.2-3 6-6.5 7.5"/><path d="m12 20 4-9 4 9"/><path d="M13.4 17h5.2"/>',
+  pip: '<rect x="2.5" y="4.5" width="19" height="15" rx="2.5"/><rect x="12" y="11.5" width="7" height="5" rx="1" fill="currentColor"/>',
+  moon2: '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>',
   cut: '<circle cx="6" cy="18" r="3"/><circle cx="18" cy="18" r="3"/><path d="M8.1 15.9 18 4"/><path d="M15.9 15.9 6 4"/>',
   paste: '<rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4h6v2H9z"/>',
   pastego: '<rect x="4" y="4" width="11" height="16" rx="2"/><path d="M7 4h5v2H7z"/><path d="M14 15h7"/><path d="m18 12 3 3-3 3"/>',
@@ -613,6 +616,15 @@ function renderToolbar() {
 
   el.back.disabled = !tab.canBack;
   el.forward.disabled = !tab.canForward;
+  // перевод: страница не по-русски или уже переведённая (тогда — вернуть оригинал)
+  const translated = /\.translate\.goog\//.test(tab.url);
+  const foreign = !!tab.lang && !/^(ru|und)/.test(tab.lang) && /^https?:/.test(tab.url);
+  const tb = $('#translatebtn');
+  tb.classList.toggle('show', !tab.start && (translated || foreign));
+  tb.classList.toggle('on', translated);
+  tb.title = translated ? 'Показать оригинал' : 'Перевести страницу на русский';
+  // «картинка в картинке» — когда на странице играет видео
+  $('#pipbtn').classList.toggle('show', !tab.start && !!tab.audio);
   el.reload.disabled = tab.start;
   el.reload.classList.toggle('loading', tab.loading);
   el.reload.title = tab.loading ? 'Остановить (Esc)' : 'Обновить (F5)';
@@ -912,6 +924,7 @@ function focusUrl() {
 // ---------- стартовая страница ----------
 
 let tilesKey = null;
+let prewarmTimer = 0;
 let engineKey = null;
 
 const engineBtn = $('#engine');
@@ -1122,6 +1135,9 @@ function renderStart() {
       h('div', {
         class: 'tile', style: `--i:${index}`, title: bookmark.url,
         onclick: () => send('open', { url: bookmark.url }),
+        // наведение — сайт начинает грузиться заранее, щелчок покажет его почти мгновенно
+        onmouseenter: () => { clearTimeout(prewarmTimer); prewarmTimer = setTimeout(() => send('prewarm', { url: bookmark.url }), 140); },
+        onmouseleave: () => clearTimeout(prewarmTimer),
       }, favicon(bookmark.url, true), h('span', { class: 'name' }, bookmark.title || hostOf(bookmark.url))));
     el.tiles.replaceChildren(...(tiles.length
       ? tiles
@@ -1320,6 +1336,10 @@ function mainMenuNodes() {
     sep(),
     item({ icon: 'search', label: 'Найти на странице', kb: 'Ctrl+F', disabled: !page, onClick: () => setTimeout(openFind, 140) }),
     item({ icon: 'print', label: 'Печать', kb: 'Ctrl+P', disabled: !page, onClick: () => send('print') }),
+    item({ icon: 'translate', label: /\.translate\.goog\//.test(activeTab()?.url || '') ? 'Показать оригинал' : 'Перевести страницу', disabled: !page,
+      onClick: () => send('translate', { original: /\.translate\.goog\//.test(activeTab()?.url || '') }) }),
+    item({ icon: 'pip', label: 'Картинка в картинке', kb: 'Alt+P', disabled: !page, onClick: () => send('pip') }),
+    item({ icon: 'moon2', label: 'Тёмная тема для этого сайта', check: !!activeTab()?.dark, disabled: !page, onClick: () => send('dark_site') }),
     item({ icon: 'bar', label: 'Панель избранного', kb: 'Ctrl+Shift+B', check: S.settings.favbar,
       onClick: () => send('set', { key: 'favbar', value: !S.settings.favbar }) }),
     item({ icon: 'code', label: 'Инструменты разработчика', kb: 'F12', disabled: !page, onClick: () => send('devtools') }),
@@ -1839,6 +1859,17 @@ function defaultBrowserSetting() {
 // Поиск в шапке ищет по всем разделам сразу.
 let settingsCat = 'look';
 
+function darkSitesRow() {
+  const chips = h('div', { class: 'pw-never' });
+  const row = h('div', {}, chips);
+  settingsUpdaters.push(() => {
+    const sites = S.settings.darkSites || [];
+    chips.replaceChildren(...(sites.length ? [h('small', {}, 'Всегда тёмные: '), ...sites.map((site) =>
+      h('span', { class: 'pw-chip' }, site, h('button', { title: 'Убрать', onclick: () => send('dark_site_remove', { host: site }) }, '×')))] : []));
+  });
+  return row;
+}
+
 function glassSetting() {
   const range = h('input', { type: 'range', min: 0, max: 70, step: 5, class: 'range' });
   const value = h('span', { class: 'rangeval' });
@@ -1861,7 +1892,10 @@ const SETTINGS_CATS = [
       colorSetting(),
       setting('Подкрасить рамку окна', 'Полоса вкладок и панель слегка окрашиваются в цвет браузера',
         toggle(() => S.settings.tintFrame, (value) => set('tint_frame', value))),
-      glassSetting()),
+      glassSetting(),
+      setting('Тёмная тема для всех сайтов', 'Светлые сайты становятся тёмными, картинки и видео не меняются. Для одного сайта — меню «⋯» → «Тёмная тема для этого сайта»',
+        toggle(() => S.settings.darkAll, (value) => set('dark_all', value))),
+      darkSitesRow()),
     h('div', { class: 'card' }, h('h2', {}, 'Движение'),
       setting('Анимации', 'Как быстро и с каким характером всё появляется',
         segmented([['smooth', 'Плавные'], ['fast', 'Быстрые'], ['bouncy', 'Пружинистые'], ['off', 'Без анимаций']],
@@ -2222,6 +2256,9 @@ function showPasswordPicker() {
   ];
   showMenu('pwpick', nodes, placeAtKey);
 }
+
+$('#translatebtn').addEventListener('click', () => send('translate', { original: /\.translate\.goog\//.test(activeTab()?.url || '') }));
+$('#pipbtn').addEventListener('click', () => send('pip'));
 
 pwkey.addEventListener('click', () => {
   if (menuKind === 'pwsave' || menuKind === 'pwpick') return closeMenu();
@@ -2596,16 +2633,43 @@ function islandSettings() {
 // ---------- заставка запуска ----------
 
 const LOGO = `<svg class="logo" viewBox="0 0 100 100" aria-hidden="true">
-  <defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1">
-    <stop offset="0" stop-color="#6d7cff"/><stop offset=".55" stop-color="#a855f7"/><stop offset="1" stop-color="#ec4899"/>
-  </linearGradient></defs>
-  <rect class="sq" x="4" y="4" width="92" height="92" rx="24" fill="url(#lg)"/>
-  <circle class="ring" cx="50" cy="50" r="27" fill="none" stroke="#fff" stroke-width="6" pathLength="100"/>
-  <g class="needle"><path d="M66 34 L56 56 L44 44 Z" fill="#fff"/><path d="M34 66 L44 44 L56 56 Z" fill="#fff" opacity=".7"/></g>
+  <defs>
+    <linearGradient id="rb-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4f6bff"/>
+      <stop offset=".55" stop-color="#8b3dff"/>
+      <stop offset="1" stop-color="#ff4fa3"/>
+    </linearGradient>
+    <radialGradient id="rb-shine" cx=".28" cy=".18" r=".75">
+      <stop offset="0" stop-color="#fff" stop-opacity=".38"/>
+      <stop offset=".6" stop-color="#fff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="rb-planet" cx=".36" cy=".3" r=".8">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset=".55" stop-color="#efe8ff"/>
+      <stop offset="1" stop-color="#bba6ff"/>
+    </radialGradient>
+    <linearGradient id="rb-ring" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".95"/>
+      <stop offset="1" stop-color="#ffd3f0"/>
+    </linearGradient>
+  </defs>
+  <rect class="sq" x="4" y="4" width="92" height="92" rx="26" fill="url(#rb-bg)"/>
+  <rect x="4" y="4" width="92" height="92" rx="26" fill="url(#rb-shine)"/>
+  <g transform="rotate(-24 50 52)">
+    <ellipse class="ring" cx="50" cy="52" rx="36" ry="12.5" fill="none" stroke="url(#rb-ring)" stroke-width="5.5" stroke-opacity=".55" pathLength="100"/>
+  </g>
+  <g class="needle">
+    <circle cx="50" cy="52" r="19" fill="url(#rb-planet)"/>
+    <circle cx="44" cy="45" r="5" fill="#fff" opacity=".55"/>
+  </g>
+  <g transform="rotate(-24 50 52)">
+    <path class="ring front" pathLength="100" d="M14 52 A36 12.5 0 0 0 86 52" fill="none" stroke="url(#rb-ring)" stroke-width="5.5" stroke-linecap="round"/>
+  </g>
+  <path class="spark" d="M80 19 L82.2 25.8 L89 28 L82.2 30.2 L80 37 L77.8 30.2 L71 28 L77.8 25.8 Z" fill="#fff"/>
 </svg>`;
 
 const SPLASHES = {
-  compass: { name: 'Компас', ms: 1250 },
+  compass: { name: 'Орбита', ms: 1300 },
   aurora: { name: 'Сияние', ms: 1450 },
   warp: { name: 'Гиперпрыжок', ms: 1300 },
   minimal: { name: 'Минимализм', ms: 750 },
