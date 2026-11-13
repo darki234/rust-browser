@@ -1766,6 +1766,7 @@ function glassSetting() {
 }
 
 const SETTINGS_CATS = [
+  ['account', 'Аккаунт', () => accountCards()],
   ['look', 'Оформление', () => [
     h('div', { class: 'card' }, h('h2', {}, 'Тема и цвет'),
       setting('Тема', 'Как в Windows, светлая, тёмная или AMOLED — чистый чёрный, бережёт заряд на OLED-экранах',
@@ -1945,7 +1946,8 @@ function renderHubList(animate) {
     return;
   }
   if (hubSection === 'settings') {
-    const key = 'settings|' + settingsCat + '|' + el.hubq.value;
+    // вход и выход из аккаунта меняют сам вид раздела, а не только значения
+    const key = 'settings|' + settingsCat + '|' + el.hubq.value + '|' + ((S.account || {}).name || '');
     if (hubKey === key) {
       settingsUpdaters.forEach((update) => update());
       return;
@@ -2061,6 +2063,7 @@ window.ui = {
   dataCleared: () => toast('Данные сайтов удалены'),
   toast,
   passwordOffer,
+  accountError,
   extPopupBox,
   extensionInstalled: (name) => toast(`Расширение «${name}» установлено — оно в меню «пазла» на панели`),
   passwordRevealed,
@@ -2295,6 +2298,97 @@ function extensionsCards() {
     h('div', { class: 'card' }, h('h2', {}, 'Перенести из другого браузера'),
       h('div', { class: 'ext-hint' }, 'Копируются сами расширения. Их настройки и вход остаются в том браузере'),
       browsers),
+  ];
+}
+
+
+// ---------- аккаунт ----------
+
+let accountMode = 'login';
+let accountErrorText = '';
+
+function accountError(text) {
+  accountErrorText = text;
+  settingsUpdaters.forEach((update) => update());
+  toast(text);
+}
+
+function timeAgo(seconds) {
+  if (!seconds) return 'ещё не было';
+  const diff = Math.max(0, Date.now() / 1000 - seconds);
+  if (diff < 60) return 'только что';
+  if (diff < 3600) return `${Math.round(diff / 60)} мин назад`;
+  if (diff < 86400) return `${Math.round(diff / 3600)} ч назад`;
+  return new Date(seconds * 1000).toLocaleString('ru-RU', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' });
+}
+
+const SYNCED = [
+  ['gear', 'Параметры, темы, цвета и обои'], ['star', 'Избранное'], ['clock', 'Журнал'],
+  ['key', 'Пароли'], ['puzzle', 'Расширения'], ['zoom', 'Масштаб сайтов'], ['file', 'Заметки'],
+];
+
+function accountCards() {
+  const a = S.account || {};
+  if (a.name) {
+    const status = h('small', {});
+    const error = h('div', { class: 'acc-error' });
+    settingsUpdaters.push(() => {
+      const acc = S.account || {};
+      status.textContent = `Синхронизация: ${timeAgo(acc.synced)} · папка ${acc.folder}`;
+      error.textContent = acc.error ? `Ошибка: ${acc.error}` : '';
+      error.style.display = acc.error ? '' : 'none';
+    });
+    return [
+      h('div', { class: 'card' },
+        h('div', { class: 'acc-head' },
+          h('span', { class: 'acc-avatar' }, a.name.charAt(0).toUpperCase()),
+          h('div', { class: 'acc-who' }, h('b', {}, a.name), status),
+          h('button', { class: 'text-btn primary', onclick: () => send('account_sync') }, 'Синхронизировать'),
+          confirmButton('Выйти', 'Точно выйти?', () => send('account_logout'))),
+        error,
+        h('div', { class: 'acc-synced' }, ...SYNCED.map(([name, text]) => h('span', {}, icon(name, 14), text))),
+        h('div', { class: 'ext-hint acc-note' },
+          'Данные зашифрованы вашим паролем ещё на этом компьютере (AES-256). В облачной папке лежит только шифр. Синхронизация — при запуске, раз в 5 минут и при закрытии. Чтобы войти на другом компьютере, откройте там ту же облачную папку и войдите с этим именем и паролем')),
+    ];
+  }
+  const name = h('input', { type: 'text', class: 'field', placeholder: 'например, misha', spellcheck: 'false', autocomplete: 'off' });
+  const pass = h('input', { type: 'password', class: 'field', placeholder: 'не меньше 8 символов', autocomplete: 'new-password' });
+  const pass2 = h('input', { type: 'password', class: 'field', placeholder: 'ещё раз', autocomplete: 'new-password' });
+  const folderText = h('small', {});
+  const repeatRow = setting('Пароль ещё раз', 'Пароль не восстановить: без него данные в облаке не расшифровать никому, даже нам', pass2);
+  const modeSeg = segmented([['login', 'Войти'], ['create', 'Создать аккаунт']], () => accountMode, (value) => {
+    accountMode = value; accountErrorText = ''; settingsUpdaters.forEach((u) => u());
+  });
+  const error = h('div', { class: 'acc-error' });
+  const go = h('button', { class: 'text-btn primary', onclick: () => {
+    if (accountMode === 'create' && pass.value !== pass2.value) return accountError('Пароли не совпадают');
+    accountErrorText = '';
+    send(accountMode === 'create' ? 'account_create' : 'account_login',
+      { name: name.value, password: pass.value, folder: (S.account || {}).picked || '' });
+  } });
+  [name, pass, pass2].forEach((input) => input.addEventListener('keydown', (e) => { if (e.key === 'Enter') go.click(); }));
+  settingsUpdaters.push(() => {
+    const acc = S.account || {};
+    const folder = acc.picked || acc.defaultFolder;
+    folderText.textContent = folder ? folder : 'Папка не выбрана';
+    repeatRow.style.display = accountMode === 'create' ? '' : 'none';
+    go.textContent = acc.busy ? 'Проверяю…' : accountMode === 'create' ? 'Создать и синхронизировать' : 'Войти';
+    go.disabled = !!acc.busy;
+    error.textContent = accountErrorText;
+    error.style.display = accountErrorText ? '' : 'none';
+  });
+  return [
+    h('div', { class: 'card' }, h('h2', {}, 'Аккаунт Rust Browser'),
+      h('div', { class: 'ext-hint acc-intro' },
+        'Пароли, журнал, избранное, расширения, параметры и темы — одинаковые на всех ваших компьютерах. Всё шифруется вашим паролем и хранится в вашей же облачной папке (OneDrive, Яндекс Диск, Google Drive): своих серверов у браузера нет, и прочитать данные не сможет никто, кроме вас'),
+      setting('', '', modeSeg),
+      setting('Имя аккаунта', 'Любое: почта или ник', name),
+      setting('Пароль', 'Шифрует данные. Используйте надёжный и нигде больше не повторяйте', pass),
+      repeatRow,
+      h('div', { class: 'set' }, h('div', { class: 'label' }, 'Облачная папка', folderText),
+        h('div', { class: 'controls' }, h('button', { class: 'text-btn outline', onclick: () => send('account_pick_folder') }, 'Выбрать'))),
+      error,
+      h('div', { class: 'set' }, h('div', { class: 'label' }), h('div', { class: 'controls' }, go))),
   ];
 }
 

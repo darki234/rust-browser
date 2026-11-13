@@ -1826,3 +1826,16 @@ body.glass .setcats { background: transparent; }
 .ext-warn { display: flex; gap: 8px; align-items: flex-start; margin: 0 18px 14px; padding: 10px 12px; border-radius: 10px; background: var(--hover); color: var(--muted); line-height: 1.45; }
 .ext-warn svg { flex: none; margin-top: 2px; }
 .ext-hint { padding: 0 18px 4px; color: var(--muted); }
+
+/* ---------- аккаунт ---------- */
+.acc-head { display: flex; align-items: center; gap: 14px; padding: 16px 18px 10px; }
+.acc-avatar { flex: none; width: 48px; height: 48px; display: grid; place-items: center; border-radius: 50%; background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; font-size: 21px; font-weight: 600; }
+.acc-who { flex: 1; min-width: 0; }
+.acc-who b { display: block; font-size: 16px; font-weight: 600; }
+.acc-who small { display: block; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acc-synced { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 18px 12px; }
+.acc-synced span { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: 14px; background: var(--hover); color: var(--muted); }
+.acc-synced svg { color: var(--accent); }
+.acc-note { padding-bottom: 14px; line-height: 1.5; }
+.acc-intro { padding: 2px 18px 10px; line-height: 1.5; }
+.acc-error { margin: 4px 18px; padding: 8px 12px; border-radius: 10px; background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }

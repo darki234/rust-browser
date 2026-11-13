@@ -54,6 +54,8 @@ pub struct Settings {
     pub tint_frame: bool,
     /// Прозрачность панелей в процентах (0 — непрозрачные).
     pub glass: u32,
+    /// Когда журнал очищали (секунды Unix) — чтобы очистка дошла до других компьютеров.
+    pub history_cleared: u64,
     /// Заставка при запуске: compass, aurora, warp, minimal или off.
     pub splash: String,
     /// "smooth" | "fast" | "bouncy" | "off"
@@ -99,6 +101,7 @@ impl Default for Settings {
             accent: String::new(),
             tint_frame: false,
             glass: 0,
+            history_cleared: 0,
             splash: "compass".to_string(),
             motion: "smooth".to_string(),
             bar_style: "classic".to_string(),
@@ -294,6 +297,15 @@ impl Store {
         added
     }
 
+    /// Журнал после синхронизации: уже слитый с облаком, заменяет текущий.
+    pub fn replace_history(&mut self, mut visits: Vec<Visit>) {
+        visits.sort_by_key(|v| v.time);
+        let extra = visits.len().saturating_sub(MAX_HISTORY);
+        self.history = visits.split_off(extra);
+        self.pending.clear();
+        self.overwrite_history();
+    }
+
     pub fn remove_bookmark(&mut self, url: &str) {
         self.bookmarks.retain(|b| b.url != url);
     }
@@ -353,6 +365,9 @@ impl Store {
         self.history.clear();
         self.pending.clear();
         self.overwrite_history();
+        // для синхронизации: всё, что старше, удалить и на других компьютерах
+        self.settings.history_cleared = now();
+        self.save_settings();
     }
 
     /// Посещения от новых к старым, отфильтрованные по подстроке.

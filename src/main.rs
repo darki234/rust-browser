@@ -8,6 +8,7 @@ mod platform;
 mod pages;
 mod passwords;
 mod webstore;
+mod sync;
 mod store;
 mod system;
 
@@ -136,6 +137,8 @@ pub enum UserEvent {
     ExtChanged,
     ExtPopupMeasure,
     ExtPopupSize(f64, f64),
+    /// Ключ аккаунта посчитан и проверен (или ошибка).
+    AccountReady(Result<sync::Account, String>),
     /// Процессы WebView2; true — показать их в диспетчере вкладок.
     Processes(Vec<efficiency::ProcessInfo>, bool),
     /// Страница не загрузилась: (вкладка, вид ошибки для своей страницы ошибки).
@@ -282,6 +285,15 @@ struct App {
     ext_popup: Option<(WebView, f64, f64)>,
     /// Найденные браузеры с расширениями: (название, сколько можно перенести).
     ext_browsers: Vec<(String, usize)>,
+    /// Расширения, которые ставит синхронизация: об ошибках не сообщаем.
+    ext_quiet: std::collections::HashSet<String>,
+    /// Аккаунт для синхронизации (None — не вошли).
+    account: Option<sync::Account>,
+    account_busy: bool,
+    /// Папка, выбранная в форме входа.
+    account_folder: Option<String>,
+    sync_error: Option<String>,
+    last_sync: Instant,
     /// Сохранённые пароли (зашифрованы) и сайты «никогда не сохранять».
     vault: passwords::Vault,
     /// Пароль, который только что ввели на сайте: ждёт ответа «Сохранить?».
@@ -416,6 +428,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ext_busy: Default::default(),
         ext_popup: None,
         ext_browsers: Vec::new(),
+        ext_quiet: Default::default(),
+        account: None,
+        account_busy: false,
+        account_folder: None,
+        sync_error: None,
+        last_sync: Instant::now(),
         vault,
         pw_offer: None,
         pw_verified: None,
@@ -467,6 +485,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.new_tab(Some(url));
     }
     app.extensions = app.store.read_named("extensions.json");
+    // аккаунт: первая синхронизация — сразу после запуска, когда окно уже на экране
+    if !app.inprivate {
+        let account: sync::Account = app.store.read_named("account.json");
+        if !account.name.is_empty() {
+            app.account = Some(account);
+            app.last_sync = Instant::now() - SYNC_EVERY + Duration::from_secs(4);
+        }
+    }
     register_icons(&app.extensions, None);
     app.refresh_extensions();
     if app.primary && system::is_registered() {
@@ -517,6 +543,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if app.quit {
             app.save_session();
             app.store.save_all();
+            app.sync_now(false); // последние изменения — в облако
             *control_flow = ControlFlow::Exit;
         }
     });
@@ -1291,6 +1318,7 @@ impl App {
             UserEvent::Panel(raw) => self.handle_panel(&raw),
             UserEvent::Page(id, url, raw) => self.handle_page(id, &url, &raw),
             UserEvent::ExtReady(result, tab) => self.extension_ready(result, tab),
+            UserEvent::AccountReady(result) => self.account_ready(result),
             UserEvent::ExtAdded(info, result, tab) => self.extension_added(info, result, tab),
             UserEvent::ExtList(list) => {
                 self.ext_list = list;
@@ -2057,6 +2085,23 @@ impl App {
                 self.open_ext_popup(&id, right, top);
             }
             "ext_popup_close" => self.close_ext_popup(),
+            "account_create" | "account_login" => {
+                let create = message["cmd"] == "account_create";
+                self.account_start(create, text("name"), text("password"), text("folder"));
+            }
+            "account_pick_folder" => {
+                if let Some(folder) = platform::pick_folder(self.window.hwnd()) {
+                    self.account_folder = Some(folder);
+                    self.dirty = true;
+                }
+            }
+            "account_sync" => self.sync_now(true),
+            "account_logout" => {
+                self.account = None;
+                self.sync_error = None;
+                self.save_account();
+                self.dirty = true;
+            }
             "pw_save" => self.save_offered_password(),
             "pw_never" => {
                 if let Some(offer) = self.pw_offer.take() {
@@ -2399,6 +2444,7 @@ impl App {
         }
         if self.last_sleep_check.elapsed() >= SLEEP_CHECK {
             self.last_sleep_check = Instant::now();
+            self.sync_tick();
             let on_battery = efficiency::on_battery();
             if on_battery != self.on_battery {
                 self.on_battery = on_battery;
@@ -2528,6 +2574,7 @@ impl App {
             "pwNever": self.vault.never.iter().map(|o| json!([o, passwords::display_host(o)])).collect::<Vec<_>>(),
             "pwHere": self.passwords_here(),
             "extensions": self.extensions_state(),
+            "account": self.account_state(),
             "extBrowsers": self.ext_browsers,
             "dark": self.dark(),
             "maximized": self.maximized,
@@ -2813,6 +2860,9 @@ impl App {
             }
             Err((id, error)) => {
                 self.ext_busy.remove(&id);
+                if self.ext_quiet.remove(&id) {
+                    return;
+                }
                 self.store_page_status(tab, "Не получилось");
                 let _ = self.ui.evaluate_script(&format!("ui.toast({:?})", format!("Расширение не установилось: {error}")));
             }
@@ -2848,6 +2898,10 @@ impl App {
             }
             Err(error) => {
                 let _ = std::fs::remove_dir_all(&info.folder);
+                if self.ext_quiet.remove(&info.id) {
+                    self.install_next_extension();
+                    return;
+                }
                 self.store_page_status(tab, "Не поддерживается");
                 let reason = if info.mv < 3 {
                     "старый формат (Manifest V2) больше не работает в движке Chromium".to_string()
@@ -2976,6 +3030,374 @@ fn register_icons(list: &[webstore::Installed], ubol: Option<(&str, &Path)>) {
 fn extension_icon(id: &str) -> Option<PathBuf> {
     let guard = EXT_ICONS.lock().ok()?;
     guard.iter().find(|(k, _)| k == id).map(|(_, p)| p.clone())
+}
+
+/// Поля параметров, которые относятся к этому компьютеру и не синхронизируются.
+const LOCAL_SETTINGS: [&str; 10] = [
+    "download_dir", "proxy_mode", "proxy_host", "proxy_port", "sidebar_open",
+    "wallpaper_version", "ubol_version", "blocked_total", "battery_saver",
+    "history_cleared", // едет вместе с журналом
+];
+const SYNC_EVERY: Duration = Duration::from_secs(5 * 60);
+
+impl App {
+    // ---------- аккаунт и синхронизация ----------
+
+    fn account_key(&self) -> Option<[u8; 32]> {
+        let account = self.account.as_ref()?;
+        let hex = passwords::unprotect(&account.key)?;
+        let bytes: Vec<u8> = (0..hex.len()).step_by(2).filter_map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok()).collect();
+        bytes.try_into().ok()
+    }
+
+    /// Всё, что синхронизируется, — по разделам.
+    fn collect_sections(&self) -> std::collections::BTreeMap<String, Value> {
+        let mut sections = std::collections::BTreeMap::new();
+        let mut settings = serde_json::to_value(&self.store.settings).unwrap_or_default();
+        if let Value::Object(fields) = &mut settings {
+            for key in LOCAL_SETTINGS {
+                fields.remove(key);
+            }
+            // своё фото и видео лежат на этом компьютере
+            if matches!(self.store.settings.wallpaper.as_str(), "image" | "video") {
+                fields.remove("wallpaper");
+            }
+        }
+        sections.insert("settings".into(), settings);
+        sections.insert("bookmarks".into(), json!(self.store.bookmarks));
+        sections.insert(
+            "history".into(),
+            json!({ "cleared": self.store.settings.history_cleared, "visits": self.store.history }),
+        );
+        let mut logins: Vec<Value> = self
+            .vault
+            .logins
+            .iter()
+            .filter_map(|l| {
+                let password = passwords::unprotect(&l.secret)?;
+                Some(json!({ "origin": l.origin, "username": l.username, "password": password, "created": l.created }))
+            })
+            .collect();
+        logins.sort_by_key(|l| l.to_string());
+        sections.insert("passwords".into(), json!({ "logins": logins, "never": self.vault.never }));
+        let extensions: Vec<Value> = self
+            .extensions
+            .iter()
+            .map(|e| json!({ "id": e.id, "name": e.name, "source": e.source }))
+            .collect();
+        sections.insert("extensions".into(), json!(extensions));
+        sections.insert("zoom".into(), json!(self.store.site_zoom));
+        let notes: String = self.store.read_named("notes.json");
+        sections.insert("notes".into(), json!(notes));
+        sections
+    }
+
+    /// Применяет раздел из облака (или объединённый) к браузеру.
+    fn apply_section(&mut self, name: &str, value: Value) {
+        match name {
+            "settings" => {
+                let mut merged = serde_json::to_value(&self.store.settings).unwrap_or_default();
+                if let (Value::Object(local), Value::Object(remote)) = (&mut merged, value) {
+                    for (key, v) in remote {
+                        if !LOCAL_SETTINGS.contains(&key.as_str()) {
+                            local.insert(key, v);
+                        }
+                    }
+                }
+                if let Ok(settings) = serde_json::from_value::<store::Settings>(merged) {
+                    self.store.settings = settings;
+                    self.store.save_settings();
+                    AMOLED.store(self.store.settings.theme == "amoled", Ordering::Relaxed);
+                    self.apply_theme();
+                    self.sent.clear();
+                }
+            }
+            "bookmarks" => {
+                if let Ok(list) = serde_json::from_value::<Vec<store::Bookmark>>(value) {
+                    self.store.bookmarks = list;
+                    self.store.save_bookmarks();
+                }
+            }
+            "history" => {
+                // готовый итог слияния: заменяем, чтобы доходили и удаления
+                let cleared = value["cleared"].as_u64().unwrap_or(0);
+                if let Ok(list) = serde_json::from_value::<Vec<store::Visit>>(value["visits"].clone()) {
+                    self.store.replace_history(list.into_iter().filter(|v| v.time > cleared).collect());
+                }
+                if cleared > self.store.settings.history_cleared {
+                    self.store.settings.history_cleared = cleared;
+                    self.store.save_settings();
+                }
+            }
+            "passwords" => {
+                let logins = value["logins"].as_array().cloned().unwrap_or_default();
+                let mut vault = passwords::Vault {
+                    logins: Vec::new(),
+                    never: serde_json::from_value(value["never"].clone()).unwrap_or_default(),
+                };
+                for login in logins {
+                    let (Some(origin), Some(username), Some(password)) =
+                        (login["origin"].as_str(), login["username"].as_str(), login["password"].as_str())
+                    else {
+                        continue;
+                    };
+                    vault.upsert(origin, username, password, login["created"].as_u64().unwrap_or_else(unix_now));
+                }
+                self.vault = vault;
+                self.store.write_named("passwords.json", &self.vault);
+            }
+            "extensions" => {
+                // недостающие ставим из Chrome Web Store; расширения только из магазина Edge там не найдутся
+                let wanted: Vec<(String, String)> = value
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|e| Some((e["id"].as_str()?.to_string(), e["name"].as_str().unwrap_or("").to_string())))
+                    .collect();
+                let missing: Vec<String> = wanted
+                    .into_iter()
+                    .map(|(id, _)| id)
+                    .filter(|id| webstore::valid_id(id) && !self.extensions.iter().any(|e| &e.id == id) && !self.ext_busy.contains(id))
+                    .collect();
+                for id in missing {
+                    self.ext_busy.insert(id.clone());
+                    self.ext_quiet.insert(id.clone());
+                    let proxy = self.proxy.clone();
+                    let engine = wry::webview_version().unwrap_or_default();
+                    std::thread::spawn(move || {
+                        let result = webstore::download(&id, &Self::extensions_dir(), &engine).map_err(|e| (id, e));
+                        let _ = proxy.send_event(UserEvent::ExtReady(result, None));
+                    });
+                }
+            }
+            "zoom" => {
+                if let Ok(map) = serde_json::from_value(value) {
+                    self.store.site_zoom = map;
+                    self.store.write_named("zoom.json", &self.store.site_zoom);
+                }
+            }
+            "notes" => {
+                if let Some(text) = value.as_str() {
+                    self.store.write_named("notes.json", &text.to_string());
+                    self.push_panel_state();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Объединение, когда раздел поменяли и здесь, и на другом компьютере.
+    fn merge_section(name: &str, local: &Value, remote: &Value) -> Value {
+        match name {
+            "bookmarks" => sync::union_by(remote, local, |b| b["url"].to_string()),
+            "history" => {
+                // очистка на любом компьютере стирает всё, что было до неё
+                let cleared = remote["cleared"].as_u64().unwrap_or(0).max(local["cleared"].as_u64().unwrap_or(0));
+                let visits = sync::union_by(&remote["visits"], &local["visits"], |v| format!("{}|{}", v["url"], v["time"]));
+                let visits: Vec<Value> = visits
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|v| v["time"].as_u64().unwrap_or(0) > cleared)
+                    .cloned()
+                    .collect();
+                json!({ "cleared": cleared, "visits": visits })
+            }
+            "passwords" => json!({
+                "logins": sync::union_by(&remote["logins"], &local["logins"], |l| format!("{}|{}", l["origin"], l["username"])),
+                "never": sync::union_by(&remote["never"], &local["never"], |o| o.to_string()),
+            }),
+            "extensions" => sync::union_by(remote, local, |e| e["id"].to_string()),
+            "notes" => {
+                let (r, l) = (remote.as_str().unwrap_or(""), local.as_str().unwrap_or(""));
+                if r.is_empty() || l.contains(r) {
+                    local.clone()
+                } else if l.is_empty() || r.contains(l) {
+                    remote.clone()
+                } else {
+                    json!(format!("{r}\n\n——— с этого компьютера ———\n\n{l}"))
+                }
+            }
+            // параметры и масштаб: облачные значения поверх своих
+            _ => sync::merge_objects(remote, local),
+        }
+    }
+
+    /// Синхронизация: прочитать облако, слить по разделам, записать обратно.
+    fn sync_now(&mut self, manual: bool) {
+        let Some(account) = self.account.clone() else { return };
+        let Some(key) = self.account_key() else {
+            self.sync_error = Some("ключ аккаунта не расшифровался — войдите заново".into());
+            self.dirty = true;
+            return;
+        };
+        self.last_sync = Instant::now();
+        let file = sync::file_for(&account.folder, &account.name);
+        let remote = match std::fs::read(&file) {
+            Ok(bytes) => match sync::decrypt(&bytes, &key) {
+                Ok(bundle) => Some(bundle),
+                Err(error) => {
+                    self.sync_error = Some(format!("облачный файл не открылся: {error}"));
+                    self.dirty = true;
+                    return;
+                }
+            },
+            Err(_) => None,
+        };
+        let local = self.collect_sections();
+        let mut changed = 0;
+        if let Some(remote) = &remote {
+            for (name, local_value) in &local {
+                let choice = sync::choose(local_value, remote.sections.get(name), account.hashes.get(name));
+                let value = match choice {
+                    sync::Choice::Local => continue,
+                    sync::Choice::Remote => remote.sections[name].clone(),
+                    sync::Choice::Merge => Self::merge_section(name, local_value, &remote.sections[name]),
+                };
+                if value != *local_value {
+                    self.apply_section(name, value);
+                    changed += 1;
+                }
+            }
+        }
+        // в облако — то, что получилось после слияния
+        let sections = self.collect_sections();
+        let hashes: std::collections::BTreeMap<String, String> =
+            sections.iter().map(|(k, v)| (k.clone(), sync::fingerprint(v))).collect();
+        let needs_write = remote.as_ref().is_none_or(|r| {
+            r.sections.iter().map(|(k, v)| (k.clone(), sync::fingerprint(v))).collect::<std::collections::BTreeMap<_, _>>() != hashes
+        });
+        if needs_write {
+            let bundle = sync::Bundle {
+                sections,
+                device: std::env::var("COMPUTERNAME").unwrap_or_default(),
+                time: unix_now(),
+            };
+            let salt = crate::base64_decode(&account.salt).unwrap_or_default();
+            let written = sync::encrypt(&bundle, &key, &salt).and_then(|bytes| sync::write_atomic(&file, &bytes));
+            if let Err(error) = written {
+                self.sync_error = Some(format!("не удалось записать в папку: {error}"));
+                self.dirty = true;
+                return;
+            }
+        }
+        if let Some(account) = &mut self.account {
+            account.hashes = hashes;
+            account.synced = unix_now();
+        }
+        self.sync_error = None;
+        self.save_account();
+        self.dirty = true;
+        if manual {
+            let text = if changed > 0 { format!("Синхронизировано: обновлено разделов — {changed}") } else { "Всё синхронизировано".to_string() };
+            let _ = self.ui.evaluate_script(&format!("ui.toast({text:?})"));
+        }
+    }
+
+    /// Раз в 5 минут — если что-то поменялось здесь или файл в облаке обновился.
+    fn sync_tick(&mut self) {
+        if self.account.is_none() || self.last_sync.elapsed() < SYNC_EVERY {
+            return;
+        }
+        self.sync_now(false);
+    }
+
+    fn save_account(&self) {
+        let path = data_dir().join("account.json");
+        match &self.account {
+            Some(account) => self.store.write_named("account.json", account),
+            None => {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
+    /// Вход или создание аккаунта. Ключ из пароля считается в фоне (это нарочно долго).
+    fn account_start(&mut self, create: bool, name: String, password: String, folder: String) {
+        let name = name.trim().to_string();
+        let folder = if folder.trim().is_empty() {
+            sync::default_folder()
+        } else {
+            Some(PathBuf::from(folder.trim()))
+        };
+        let fail = |app: &mut App, text: &str| {
+            let _ = app.ui.evaluate_script(&format!("ui.accountError({text:?})"));
+        };
+        let Some(folder) = folder else { return fail(self, "Выберите папку, которая синхронизируется: OneDrive, Яндекс Диск, Google Drive…") };
+        if name.chars().count() < 3 {
+            return fail(self, "Имя аккаунта — хотя бы 3 символа");
+        }
+        if password.chars().count() < 8 {
+            return fail(self, "Пароль — хотя бы 8 символов");
+        }
+        let file = sync::file_for(&folder, &name);
+        let existing = std::fs::read(&file).ok();
+        if create && existing.is_some() {
+            return fail(self, "Такой аккаунт в этой папке уже есть — нажмите «Войти»");
+        }
+        if !create && existing.is_none() {
+            return fail(self, "В этой папке нет такого аккаунта. Проверьте имя и папку или создайте аккаунт");
+        }
+        self.account_busy = true;
+        self.dirty = true;
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let salt = match &existing {
+                Some(bytes) => sync::read_salt(bytes).unwrap_or_default(),
+                None => sync::random_bytes::<16>().to_vec(),
+            };
+            let key = sync::derive_key(&password, &salt);
+            let result = match &existing {
+                Some(bytes) => sync::decrypt(bytes, &key).map(|_| ()),
+                None => Ok(()),
+            };
+            let account = result.map(|()| sync::Account {
+                name,
+                folder,
+                key: key.iter().map(|b| format!("{b:02x}")).collect(),
+                salt: crate::base64(&salt),
+                synced: 0,
+                hashes: Default::default(),
+            });
+            let _ = proxy.send_event(UserEvent::AccountReady(account));
+        });
+    }
+
+    fn account_ready(&mut self, result: Result<sync::Account, String>) {
+        self.account_busy = false;
+        self.dirty = true;
+        match result {
+            Ok(mut account) => {
+                let Some(protected) = passwords::protect(&account.key) else {
+                    let _ = self.ui.evaluate_script("ui.accountError('Windows не дала защитить ключ')");
+                    return;
+                };
+                account.key = protected;
+                self.account = Some(account);
+                self.save_account();
+                self.sync_now(true);
+            }
+            Err(error) => {
+                let text = if error == "неверный пароль" { "Неверный пароль".to_string() } else { error };
+                let _ = self.ui.evaluate_script(&format!("ui.accountError({text:?})"));
+            }
+        }
+    }
+
+    fn account_state(&self) -> Value {
+        let default = sync::default_folder().map(|p| p.display().to_string()).unwrap_or_default();
+        match &self.account {
+            Some(a) => json!({
+                "name": a.name,
+                "folder": a.folder.display().to_string(),
+                "synced": a.synced,
+                "error": self.sync_error,
+                "busy": self.account_busy,
+                "defaultFolder": default,
+            }),
+            None => json!({ "busy": self.account_busy, "defaultFolder": default, "picked": self.account_folder }),
+        }
+    }
 }
 
 /// Выгружает вкладку: webview и процесс страницы уничтожаются, адрес остаётся;
