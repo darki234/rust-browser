@@ -2016,4 +2016,95 @@ window.ui = {
   imported: (count) => toast(count ? `Перенесено в избранное: ${count}` : 'Новых сайтов для избранного не нашлось'),
 };
 
+// ---------- заставка запуска ----------
+
+const LOGO = `<svg class="logo" viewBox="0 0 100 100" aria-hidden="true">
+  <defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#6d7cff"/><stop offset=".55" stop-color="#a855f7"/><stop offset="1" stop-color="#ec4899"/>
+  </linearGradient></defs>
+  <rect class="sq" x="4" y="4" width="92" height="92" rx="24" fill="url(#lg)"/>
+  <circle class="ring" cx="50" cy="50" r="27" fill="none" stroke="#fff" stroke-width="6" pathLength="100"/>
+  <g class="needle"><path d="M66 34 L56 56 L44 44 Z" fill="#fff"/><path d="M34 66 L44 44 L56 56 Z" fill="#fff" opacity=".7"/></g>
+</svg>`;
+
+const SPLASHES = {
+  compass: { name: 'Компас', ms: 1250 },
+  aurora: { name: 'Сияние', ms: 1450 },
+  warp: { name: 'Гиперпрыжок', ms: 1300 },
+  minimal: { name: 'Минимализм', ms: 750 },
+};
+
+/** Звёзды летят навстречу — рисуем на холсте, пока идёт заставка. */
+function warpStars(canvas, until) {
+  const ctx = canvas.getContext('2d');
+  const dpr = devicePixelRatio || 1;
+  const w = (canvas.width = innerWidth * dpr);
+  const hgt = (canvas.height = innerHeight * dpr);
+  const stars = Array.from({ length: 420 }, () => ({ x: Math.random() * 2 - 1, y: Math.random() * 2 - 1, z: Math.random() }));
+  const start = performance.now();
+  const frame = (now) => {
+    if (now > until || !canvas.isConnected) return;
+    const t = (now - start) / 1000;
+    const speed = 0.004 + Math.min(t, 1) ** 2 * 0.05; // разгон
+    ctx.fillStyle = 'rgba(3, 4, 12, .32)';
+    ctx.fillRect(0, 0, w, hgt);
+    ctx.lineCap = 'round';
+    for (const s of stars) {
+      const pz = s.z;
+      s.z -= speed;
+      if (s.z <= 0.02) { s.x = Math.random() * 2 - 1; s.y = Math.random() * 2 - 1; s.z = 1; continue; }
+      const k = 0.5 / s.z, pk = 0.5 / pz;
+      const x = w / 2 + s.x * k * w / 2, y = hgt / 2 + s.y * k * hgt / 2;
+      const px = w / 2 + s.x * pk * w / 2, py = hgt / 2 + s.y * pk * hgt / 2;
+      ctx.strokeStyle = `hsla(${230 + s.x * 60}, 90%, ${70 + (1 - s.z) * 30}%, ${1 - s.z})`;
+      ctx.lineWidth = (1 - s.z) * 3 * dpr;
+      ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(x, y); ctx.stroke();
+    }
+    requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
+}
+
+/** Играет заставку; preview — показ из параметров, тогда Rust не трогаем. */
+function playSplash(kind, preview = false) {
+  const box = $('#splash');
+  const info = SPLASHES[kind];
+  if (!info) { if (!preview) send('splash_done'); return; }
+  box.className = 'show s-' + kind;
+  const title = h('div', { class: 'stitle' }, ...[...'Rust Browser'].map((ch, i) =>
+    h('span', { style: `--i:${i}` }, ch === ' ' ? ' ' : ch)));
+  box.replaceChildren(
+    h('div', { class: 'sbg' }, h('i'), h('i'), h('i')),
+    kind === 'warp' ? h('canvas', { class: 'swarp' }) : '',
+    h('div', { class: 'scenter' }, h('div', { class: 'slogo' }), title, h('div', { class: 'sbar' }, h('i'))));
+  box.querySelector('.slogo').innerHTML = LOGO;
+  if (kind === 'warp') warpStars(box.querySelector('canvas'), performance.now() + info.ms + 600);
+  let done = false;
+  const finish = () => {
+    if (done) return;
+    done = true;
+    removeEventListener('keydown', finish, true);
+    box.classList.add('leave');
+    setTimeout(() => {
+      box.className = '';
+      box.replaceChildren();
+      if (!preview) send('splash_done');
+    }, 480);
+  };
+  box.onmousedown = finish;
+  addEventListener('keydown', finish, true);
+  setTimeout(finish, info.ms);
+}
+
+function splashSetting() {
+  return setting('Заставка при запуске', 'Короткая анимация, пока открываются вкладки. Щелчок или клавиша пропускают её',
+    segmented([...Object.entries(SPLASHES).map(([id, s]) => [id, s.name]), ['off', 'Без заставки']],
+      () => S.settings.splash, (value) => { set('splash', value); if (value !== 'off') playSplash(value, true); }),
+    h('button', { class: 'text-btn outline', onclick: () => playSplash(S.settings.splash, true) }, 'Показать'));
+}
+
+if (BOOT.splash && BOOT.splash !== 'off') {
+  try { playSplash(BOOT.splash); } catch (e) { $('#splash').className = ''; send('splash_done'); }
+}
+
 send('ready');

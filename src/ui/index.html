@@ -6,6 +6,13 @@
 <style>/*__CSS__*/</style>
 </head>
 <body>
+<!-- Заставка запуска: показываем до разбора остальной страницы, чтобы панель не мелькнула раньше неё -->
+<div id="splash"></div>
+<script>
+  if (window.__BOOT__ && __BOOT__.splash && __BOOT__.splash !== 'off') {
+    document.getElementById('splash').className = 'show s-' + __BOOT__.splash;
+  }
+</script>
 
 <header id="chrome">
   <!-- Верхний край окна: тянуть за него, чтобы изменить высоту -->

@@ -230,6 +230,8 @@ struct App {
     inprivate: bool,
     /// Основное окно: восстанавливает и сохраняет сеанс, принимает ссылки от Windows.
     primary: bool,
+    /// Идёт заставка запуска: интерфейс на всё окно, пока он не скажет «splash_done».
+    splash: bool,
     is_default: bool,
     /// Режим эффективности, уже выставленный процессам: pid → включён.
     eco: HashMap<u32, bool>,
@@ -329,7 +331,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let store = Store::load(data_dir());
     let dark = match store.settings.theme.as_str() {
-        "dark" => true,
+        "dark" | "amoled" => true,
         "light" => false,
         _ => window.theme() == WindowTheme::Dark,
     };
@@ -340,7 +342,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let profile = if inprivate { "WebView2-InPrivate" } else { "WebView2" };
     let mut web_context = WebContext::new(Some(data_dir().join(profile)));
     let network = proxy_config(&store.settings);
-    let ui = build_ui(&window, proxy.clone(), &mut web_context, keys.clone(), inprivate, dark, network.clone())?;
+    // Заставка — только при первом запуске браузера, не для каждого нового окна.
+    let splash = if primary { store.settings.splash.clone() } else { "off".to_string() };
+    let ui = build_ui(&window, proxy.clone(), &mut web_context, keys.clone(), inprivate, dark, &splash, network.clone())?;
 
     let mut app = App {
         adblock: Arc::new(AtomicBool::new(store.settings.adblock)),
@@ -366,6 +370,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         downloads: Vec::new(),
         keys,
         overlay: Overlay::None,
+        splash: splash != "off",
         overlay_pending: false,
         overlay_requested: Instant::now(),
         chrome_height: DEFAULT_CHROME,
@@ -508,6 +513,7 @@ fn build_ui(
     keys: Arc<KeyState>,
     inprivate: bool,
     dark: bool,
+    splash: &str,
     network: Option<wry::ProxyConfig>,
 ) -> wry::Result<WebView> {
     let html = include_str!("ui/index.html")
@@ -518,6 +524,7 @@ fn build_ui(
         "inprivate": inprivate,
         "version": env!("CARGO_PKG_VERSION"),
         "engine": engine,
+        "splash": splash,
     });
     let (width, height) = window_size(window);
 
@@ -711,7 +718,7 @@ impl App {
         let on_start_page = self.active_webview().is_none();
 
         let ui_rect = match self.overlay {
-            _ if on_start_page => rect(0.0, 0.0, width, height),
+            _ if on_start_page || self.splash => rect(0.0, 0.0, width, height),
             Overlay::Full => rect(0.0, 0.0, width, height),
             // боковая колонка и так на всю высоту — подсказки помещаются в ней
             _ if side > 0.0 => rect(0.0, 0.0, side, height),
@@ -1647,9 +1654,10 @@ impl App {
             "wallpaper_always" => {
                 settings.wallpaper_always = value.as_bool().unwrap_or(settings.wallpaper_always)
             }
-            "motion" | "bar_style" | "newtab_layout" => {
+            "motion" | "bar_style" | "newtab_layout" | "splash" => {
                 let allowed: &[&str] = match key {
                     "motion" => &["smooth", "fast", "bouncy", "off"],
+                    "splash" => &["compass", "aurora", "warp", "minimal", "off"],
                     "bar_style" => &["classic", "compact", "floating", "vertical"],
                     _ => &["clock", "minimal", "tiles", "greeting"],
                 };
@@ -1657,6 +1665,7 @@ impl App {
                 match key {
                     "motion" => settings.motion = choice.to_string(),
                     "bar_style" => settings.bar_style = choice.to_string(),
+                    "splash" => settings.splash = choice.to_string(),
                     _ => settings.newtab_layout = choice.to_string(),
                 }
             }
@@ -1926,6 +1935,10 @@ impl App {
             }
 
             // слои поверх страницы
+            "splash_done" => {
+                self.splash = false;
+                self.layout();
+            }
             "overlay" => match message["mode"].as_str() {
                 Some("full") => self.request_full_overlay(),
                 Some("sheet") => {
@@ -2338,6 +2351,7 @@ impl App {
                 "accent": settings.accent,
                 "tintFrame": settings.tint_frame,
                 "glass": settings.glass,
+                "splash": settings.splash,
                 "motion": settings.motion,
                 "barStyle": settings.bar_style,
                 "newtabLayout": settings.newtab_layout,
