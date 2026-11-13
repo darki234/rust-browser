@@ -148,6 +148,19 @@ pub struct SessionTab {
     pub title: String,
     #[serde(default)]
     pub pinned: bool,
+    /// Группа вкладки (0 — без группы).
+    #[serde(default)]
+    pub group: u32,
+}
+
+/// Группа вкладок: название, цвет, свёрнута ли.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct TabGroup {
+    pub id: u32,
+    pub name: String,
+    pub color: String,
+    #[serde(default)]
+    pub collapsed: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -155,6 +168,8 @@ pub struct Session {
     pub tabs: Vec<SessionTab>,
     /// Номер активной вкладки.
     pub active: usize,
+    #[serde(default)]
+    pub groups: Vec<TabGroup>,
 }
 
 #[derive(Serialize, Debug, PartialEq)]

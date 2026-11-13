@@ -80,6 +80,7 @@ const ICONS = {
   moon2: '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>',
   card: '<rect x="2.5" y="5" width="19" height="14" rx="2.5"/><path d="M2.5 10h19"/><path d="M6 15h4"/>',
   home: '<path d="M3 11 12 4l9 7"/><path d="M5 10v10h14V10"/><path d="M10 20v-6h4v6"/>',
+  split: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M12 4v16"/>',
   cut: '<circle cx="6" cy="18" r="3"/><circle cx="18" cy="18" r="3"/><path d="M8.1 15.9 18 4"/><path d="M15.9 15.9 6 4"/>',
   paste: '<rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4h6v2H9z"/>',
   pastego: '<rect x="4" y="4" width="11" height="16" rx="2"/><path d="M7 4h5v2H7z"/><path d="M14 15h7"/><path d="m18 12 3 3-3 3"/>',
@@ -304,6 +305,7 @@ function setState(next) {
   renderExtButton();
   renderMyButtons();
   renderAutofillButton();
+  renderSplitButton();
   if (hubSection && hubSection !== 'history') renderHubList(false);
   if (menuKind === 'main') refreshMainMenu();
 }
@@ -443,6 +445,7 @@ function renderTabs() {
   const wanted = S.tabs.map((tab) => tabEls.get(tab.id));
   const current = aliveTabNodes();
   if (wanted.some((node, i) => node !== current[i])) {
+    groupChips.forEach((chip) => chip.remove()); // метки групп встанут заново ниже
     for (const node of wanted) el.tabs.insertBefore(node, newTabBtn);
     for (const node of wanted) {
       const was = before.get(node);
@@ -453,6 +456,13 @@ function renderTabs() {
           { duration: 240, easing: 'cubic-bezier(.2,.8,.2,1)' });
       }
     }
+  }
+  renderGroups();
+  // только что созданная группа: сразу предлагаем дать ей имя
+  if (groupJustCreated && groupChips.has(groupJustCreated)) {
+    const gid = groupJustCreated;
+    groupJustCreated = 0;
+    requestAnimationFrame(() => openGroupMenu(gid, groupChips.get(gid)));
   }
 }
 
@@ -1342,6 +1352,8 @@ function mainMenuNodes() {
     item({ icon: 'translate', label: /\.translate\.goog\//.test(activeTab()?.url || '') ? 'Показать оригинал' : 'Перевести страницу', disabled: !page,
       onClick: () => send('translate', { original: /\.translate\.goog\//.test(activeTab()?.url || '') }) }),
     item({ icon: 'pip', label: 'Картинка в картинке', kb: 'Alt+P', disabled: !page, onClick: () => send('pip') }),
+    item({ icon: 'split', label: S.split && [S.split.left, S.split.right].includes(S.active) ? 'Убрать разделение экрана' : 'Разделить экран', disabled: !page,
+      onClick: () => send(S.split && [S.split.left, S.split.right].includes(S.active) ? 'unsplit' : 'split') }),
     item({ icon: 'moon2', label: 'Тёмная тема для этого сайта', check: !!activeTab()?.dark, disabled: !page, onClick: () => send('dark_site') }),
     item({ icon: 'bar', label: 'Панель избранного', kb: 'Ctrl+Shift+B', check: S.settings.favbar,
       onClick: () => send('set', { key: 'favbar', value: !S.settings.favbar }) }),
@@ -1434,6 +1446,8 @@ function openTabMenu(id, x, y) {
     item({ icon: 'copy', label: 'Дублировать', disabled: tab.start, onClick: () => send('duplicate', { id }) }),
     item({ icon: 'pin', label: tab.pinned ? 'Открепить вкладку' : 'Закрепить вкладку', onClick: () => send('pin', { id }) }),
     item({ icon: 'window', label: 'Переместить в новое окно', disabled: tab.start, onClick: () => send('detach', { id }) }),
+    ...tabMenuExtras(tab),
+    sep(),
     item({ icon: 'moon', label: 'Выгрузить из памяти', disabled: tab.start || tab.id === S.active,
       onClick: () => send('unload_tab', { id }) }),
     item({ icon: tab.muted ? 'speaker' : 'muted', label: tab.muted ? 'Включить звук' : 'Выключить звук вкладки',
@@ -2186,6 +2200,7 @@ window.ui = {
   dataCleared: () => toast('Данные сайтов удалены'),
   toast,
   passwordOffer,
+  groupCreated,
   pageScroll,
   iconsUpdated: () => { iconsVersion++; tilesKey = null; renderStart(); },
   accountError,
@@ -2728,6 +2743,122 @@ function healthBadge(index) {
   if (health.reused) return h('span', { class: 'pw-badge-warn', title: 'Тот же пароль стоит на другом сайте' }, 'повторяется');
   if (health.weak) return h('span', { class: 'pw-badge-warn', title: 'Короткий или простой' }, 'простой');
   return h('span', { class: 'pw-badge-ok' }, 'надёжный');
+}
+
+
+
+// ---------- группы вкладок ----------
+
+const GROUP_COLORS = {
+  blue: '#3b82f6', purple: '#8b5cf6', pink: '#ec4899', red: '#ef4444',
+  orange: '#f97316', yellow: '#eab308', green: '#22c55e', cyan: '#06b6d4', grey: '#8b8fa3',
+};
+const groupChips = new Map();
+const groupOf = (gid) => (S.groups || []).find((g) => g.id === gid);
+
+/** Метки групп перед первой вкладкой каждой группы и цветная полоска у вкладок. */
+function renderGroups() {
+  const groups = S.groups || [];
+  for (const [gid, chip] of groupChips) {
+    if (!groupOf(gid)) { chip.remove(); groupChips.delete(gid); }
+  }
+  for (const tab of S.tabs) {
+    const node = tabEls.get(tab.id);
+    if (!node) continue;
+    const group = groupOf(tab.group);
+    node.classList.toggle('grouped', !!group);
+    node.classList.toggle('gcollapsed', !!group?.collapsed && tab.id !== S.active);
+    if (group) node.style.setProperty('--gc', GROUP_COLORS[group.color] || group.color);
+    else node.style.removeProperty('--gc');
+    const split = S.split && (S.split.left === tab.id || S.split.right === tab.id);
+    node.classList.toggle('in-split', !!split);
+  }
+  for (const group of groups) {
+    const first = S.tabs.find((t) => t.group === group.id);
+    if (!first) continue;
+    let chip = groupChips.get(group.id);
+    if (!chip) {
+      chip = h('button', { class: 'gchip' });
+      const gid = group.id;
+      chip.addEventListener('click', () => send('group_edit', { group: gid, collapsed: !groupOf(gid)?.collapsed }));
+      chip.addEventListener('contextmenu', (event) => { event.preventDefault(); openGroupMenu(gid, chip); });
+      groupChips.set(group.id, chip);
+    }
+    chip.style.setProperty('--gc', GROUP_COLORS[group.color] || group.color);
+    chip.classList.toggle('collapsed', !!group.collapsed);
+    const count = S.tabs.filter((t) => t.group === group.id).length;
+    chip.textContent = group.name || (group.collapsed ? String(count) : '');
+    chip.classList.toggle('empty', !chip.textContent);
+    chip.title = (group.name || 'Группа') + ` · вкладок: ${count}\nЩелчок — свернуть или развернуть, правая кнопка — меню`;
+    const firstNode = tabEls.get(first.id);
+    if (firstNode && chip.nextSibling !== firstNode) el.tabs.insertBefore(chip, firstNode);
+  }
+}
+
+function openGroupMenu(gid, anchor) {
+  const group = groupOf(gid);
+  if (!group) return;
+  const name = h('input', { type: 'text', class: 'field gname', placeholder: 'Название группы', value: group.name, spellcheck: 'false' });
+  name.addEventListener('keydown', (event) => {
+    event.stopPropagation();
+    if (event.key === 'Enter') { send('group_edit', { group: gid, name: name.value }); closeMenu(); }
+  });
+  name.addEventListener('change', () => send('group_edit', { group: gid, name: name.value }));
+  const colors = h('div', { class: 'gcolors' }, ...Object.entries(GROUP_COLORS).map(([key, value]) =>
+    h('button', { class: 'swatch' + (group.color === key ? ' on' : ''), style: `--c:${value}`, title: key,
+      onclick: () => { send('group_edit', { group: gid, color: key, name: name.value }); closeMenu(); } })));
+  const nodes = [
+    h('div', { class: 'gedit' }, name, colors),
+    sep(),
+    item({ icon: group.collapsed ? 'down' : 'up', label: group.collapsed ? 'Развернуть' : 'Свернуть',
+      onClick: () => send('group_edit', { group: gid, collapsed: !group.collapsed }) }),
+    item({ icon: 'plus', label: 'Новая вкладка в группе', onClick: () => send('group_new_tab', { group: gid }) }),
+    item({ icon: 'x', label: 'Разгруппировать', onClick: () => send('group_ungroup', { group: gid }) }),
+    item({ icon: 'trash', label: 'Закрыть группу', danger: true, onClick: () => send('group_close', { group: gid }) }),
+  ];
+  showMenu('group', nodes, () => {
+    const r = anchor.getBoundingClientRect();
+    el.menu.style.left = Math.max(8, Math.min(r.left, innerWidth - 300)) + 'px';
+    el.menu.style.top = r.bottom + 8 + 'px';
+  });
+  setTimeout(() => name.focus(), 60);
+}
+
+/** Пункты групп и разделённого экрана для меню вкладки. */
+function tabMenuExtras(tab) {
+  const items = [];
+  const others = (S.groups || []).filter((g) => g.id !== tab.group);
+  items.push(item({ icon: 'plus', label: 'Добавить в новую группу', onClick: () => send('group_new', { id: tab.id }) }));
+  for (const g of others) {
+    items.push(item({ icon: 'folder', label: `В группу «${g.name || 'без названия'}»`, onClick: () => send('group_add', { id: tab.id, group: g.id }) }));
+  }
+  if (tab.group) items.push(item({ icon: 'x', label: 'Убрать из группы', onClick: () => send('group_remove', { id: tab.id }) }));
+  items.push(sep());
+  const inSplit = S.split && (S.split.left === tab.id || S.split.right === tab.id);
+  if (inSplit) {
+    items.push(item({ icon: 'split', label: 'Поменять половины местами', onClick: () => send('split_swap') }));
+    items.push(item({ icon: 'x', label: 'Убрать разделение экрана', onClick: () => send('unsplit') }));
+  } else if (tab.id !== S.active && !tab.start) {
+    items.push(item({ icon: 'split', label: 'Открыть рядом с текущей', onClick: () => send('split', { id: tab.id }) }));
+  }
+  return items;
+}
+
+let groupJustCreated = 0;
+function groupCreated(gid) {
+  groupJustCreated = gid;
+}
+
+// ---------- разделённый экран ----------
+
+$('#splitbtn').addEventListener('click', () => {
+  const inSplit = S.split && (S.split.left === S.active || S.split.right === S.active);
+  send(inSplit ? 'unsplit' : 'split');
+});
+function renderSplitButton() {
+  const inSplit = !!S.split && (S.split.left === S.active || S.split.right === S.active);
+  $('#splitbtn').classList.toggle('on', inSplit);
+  $('#splitbtn').title = inSplit ? 'Убрать разделение экрана' : 'Разделить экран: эта вкладка и предыдущая рядом';
 }
 
 // ---------- заставка запуска ----------

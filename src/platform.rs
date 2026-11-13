@@ -21,7 +21,7 @@ use webview2_com::{
     take_pwstr, AcceleratorKeyPressedEventHandler, BytesReceivedChangedEventHandler,
     BrowserExtensionEnableCompletedHandler, BrowserExtensionRemoveCompletedHandler,
     AddScriptToExecuteOnDocumentCreatedCompletedHandler, CallDevToolsProtocolMethodCompletedHandler,
-    CapturePreviewCompletedHandler, ProcessFailedEventHandler,
+    CapturePreviewCompletedHandler, FocusChangedEventHandler, ProcessFailedEventHandler,
     ContainsFullScreenElementChangedEventHandler,
     DownloadStartingEventHandler, FaviconChangedEventHandler,
     FindActiveMatchIndexChangedEventHandler, FindMatchCountChangedEventHandler,
@@ -344,6 +344,17 @@ pub fn hook_messages(webview: &WebView, tab: u32, proxy: Proxy) {
     }));
     unsafe {
         let _ = webview.webview().add_WebMessageReceived(&handler, &mut 0i64);
+    }
+}
+
+/// Вкладка получила фокус (щелчок по странице) — для разделённого экрана.
+pub fn hook_focus(webview: &WebView, tab: u32, proxy: Proxy) {
+    let handler = FocusChangedEventHandler::create(Box::new(move |_, _| {
+        let _ = proxy.send_event(UserEvent::PageFocused(tab));
+        Ok(())
+    }));
+    unsafe {
+        let _ = webview.controller().add_GotFocus(&handler, &mut 0i64);
     }
 }
 

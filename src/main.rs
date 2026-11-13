@@ -75,6 +75,9 @@ fn backdrop_color(dark: bool) -> (u8, u8, u8, u8) {
 /// Тема AMOLED: под страницами чистый чёрный, а не тёмно-серый.
 static AMOLED: AtomicBool = AtomicBool::new(false);
 
+/// Щель между половинами разделённого экрана — за неё тянут разделитель.
+const SPLIT_GAP: f64 = 6.0;
+
 /// Ширина боковой панели и высота её шапки.
 const PANEL_WIDTH: f64 = 380.0;
 const PANEL_HEADER: f64 = 44.0;
@@ -144,6 +147,8 @@ pub enum UserEvent {
     PwHealth(Vec<autofill::Health>),
     /// Windows Hello ответил на просьбу подставить карту (номер карты, итог).
     CardVerified(usize, passwords::Verdict),
+    /// Щелчок внутри вкладки — при разделённом экране она становится активной.
+    PageFocused(u32),
     /// Упал весь движок WebView2 — перезапуск браузера.
     EngineCrashed,
     /// Язык открытой страницы (lang у html).
@@ -208,6 +213,8 @@ struct Tab {
     af_address: bool,
     /// id скрипта тёмной темы для сайтов в этой вкладке (его снимают при смене настройки).
     dark_script: Arc<Mutex<Option<String>>>,
+    /// Группа вкладки (0 — без группы).
+    group: u32,
 }
 
 impl Tab {
@@ -237,6 +244,7 @@ impl Tab {
             dark_script: Default::default(),
             af_card: false,
             af_address: false,
+            group: 0,
         }
     }
 
@@ -245,7 +253,7 @@ impl Tab {
     }
 
     fn snapshot(&self) -> SessionTab {
-        SessionTab { url: self.url.clone(), title: self.title.clone(), pinned: self.pinned }
+        SessionTab { url: self.url.clone(), title: self.title.clone(), pinned: self.pinned, group: self.group }
     }
 }
 
@@ -313,6 +321,14 @@ struct App {
     ext_quiet: std::collections::HashSet<String>,
     /// Предзагрузка с плитки: (вкладка, адрес, скрытый webview, который уже грузит сайт).
     prewarm: Option<(u32, String, WebView)>,
+    /// Группы вкладок.
+    groups: Vec<store::TabGroup>,
+    /// Разделённый экран: (левая вкладка, правая вкладка, доля левой половины).
+    split: Option<(u32, u32, f64)>,
+    /// Тянут разделитель половин экрана.
+    split_drag: bool,
+    /// Последнее положение мыши в окне (физические пиксели) — для разделителя.
+    cursor: (f64, f64),
     /// Адреса и карты для автозаполнения (на диске — под DPAPI).
     autofill: autofill::Profile,
     /// Результат проверки паролей (по номерам в хранилище) и идёт ли проверка.
@@ -474,6 +490,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ext_browsers: Vec::new(),
         ext_quiet: Default::default(),
         prewarm: None,
+        groups: Vec::new(),
+        split: None,
+        split_drag: false,
+        cursor: (0.0, 0.0),
         autofill: Default::default(),
         pw_health: Vec::new(),
         pw_checking: false,
@@ -556,6 +576,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match event {
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested => app.quit = true,
+                WindowEvent::CursorMoved { position, .. } => app.split_cursor(position.x, position.y),
+                WindowEvent::MouseInput { state, button: tao::event::MouseButton::Left, .. } => {
+                    app.split_press(state == tao::event::ElementState::Pressed)
+                }
                 WindowEvent::Resized(_) => {
                     app.layout();
                     let maximized = app.window.is_maximized();
@@ -807,6 +831,7 @@ fn build_tab(app: &mut App, id: u32, bounds: Rect) -> wry::Result<WebView> {
     platform::hook_history(&webview, id, proxy.clone());
     platform::hook_messages(&webview, id, proxy.clone());
     platform::hook_crashes(&webview, id, proxy.clone());
+    platform::hook_focus(&webview, id, proxy.clone());
     platform::hook_page_state(&webview, id, proxy.clone());
     platform::hook_find(&webview, id, proxy.clone());
     platform::hook_load_errors(&webview, id, proxy.clone());
@@ -918,12 +943,25 @@ impl App {
 
         // Сначала показываем новую вкладку и только потом прячем остальные: иначе
         // на миг не видно ни одной, и сквозь щель мелькает фон окна.
-        if let Some(webview) = self.active_webview() {
-            let _ = webview.set_bounds(self.page_rect());
-            let _ = webview.set_visible(true);
+        let visible = self.visible_with(self.active);
+        match self.split_rects() {
+            Some((left_rect, right_rect, left, right)) if visible.len() == 2 => {
+                for (id, bounds) in [(left, left_rect), (right, right_rect)] {
+                    if let Some(webview) = self.tab(id).and_then(|t| t.webview.as_ref()) {
+                        let _ = webview.set_bounds(bounds);
+                        let _ = webview.set_visible(true);
+                    }
+                }
+            }
+            _ => {
+                if let Some(webview) = self.active_webview() {
+                    let _ = webview.set_bounds(self.page_rect());
+                    let _ = webview.set_visible(true);
+                }
+            }
         }
         for tab in &self.tabs {
-            if tab.id == self.active {
+            if visible.contains(&tab.id) {
                 continue;
             }
             if let Some(webview) = &tab.webview {
@@ -1117,8 +1155,11 @@ impl App {
         for saved in &session.tabs {
             let id = self.next_id;
             self.next_id += 1;
-            self.tabs.push(Tab::new(id, &saved.url, &saved.title, saved.pinned));
+            let mut tab = Tab::new(id, &saved.url, &saved.title, saved.pinned);
+            tab.group = saved.group;
+            self.tabs.push(tab);
         }
+        self.groups = session.groups.clone();
         // Загружается только активная вкладка, остальные — когда их откроют.
         let index = session.active.min(self.tabs.len() - 1);
         self.activate(self.tabs[index].id);
@@ -1133,6 +1174,7 @@ impl App {
         let session = Session {
             active: saved.iter().position(|t| t.id == self.active).unwrap_or(0),
             tabs: saved.iter().map(|t| t.snapshot()).collect(),
+            groups: self.groups.clone(),
         };
         self.store.save_session(&session);
     }
@@ -1185,6 +1227,11 @@ impl App {
         drop(tab); // уничтожает webview вкладки
         self.dirty = true;
         self.session_dirty = true;
+        if self.split.is_some_and(|(l, r, _)| l == id || r == id) {
+            self.split = None;
+            self.layout();
+        }
+        self.prune_groups();
 
         if self.tabs.is_empty() {
             self.quit = true;
@@ -1206,8 +1253,27 @@ impl App {
     fn set_active(&mut self, id: u32) {
         let previous = self.active;
         let scroll_proxy = self.proxy.clone();
+        // половины разделённого экрана видны обе: соседняя не уходит в фон
+        let visible_after = self.visible_with(id);
+        if let Some(partner) = self.visible_with(previous).into_iter().find(|t| *t != previous && !visible_after.contains(t)) {
+            if let Some(tab) = self.tab_mut(partner) {
+                tab.hidden_since = Some(Instant::now());
+                if let Some(webview) = &tab.webview {
+                    platform::set_background(webview, true);
+                }
+            }
+        }
+        if let Some(partner) = visible_after.iter().copied().find(|t| *t != id) {
+            if let Some(tab) = self.tab_mut(partner) {
+                tab.hidden_since = None;
+                tab.sleeping = false;
+                if let Some(webview) = &tab.webview {
+                    platform::set_background(webview, false);
+                }
+            }
+        }
         if let Some(old) = self.tab_mut(previous) {
-            if previous != id {
+            if previous != id && !visible_after.contains(&previous) {
                 old.hidden_since = Some(Instant::now());
                 if let Some(webview) = &old.webview {
                     platform::set_background(webview, true);
@@ -1464,6 +1530,14 @@ impl App {
                     let _ = self.ui.evaluate_script("ui.toast('Включите ПИН-код Windows Hello — без него карты не подставляются')");
                 }
             },
+            UserEvent::PageFocused(id) => {
+                // щёлкнули во вторую половину разделённого экрана — адрес и кнопки теперь её
+                if id != self.active && self.visible_with(self.active).contains(&id) {
+                    self.set_active(id);
+                    self.dirty = true;
+                    self.update_title();
+                }
+            }
             UserEvent::EngineCrashed => {
                 // движок упал целиком: все вкладки мертвы — перезапускаемся, сеанс восстановится
                 self.save_session();
@@ -2315,6 +2389,88 @@ impl App {
                 }
             }
             "prewarm_cancel" => self.prewarm = None,
+            "split" => {
+                // разделить экран: текущая вкладка слева, выбранная (или предыдущая) справа
+                let other = message["id"].as_u64().map(|v| v as u32).filter(|o| *o != self.active).or_else(|| {
+                    self.tabs.iter().filter(|t| t.id != self.active && !t.url.is_empty()).map(|t| t.id).last()
+                });
+                let Some(other) = other else {
+                    let _ = self.ui.evaluate_script("ui.toast('Откройте ещё одну вкладку с сайтом, чтобы разделить экран')");
+                    return;
+                };
+                self.start_split(self.active, other);
+            }
+            "unsplit" => {
+                self.split = None;
+                if let Some(tab) = self.visible_with(self.active).into_iter().find(|t| *t != self.active) {
+                    if let Some(tab) = self.tab_mut(tab) {
+                        tab.hidden_since = Some(Instant::now());
+                    }
+                }
+                self.layout();
+                self.dirty = true;
+            }
+            "split_swap" => {
+                if let Some((l, r, ratio)) = self.split {
+                    self.split = Some((r, l, 1.0 - ratio));
+                    self.layout();
+                    self.dirty = true;
+                }
+            }
+            "group_new" => {
+                let id = number("id") as u32;
+                let gid = self.groups.iter().map(|g| g.id).max().unwrap_or(0) + 1;
+                const COLORS: [&str; 8] = ["blue", "purple", "pink", "red", "orange", "yellow", "green", "cyan"];
+                let color = COLORS[(gid as usize - 1) % COLORS.len()].to_string();
+                self.groups.push(store::TabGroup { id: gid, name: String::new(), color, collapsed: false });
+                self.set_group(id, gid);
+                let _ = self.ui.evaluate_script(&format!("ui.groupCreated({gid})"));
+            }
+            "group_add" => self.set_group(number("id") as u32, number("group") as u32),
+            "group_new_tab" => {
+                let gid = number("group") as u32;
+                self.new_tab(None);
+                let id = self.active;
+                self.set_group(id, gid);
+            }
+            "group_remove" => self.set_group(number("id") as u32, 0),
+            "group_edit" => {
+                let gid = number("group") as u32;
+                if let Some(group) = self.groups.iter_mut().find(|g| g.id == gid) {
+                    if let Some(name) = message["name"].as_str() {
+                        group.name = name.chars().take(40).collect();
+                    }
+                    if let Some(color) = message["color"].as_str().filter(|c| c.len() < 16) {
+                        group.color = color.to_string();
+                    }
+                    if let Some(collapsed) = message["collapsed"].as_bool() {
+                        group.collapsed = collapsed;
+                    }
+                }
+                // свернули группу с активной вкладкой — переходим на вкладку вне группы
+                let collapsed = self.groups.iter().any(|g| g.id == gid && g.collapsed);
+                if collapsed && self.active_tab().is_some_and(|t| t.group == gid) {
+                    if let Some(next) = self.tabs.iter().find(|t| t.group != gid).map(|t| t.id) {
+                        self.activate(next);
+                    }
+                }
+                self.dirty = true;
+                self.session_dirty = true;
+            }
+            "group_ungroup" => {
+                let gid = number("group") as u32;
+                for tab in &mut self.tabs {
+                    if tab.group == gid {
+                        tab.group = 0;
+                    }
+                }
+                self.prune_groups();
+            }
+            "group_close" => {
+                let gid = number("group") as u32;
+                let ids: Vec<u32> = self.tabs.iter().filter(|t| t.group == gid).map(|t| t.id).collect();
+                self.close_many(ids);
+            }
             "my_button" => {
                 // уже открыт этот сайт — переключаемся на его вкладку, иначе открываем новую
                 let url = text("url");
@@ -2863,6 +3019,7 @@ impl App {
                     "muted": tab.muted,
                     "sleeping": tab.sleeping || (tab.webview.is_none() && !tab.url.is_empty()),
                     "lang": tab.lang,
+                    "group": tab.group,
                     "dark": adblock::host_of(&tab.url).is_some_and(|h| self.store.settings.dark_sites.iter().any(|d| d == h.trim_start_matches("www."))),
                 })
             })
@@ -2937,6 +3094,8 @@ impl App {
             "autofill": self.autofill.summary(),
             "afHere": self.active_tab().filter(|t| passwords::origin_of(&t.url).is_some()).map(|t| json!({ "card": t.af_card, "address": t.af_address })),
             "extensions": self.extensions_state(),
+            "groups": self.groups,
+            "split": self.split.map(|(l, r, ratio)| json!({ "left": l, "right": r, "ratio": ratio })),
             "account": self.account_state(),
             "extBrowsers": self.ext_browsers,
             "dark": self.dark(),
@@ -2960,6 +3119,126 @@ impl App {
 }
 
 impl App {
+    // ---------- группы вкладок и разделённый экран ----------
+
+    /// Какие вкладки видны, если активна эта: она сама или обе половины разделённого экрана.
+    fn visible_with(&self, id: u32) -> Vec<u32> {
+        match self.split {
+            Some((l, r, _)) if id == l || id == r => vec![l, r],
+            _ => vec![id],
+        }
+    }
+
+    /// Прямоугольники половин: (левый, правый, левая вкладка, правая вкладка).
+    fn split_rects(&self) -> Option<(Rect, Rect, u32, u32)> {
+        let (left, right, ratio) = self.split?;
+        if self.is_fullscreen() {
+            return None;
+        }
+        let area = self.page_rect();
+        let (pos, size) = (area.position.to_logical::<f64>(1.0), area.size.to_logical::<f64>(1.0));
+        let gap = SPLIT_GAP;
+        let left_w = ((size.width - gap) * ratio).round();
+        let right_w = size.width - gap - left_w;
+        Some((
+            rect(pos.x, pos.y, left_w, size.height),
+            rect(pos.x + left_w + gap, pos.y, right_w, size.height),
+            left,
+            right,
+        ))
+    }
+
+    fn start_split(&mut self, left: u32, right: u32) {
+        if self.tab(right).is_none() || left == right {
+            return;
+        }
+        // правая вкладка могла быть выгружена — загружаем, но остаёмся на левой
+        if self.tab(right).is_some_and(|t| t.webview.is_none() && !t.url.is_empty()) {
+            self.activate(right);
+        }
+        self.split = Some((left, right, 0.5));
+        self.activate(left);
+        if let Some(tab) = self.tab_mut(right) {
+            tab.hidden_since = None;
+            tab.sleeping = false;
+            if let Some(webview) = &tab.webview {
+                platform::set_background(webview, false);
+            }
+        }
+        self.layout();
+        self.dirty = true;
+    }
+
+    /// Разделитель между половинами: курсор-стрелки над ним, перетаскивание меняет доли.
+    fn split_cursor(&mut self, x: f64, y: f64) {
+        self.cursor = (x, y);
+        let Some((left_rect, _, _, _)) = self.split_rects().filter(|_| self.visible_with(self.active).len() == 2) else {
+            return;
+        };
+        let scale = self.window.scale_factor();
+        let (lx, ly) = (x / scale, y / scale);
+        let left = left_rect.position.to_logical::<f64>(1.0);
+        let size = left_rect.size.to_logical::<f64>(1.0);
+        if self.split_drag {
+            let area = self.page_rect();
+            let (ax, aw) = (area.position.to_logical::<f64>(1.0).x, area.size.to_logical::<f64>(1.0).width);
+            let ratio = ((lx - ax - SPLIT_GAP / 2.0) / (aw - SPLIT_GAP)).clamp(0.2, 0.8);
+            if let Some(split) = &mut self.split {
+                split.2 = ratio;
+            }
+            self.layout();
+            return;
+        }
+        let over = lx >= left.x + size.width - 2.0 && lx <= left.x + size.width + SPLIT_GAP + 2.0 && ly >= left.y;
+        self.window.set_cursor_icon(if over { tao::window::CursorIcon::ColResize } else { tao::window::CursorIcon::Default });
+    }
+
+    fn split_press(&mut self, pressed: bool) {
+        if !pressed {
+            if self.split_drag {
+                self.split_drag = false;
+                self.dirty = true;
+            }
+            return;
+        }
+        let Some((left_rect, _, _, _)) = self.split_rects() else { return };
+        let scale = self.window.scale_factor();
+        let lx = self.cursor.0 / scale;
+        let left = left_rect.position.to_logical::<f64>(1.0).x + left_rect.size.to_logical::<f64>(1.0).width;
+        self.split_drag = lx >= left - 2.0 && lx <= left + SPLIT_GAP + 2.0;
+    }
+
+    /// Вкладка вступает в группу (или выходит из неё при 0) и встаёт рядом с остальными.
+    fn set_group(&mut self, id: u32, group: u32) {
+        let Some(index) = self.index_of(id) else { return };
+        if group != 0 && !self.groups.iter().any(|g| g.id == group) {
+            return;
+        }
+        self.tabs[index].group = group;
+        if group != 0 && !self.tabs[index].pinned {
+            // вкладки группы держатся вместе: ставим за последней вкладкой группы
+            if let Some(last) = self.tabs.iter().rposition(|t| t.group == group && t.id != id) {
+                let tab = self.tabs.remove(index);
+                let at = if last >= index { last } else { last + 1 };
+                self.tabs.insert(at.min(self.tabs.len()), tab);
+            }
+        }
+        self.prune_groups();
+        self.dirty = true;
+        self.session_dirty = true;
+    }
+
+    /// Группы без вкладок исчезают сами.
+    fn prune_groups(&mut self) {
+        let before = self.groups.len();
+        let used: Vec<u32> = self.tabs.iter().map(|t| t.group).collect();
+        self.groups.retain(|g| used.contains(&g.id));
+        if self.groups.len() != before {
+            self.dirty = true;
+            self.session_dirty = true;
+        }
+    }
+
     // ---------- тёмные сайты, перевод ----------
 
     /// Перерегистрирует скрипт тёмной темы во всех вкладках и сразу применяет его.
