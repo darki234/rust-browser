@@ -18,7 +18,7 @@ powershell -ExecutionPolicy Bypass -File tests\e2e\run-e2e.ps1
 передачу адреса уже открытому окну. После проверок всё временное удаляется.
 
 Видеообои в git не хранятся: после клонирования один раз запустите
-`powershell -ExecutionPolicy Bypass -File assets\wallsetch.ps1`.
+`powershell -ExecutionPolicy Bypass -File assets\walls\fetch.ps1`.
 
 Ключ `-Release` проверяет релизную сборку. Модульные тесты — `cargo test`.
 
