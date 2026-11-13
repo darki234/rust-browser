@@ -71,6 +71,9 @@ const ICONS = {
   mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/>',
   undo: '<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>',
   redo: '<path d="m15 14 5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/>',
+  key: '<circle cx="7.5" cy="15.5" r="4.5"/><path d="m10.7 12.3 9.3-9.3"/><path d="m16 7 3 3"/><path d="m14 9 2 2"/>',
+  eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
+  eyeoff: '<path d="M10.6 5.1A10 10 0 0 1 12 5c6.5 0 10 7 10 7a17 17 0 0 1-2.2 3.1"/><path d="M6.6 6.6C3.7 8.4 2 12 2 12s3.5 7 10 7a9.7 9.7 0 0 0 5.4-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/><path d="m3 3 18 18"/>',
   cut: '<circle cx="6" cy="18" r="3"/><circle cx="18" cy="18" r="3"/><path d="M8.1 15.9 18 4"/><path d="M15.9 15.9 6 4"/>',
   paste: '<rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4h6v2H9z"/>',
   pastego: '<rect x="4" y="4" width="11" height="16" rx="2"/><path d="M7 4h5v2H7z"/><path d="M14 15h7"/><path d="m18 12 3 3-3 3"/>',
@@ -271,6 +274,7 @@ function setState(next) {
   renderToolbar();
   renderFavbar();
   renderStart();
+  renderPasswordKey();
   if (hubSection && hubSection !== 'history') renderHubList(false);
   if (menuKind === 'main') refreshMainMenu();
 }
@@ -2008,6 +2012,10 @@ window.ui = {
   zoomChanged: refreshMainMenu,
   downloadStarted: () => replay(el.downloads, 'bounce'),
   dataCleared: () => toast('Данные сайтов удалены'),
+  toast,
+  passwordOffer,
+  passwordRevealed,
+  passwordsImported: (count) => toast(count ? `Перенесено паролей: ${count}. Не забудьте удалить CSV-файл` : 'Новых паролей в файле не нашлось'),
   pasteText,
   showSiteInfo,
   showTasks,
@@ -2015,6 +2023,122 @@ window.ui = {
   cookiesCleared: (count) => { closeMenu(); toast(`Удалено файлов cookie: ${count}`); },
   imported: (count) => toast(count ? `Перенесено в избранное: ${count}` : 'Новых сайтов для избранного не нашлось'),
 };
+
+
+// ---------- пароли ----------
+// Интерфейс знает только сайт и логин. Сам пароль приходит сюда лишь после Windows Hello
+// (показать/скопировать), а подставляет его в страницу Rust — по щелчку здесь.
+
+const pwkey = $('#pwkey');
+let pwOffer = null;
+
+function renderPasswordKey() {
+  const here = S.pwHere || [];
+  const show = !!pwOffer || here.length > 0;
+  pwkey.classList.toggle('show', show);
+  pwkey.classList.toggle('offer', !!pwOffer);
+  pwkey.title = pwOffer ? 'Сохранить пароль' : 'Войти с сохранённым паролем';
+}
+
+function placeAtKey() {
+  const anchor = pwkey.getBoundingClientRect();
+  el.menu.style.left = Math.max(8, Math.min(anchor.right - 330, innerWidth - 340)) + 'px';
+  el.menu.style.top = anchor.bottom + 10 + 'px';
+  el.menu.style.transformOrigin = 'top right';
+}
+
+function showPasswordOffer() {
+  if (!pwOffer) return;
+  const offer = pwOffer;
+  const nodes = [
+    h('div', { class: 'pw-head' },
+      h('span', { class: 'pw-badge' }, icon('key', 20)),
+      h('div', {},
+        h('b', {}, offer.update ? 'Обновить пароль?' : 'Сохранить пароль?'),
+        h('small', {}, offer.site))),
+    h('div', { class: 'pw-fields' },
+      h('div', { class: 'pw-field' }, h('span', {}, 'Логин'), h('b', {}, offer.username || 'без логина')),
+      h('div', { class: 'pw-field' }, h('span', {}, 'Пароль'), h('b', {}, '••••••••••'))),
+    h('div', { class: 'pw-note' }, icon('lock', 13), 'Шифруется Windows: прочитать сможет только ваша учётная запись'),
+    h('div', { class: 'pw-acts' },
+      h('button', { class: 'text-btn', onclick: () => { send('pw_never'); pwOffer = null; closeMenu(); renderPasswordKey(); } }, 'Никогда для сайта'),
+      h('button', { class: 'text-btn outline', onclick: () => { send('pw_dismiss'); pwOffer = null; closeMenu(); renderPasswordKey(); } }, 'Не сейчас'),
+      h('button', { class: 'text-btn primary', onclick: () => { send('pw_save'); pwOffer = null; closeMenu(); renderPasswordKey(); } }, 'Сохранить')),
+  ];
+  showMenu('pwsave', nodes, placeAtKey);
+}
+
+function showPasswordPicker() {
+  const here = S.pwHere || [];
+  const nodes = [
+    h('div', { class: 'menu-title' }, 'Войти как'),
+    ...here.map(([index, username]) => item({
+      icon: 'key', label: username || 'без логина', onClick: () => send('pw_fill', { index }),
+    })),
+    sep(),
+    item({ icon: 'gear', label: 'Управление паролями', onClick: () => { settingsCat = 'privacy'; openHub('settings'); } }),
+  ];
+  showMenu('pwpick', nodes, placeAtKey);
+}
+
+pwkey.addEventListener('click', () => {
+  if (menuKind === 'pwsave' || menuKind === 'pwpick') return closeMenu();
+  if (pwOffer) showPasswordOffer();
+  else showPasswordPicker();
+});
+
+function passwordOffer(offer) {
+  pwOffer = offer;
+  renderPasswordKey();
+  showPasswordOffer();
+}
+
+// показанные пароли: номер → текст; через 20 секунд снова скрываются
+const revealed = new Map();
+function passwordRevealed({ index, password, copy }) {
+  if (copy) {
+    navigator.clipboard.writeText(password).then(() => toast('Пароль скопирован'), () => toast('Не удалось скопировать'));
+    return;
+  }
+  revealed.set(index, password);
+  settingsUpdaters.forEach((update) => update());
+  setTimeout(() => { revealed.delete(index); settingsUpdaters.forEach((update) => update()); }, 20000);
+}
+
+function passwordsCard() {
+  const query = h('input', { type: 'text', class: 'field', placeholder: 'Найти сайт или логин', spellcheck: 'false' });
+  const list = h('div', { class: 'pw-list' });
+  const never = h('div', { class: 'pw-never' });
+  const draw = () => {
+    const q = query.value.trim().toLowerCase();
+    const rows = (S.logins || []).map((login, index) => ({ ...login, index }))
+      .filter((l) => !q || l.site.includes(q) || l.username.toLowerCase().includes(q))
+      .sort((a, b) => a.site.localeCompare(b.site));
+    list.replaceChildren(...(rows.length ? rows.map((l) => h('div', { class: 'pw-row' },
+      h('span', { class: 'pw-fav' }, l.site.replace(/^www\./, '').charAt(0).toUpperCase()),
+      h('div', { class: 'pw-who' }, h('b', {}, l.site), h('small', {}, l.username || 'без логина')),
+      h('code', { class: 'pw-secret' + (revealed.has(l.index) ? ' open' : '') }, revealed.get(l.index) ?? '••••••••••'),
+      actionButton(revealed.has(l.index) ? 'eyeoff' : 'eye', revealed.has(l.index) ? 'Скрыть' : 'Показать (Windows Hello)', () => {
+        if (revealed.has(l.index)) { revealed.delete(l.index); draw(); } else send('pw_reveal', { index: l.index });
+      }),
+      actionButton('copy', 'Скопировать пароль (Windows Hello)', () => send('pw_reveal', { index: l.index, copy: true })),
+      actionButton('trash', 'Удалить', () => send('pw_delete', { index: l.index }))))
+      : [h('div', { class: 'pw-empty' }, (S.logins || []).length ? 'Ничего не найдено' : 'Сохранённых паролей пока нет')]));
+    const blocked = S.pwNever || [];
+    never.replaceChildren(...(blocked.length ? [h('small', {}, 'Не предлагать для: '), ...blocked.map(([origin, site]) =>
+      h('span', { class: 'pw-chip' }, site, h('button', { title: 'Снова предлагать', onclick: () => send('pw_unblock', { origin }) }, '×')))] : []));
+  };
+  query.addEventListener('input', draw);
+  settingsUpdaters.push(draw);
+  return h('div', { class: 'card' }, h('h2', {}, 'Пароли'),
+    setting('Предлагать сохранять пароли', 'Пароли шифруются Windows (DPAPI) и хранятся только на этом компьютере. На сайт подставляются по щелчку на ключ в адресной строке и только по HTTPS',
+      toggle(() => S.settings.passwords, (value) => set('passwords', value))),
+    setting('Перенести из другого браузера', 'В Chrome, Edge или Firefox выгрузите пароли в CSV-файл и выберите его здесь. Потом удалите этот файл — в нём пароли открытым текстом',
+      h('button', { class: 'text-btn outline', onclick: () => send('pw_import') }, 'Импорт из CSV')),
+    h('div', { class: 'set pw-search' }, h('div', { class: 'label' }, 'Сохранённые пароли',
+      h('small', {}, 'Посмотреть или скопировать пароль можно после Windows Hello — ПИН-кода, отпечатка или лица')), query),
+    list, never);
+}
 
 // ---------- заставка запуска ----------
 

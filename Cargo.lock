@@ -1761,6 +1761,7 @@ dependencies = [
  "tao",
  "webview2-com",
  "windows",
+ "windows-future",
  "winresource",
  "wry",
  "zip",

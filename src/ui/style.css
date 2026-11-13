@@ -1760,3 +1760,39 @@ body.glass .setcats { background: transparent; }
 .s-minimal .sbar i { display: block; height: 100%; background: var(--accent); animation: s-load .7s var(--ease) both; transform-origin: left; }
 .s-minimal.leave { animation: s-fade .3s ease-in forwards; }
 @keyframes s-load { from { transform: scaleX(0); } }
+
+/* ---------- пароли ---------- */
+#pwkey { display: none; color: var(--muted); }
+#pwkey.show { display: grid; }
+#pwkey.offer { color: var(--accent); animation: pop .45s var(--spring); }
+.pw-head { display: flex; align-items: center; gap: 12px; padding: 10px 12px 8px; }
+.pw-head b { display: block; font-size: 15px; }
+.pw-head small { color: var(--muted); }
+.pw-badge { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 12px; color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, transparent); }
+.pw-fields { margin: 4px 12px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+.pw-field { display: flex; gap: 12px; padding: 9px 12px; }
+.pw-field + .pw-field { border-top: 1px solid var(--border); }
+.pw-field span { width: 60px; color: var(--muted); }
+.pw-field b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pw-note { display: flex; align-items: center; gap: 6px; padding: 8px 14px 2px; font-size: 12px; color: var(--muted); }
+.pw-acts { display: flex; justify-content: flex-end; gap: 6px; padding: 10px 10px 6px; }
+.menu-title { padding: 8px 12px 4px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.pw-search .field { width: 230px; }
+.pw-list { padding: 0 10px 8px; }
+.pw-row { display: flex; align-items: center; gap: 12px; height: 52px; padding: 0 8px; border-radius: 10px; }
+.pw-row:hover { background: var(--hover); }
+.pw-row .acts, .pw-row > .icon-btn { flex: none; }
+.pw-fav { flex: none; width: 30px; height: 30px; display: grid; place-items: center; border-radius: 9px; background: color-mix(in srgb, var(--accent) 16%, var(--surface)); color: var(--accent); font-weight: 600; }
+.pw-who { flex: 1; min-width: 0; }
+.pw-who b, .pw-who small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pw-who b { font-weight: 500; }
+.pw-who small { color: var(--muted); }
+.pw-secret { flex: none; width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font: 13px/1 Consolas, monospace; letter-spacing: .08em; }
+.pw-secret.open { color: var(--text); letter-spacing: 0; user-select: text; }
+.pw-empty { padding: 18px 10px; color: var(--muted); text-align: center; }
+.pw-never { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 0 18px 12px; }
+.pw-never:empty { display: none; }
+.pw-never small { color: var(--muted); }
+.pw-chip { display: inline-flex; align-items: center; gap: 4px; height: 26px; padding: 0 4px 0 10px; border-radius: 13px; background: var(--hover); }
+.pw-chip button { width: 20px; height: 20px; border: 0; border-radius: 10px; background: transparent; color: var(--muted); font: inherit; }
+.pw-chip button:hover { background: var(--press); color: var(--text); }

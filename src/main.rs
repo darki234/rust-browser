@@ -6,6 +6,7 @@ mod efficiency;
 mod extension;
 mod platform;
 mod pages;
+mod passwords;
 mod store;
 mod system;
 
@@ -120,6 +121,10 @@ pub enum UserEvent {
     Remote(Vec<String>),
     /// Прокрутка вкладки в момент ухода в фон.
     Scrolled(u32, f64),
+    /// Сообщение от страницы вкладки: (вкладка, настоящий адрес страницы, JSON).
+    Page(u32, String, String),
+    /// Windows Hello ответил: (номер пароля, скопировать, итог).
+    Verified(usize, bool, passwords::Verdict),
     /// Процессы WebView2; true — показать их в диспетчере вкладок.
     Processes(Vec<efficiency::ProcessInfo>, bool),
     /// Страница не загрузилась: (вкладка, вид ошибки для своей страницы ошибки).
@@ -131,6 +136,13 @@ pub enum DownloadEvent {
     Progress { id: u64, received: i64, total: i64 },
     /// "progress" | "paused" | "done" | "canceled" | "failed"
     State { id: u64, state: &'static str, received: i64 },
+}
+
+struct PasswordOffer {
+    tab: u32,
+    origin: String,
+    username: String,
+    password: String,
 }
 
 struct Tab {
@@ -160,6 +172,8 @@ struct Tab {
     restore_scroll: Option<f64>,
     /// Показана своя страница ошибки: в журнал такое не пишем.
     failed: bool,
+    /// На странице есть поле пароля — показываем ключ, если для сайта есть пароли.
+    pw_form: bool,
 }
 
 impl Tab {
@@ -184,6 +198,7 @@ impl Tab {
             scroll: None,
             restore_scroll: None,
             failed: false,
+            pw_form: false,
         }
     }
 
@@ -244,6 +259,12 @@ struct App {
     last_download: Option<Instant>,
     /// id установленного uBlock Origin Lite.
     ubol_id: Option<String>,
+    /// Сохранённые пароли (зашифрованы) и сайты «никогда не сохранять».
+    vault: passwords::Vault,
+    /// Пароль, который только что ввели на сайте: ждёт ответа «Сохранить?».
+    pw_offer: Option<PasswordOffer>,
+    /// Когда последний раз подтверждали личность: минуту пароли можно смотреть без повтора.
+    pw_verified: Option<Instant>,
     tabs: Vec<Tab>,
     active: u32,
     next_id: u32,
@@ -345,6 +366,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Заставка — только при первом запуске браузера, не для каждого нового окна.
     let splash = if primary { store.settings.splash.clone() } else { "off".to_string() };
     let ui = build_ui(&window, proxy.clone(), &mut web_context, keys.clone(), inprivate, dark, &splash, network.clone())?;
+    let vault: passwords::Vault = store.read_named("passwords.json");
 
     let mut app = App {
         adblock: Arc::new(AtomicBool::new(store.settings.adblock)),
@@ -363,6 +385,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         import_sources: pages::import_sources(),
         last_download: None,
         ubol_id: None,
+        vault,
+        pw_offer: None,
+        pw_verified: None,
         tabs: Vec::new(),
         active: 0,
         next_id: 1,
@@ -610,6 +635,7 @@ fn build_panel_app(app: &mut App, url: &str) -> wry::Result<WebView> {
 fn build_tab(app: &mut App, id: u32, bounds: Rect) -> wry::Result<WebView> {
     let proxy = app.proxy.clone();
     let (nav, title, load, popup) = (proxy.clone(), proxy.clone(), proxy.clone(), proxy.clone());
+    let page = proxy.clone();
     let theme = app.page_theme();
     // Пока страница не отрисовалась, под ней цвет темы, а не белая вспышка.
     let background = backdrop_color(app.dark());
@@ -621,6 +647,13 @@ fn build_tab(app: &mut App, id: u32, bounds: Rect) -> wry::Result<WebView> {
         .with_network(proxy_config(&app.store.settings))
         .with_devtools(true)
         .with_theme(theme)
+        // менеджер паролей: замечает формы входа (сам пароль — только при отправке)
+        .with_initialization_script(passwords::PAGE_SCRIPT)
+        // адрес берём из самого запроса WebView2, а не из сообщения: сайт не может притвориться другим
+        .with_ipc_handler(move |request: Request<String>| {
+            let url = request.uri().to_string();
+            let _ = page.send_event(UserEvent::Page(id, url, request.into_body()));
+        })
         .with_navigation_handler(move |url| {
             let _ = nav.send_event(UserEvent::UrlChanged(id, url));
             true
@@ -647,7 +680,8 @@ fn build_tab(app: &mut App, id: u32, bounds: Rect) -> wry::Result<WebView> {
     platform::hook_find(&webview, id, proxy.clone());
     platform::hook_load_errors(&webview, id, proxy.clone());
     platform::hook_downloads(&webview, app.download_dir.clone(), proxy);
-    platform::set_passwords(&webview, app.store.settings.passwords);
+    // встроенное сохранение паролей WebView2 выключено: пароли хранит свой менеджер
+    platform::set_passwords(&webview, false);
     Ok(webview)
 }
 
@@ -1143,6 +1177,7 @@ impl App {
                     tab.url = url;
                     tab.failed = false;
                     tab.blocked = 0;
+                    tab.pw_form = false;
                     self.dirty = true;
                     self.session_dirty = true;
                 }
@@ -1219,6 +1254,8 @@ impl App {
             }
             UserEvent::Captured(bytes) => self.finish_overlay(bytes),
             UserEvent::Panel(raw) => self.handle_panel(&raw),
+            UserEvent::Page(id, url, raw) => self.handle_page(id, &url, &raw),
+            UserEvent::Verified(index, copy, verdict) => self.password_verified(index, copy, verdict),
             UserEvent::Processes(list, report) => {
                 self.processes = list;
                 self.apply_efficiency();
@@ -1633,10 +1670,6 @@ impl App {
             "favbar" => settings.favbar = value.as_bool().unwrap_or(settings.favbar),
             "passwords" => {
                 settings.passwords = value.as_bool().unwrap_or(settings.passwords);
-                let enabled = settings.passwords;
-                for webview in self.tabs.iter().filter_map(|t| t.webview.as_ref()) {
-                    platform::set_passwords(webview, enabled);
-                }
             }
             "efficiency_mode" => {
                 settings.efficiency_mode = value.as_bool().unwrap_or(settings.efficiency_mode);
@@ -1935,6 +1968,31 @@ impl App {
             }
 
             // слои поверх страницы
+            "pw_save" => self.save_offered_password(),
+            "pw_never" => {
+                if let Some(offer) = self.pw_offer.take() {
+                    if !self.vault.never.contains(&offer.origin) {
+                        self.vault.never.push(offer.origin);
+                    }
+                    self.save_vault();
+                }
+            }
+            "pw_dismiss" => self.pw_offer = None,
+            "pw_fill" => self.fill_password(number("index") as usize),
+            "pw_reveal" => self.reveal_password(number("index") as usize, message["copy"].as_bool().unwrap_or(false)),
+            "pw_delete" => {
+                let index = number("index") as usize;
+                if index < self.vault.logins.len() {
+                    self.vault.logins.remove(index);
+                    self.save_vault();
+                }
+            }
+            "pw_unblock" => {
+                let origin = text("origin");
+                self.vault.never.retain(|o| *o != origin);
+                self.save_vault();
+            }
+            "pw_import" => self.import_passwords(),
             "splash_done" => {
                 self.splash = false;
                 self.layout();
@@ -2373,13 +2431,19 @@ impl App {
             "panelOpen": self.panel_width() > 0.0,
             "onBattery": self.on_battery,
             "importSources": self.import_sources,
+            "logins": self.vault.logins.iter().map(|l| json!({
+                "site": passwords::display_host(&l.origin),
+                "username": l.username,
+            })).collect::<Vec<_>>(),
+            "pwNever": self.vault.never.iter().map(|o| json!([o, passwords::display_host(o)])).collect::<Vec<_>>(),
+            "pwHere": self.passwords_here(),
             "dark": self.dark(),
             "maximized": self.maximized,
             "fullscreen": self.is_fullscreen(),
         });
         let mut state = state;
         if let Value::Object(fields) = &mut state {
-            for key in ["bookmarks", "downloads", "engines", "settings"] {
+            for key in ["bookmarks", "downloads", "engines", "settings", "logins", "pwNever"] {
                 let Some(value) = fields.get(key) else { continue };
                 let text = value.to_string();
                 if self.sent.get(key) == Some(&text) {
@@ -2391,6 +2455,156 @@ impl App {
         }
         let _ = self.ui.evaluate_script(&format!("ui.setState({state})"));
     }
+}
+
+impl App {
+    // ---------- пароли ----------
+
+    fn save_vault(&mut self) {
+        self.store.write_named("passwords.json", &self.vault);
+        self.dirty = true;
+    }
+
+    /// Логины для страницы на экране: (номер в хранилище, логин). Только если на ней форма входа.
+    fn passwords_here(&self) -> Vec<Value> {
+        let Some(tab) = self.active_tab().filter(|t| t.pw_form) else { return Vec::new() };
+        let Some(origin) = passwords::origin_of(&tab.url) else { return Vec::new() };
+        self.vault
+            .logins
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.origin == origin)
+            .map(|(i, l)| json!([i, l.username]))
+            .collect()
+    }
+
+    fn handle_page(&mut self, id: u32, url: &str, raw: &str) {
+        let Ok(message) = serde_json::from_str::<Value>(raw) else { return };
+        match message["cmd"].as_str().unwrap_or("") {
+            "pw_form" => {
+                // сообщение могло прийти от прошлой страницы этой вкладки
+                let Some(tab) = self.tab_mut(id) else { return };
+                if passwords::origin_of(&tab.url) == passwords::origin_of(url) {
+                    tab.pw_form = true;
+                    self.dirty = true;
+                }
+            }
+            "pw_capture" => {
+                if self.inprivate || !self.store.settings.passwords {
+                    return;
+                }
+                let Some(origin) = passwords::origin_of(url) else { return };
+                let username: String = message["username"].as_str().unwrap_or("").chars().take(200).collect();
+                let password = message["password"].as_str().unwrap_or("");
+                if password.is_empty() || password.len() > 1000 || self.vault.never.contains(&origin) {
+                    return;
+                }
+                if self.vault.has_same(&origin, &username, password) {
+                    return;
+                }
+                let update = self.vault.for_origin(&origin).any(|l| l.username == username);
+                let site = passwords::display_host(&origin).to_string();
+                self.pw_offer = Some(PasswordOffer {
+                    tab: id,
+                    origin,
+                    username: username.clone(),
+                    password: password.to_string(),
+                });
+                if id == self.active {
+                    let offer = json!({ "site": site, "username": username, "update": update });
+                    let _ = self.ui.evaluate_script(&format!("ui.passwordOffer({offer})"));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn save_offered_password(&mut self) {
+        let Some(offer) = self.pw_offer.take() else { return };
+        if self.vault.upsert(&offer.origin, &offer.username, &offer.password, unix_now()) {
+            self.save_vault();
+            let _ = self.ui.evaluate_script("ui.toast('Пароль сохранён и зашифрован')");
+        }
+        if let Some(tab) = self.tab_mut(offer.tab) {
+            tab.pw_form = true;
+        }
+    }
+
+    /// Подставляет пароль только по щелчку в интерфейсе и только на тот же сайт.
+    fn fill_password(&mut self, index: usize) {
+        let Some(login) = self.vault.logins.get(index) else { return };
+        let Some(tab) = self.active_tab() else { return };
+        if passwords::origin_of(&tab.url).as_deref() != Some(login.origin.as_str()) {
+            return;
+        }
+        let Some(webview) = tab.webview.as_ref() else { return };
+        let Some(password) = passwords::unprotect(&login.secret) else {
+            let _ = self.ui.evaluate_script("ui.toast('Не удалось расшифровать пароль')");
+            return;
+        };
+        let _ = webview.evaluate_script(&passwords::fill_script(&login.username, &password));
+        let _ = webview.focus();
+        self.vault.logins[index].used = unix_now();
+        self.store.write_named("passwords.json", &self.vault);
+    }
+
+    /// Показать или скопировать пароль можно только после Windows Hello.
+    fn reveal_password(&mut self, index: usize, copy: bool) {
+        if index >= self.vault.logins.len() {
+            return;
+        }
+        if self.pw_verified.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
+            self.password_verified(index, copy, passwords::Verdict::Verified);
+            return;
+        }
+        let proxy = self.proxy.clone();
+        passwords::verify(
+            self.window.hwnd(),
+            "Rust Browser: подтвердите, что это вы, чтобы увидеть пароль",
+            move |verdict| {
+                let _ = proxy.send_event(UserEvent::Verified(index, copy, verdict));
+            },
+        );
+    }
+
+    fn password_verified(&mut self, index: usize, copy: bool, verdict: passwords::Verdict) {
+        match verdict {
+            passwords::Verdict::Verified => {
+                self.pw_verified = Some(Instant::now());
+                let Some(password) = self.vault.logins.get(index).and_then(|l| passwords::unprotect(&l.secret))
+                else {
+                    return;
+                };
+                let reply = json!({ "index": index, "password": password, "copy": copy });
+                let _ = self.ui.evaluate_script(&format!("ui.passwordRevealed({reply})"));
+            }
+            passwords::Verdict::Canceled => {}
+            passwords::Verdict::Unavailable => {
+                let _ = self.ui.evaluate_script(
+                    "ui.toast('Включите ПИН-код Windows Hello в Параметрах Windows — без него пароли не показываются')",
+                );
+            }
+        }
+    }
+
+    fn import_passwords(&mut self) {
+        let Some(path) = platform::pick_file(self.window.hwnd(), "Пароли (CSV)", "*.csv") else { return };
+        let Ok(text) = std::fs::read_to_string(&path) else { return };
+        let now = unix_now();
+        let mut added = 0;
+        for (url, username, password) in passwords::parse_csv(&text) {
+            let Some(origin) = passwords::origin_of(&url) else { continue };
+            if !self.vault.has_same(&origin, &username, &password) && self.vault.upsert(&origin, &username, &password, now) {
+                added += 1;
+            }
+        }
+        self.save_vault();
+        let _ = self.ui.evaluate_script(&format!("ui.passwordsImported({added})"));
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 /// Выгружает вкладку: webview и процесс страницы уничтожаются, адрес остаётся;
