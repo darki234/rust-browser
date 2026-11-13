@@ -687,7 +687,73 @@ body[data-wall="night"] .aurora i:nth-child(3) { --blob: #0d47a1; }
 :root[data-theme="light"] body[data-wall="sunset"] #start { background: #fff3ee; }
 :root[data-theme="light"] body[data-wall="ocean"] #start { background: #eef7fb; }
 :root[data-theme="light"] body[data-wall="forest"] #start { background: #f0f7f1; }
-body[data-wall="mono"] .aurora, body[data-wall="image"] .aurora { display: none; }
+body:is([data-wall="mono"], [data-wall="image"], [data-wall="video"], [data-wall="waves"],
+  [data-wall="stars"], [data-wall="particles"], [data-wall="flow"]) .aurora { display: none; }
+
+/* ---------- живые обои ---------- */
+
+#wall video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+body:not([data-wall="video"]) #wall video { display: none; }
+#wallcanvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+body:not(:is([data-wall="stars"], [data-wall="particles"])) #wallcanvas { display: none; }
+
+body[data-wall="stars"] #start { background: radial-gradient(120% 90% at 50% 115%, #2a1d5c 0%, #0b0d1a 55%, #04050b 100%); }
+body[data-wall="particles"] #start { background: radial-gradient(90% 90% at 25% 15%, color-mix(in srgb, var(--accent) 22%, #0c0e18), #07080f 70%); }
+
+/* «Переливы»: мягко вращающийся цветной круг, крутит его только видеокарта */
+#flow {
+  position: absolute;
+  inset: -60%;
+  display: none;
+  background: conic-gradient(from 0deg, var(--accent), var(--accent-2), var(--accent-3), var(--accent));
+  filter: blur(70px) saturate(1.2);
+  opacity: .55;
+  will-change: transform;
+  animation: spin 48s linear infinite;
+}
+body[data-wall="flow"] #flow { display: block; }
+body[data-wall="flow"] #start { background: #0b0c12; }
+
+/* «Волны»: три слоя волн бегут с разной скоростью */
+#waves { position: absolute; inset: 0; display: none; overflow: hidden; pointer-events: none;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 14%, var(--bg)), var(--bg) 70%); }
+body[data-wall="waves"] #waves { display: block; }
+#waves svg { position: absolute; left: 0; bottom: 0; width: 300%; height: 34%; will-change: transform; animation: wave 22s linear infinite; }
+#waves svg:nth-child(1) { fill: color-mix(in srgb, var(--accent) 45%, transparent); height: 40%; animation-duration: 26s; }
+#waves svg:nth-child(2) { fill: color-mix(in srgb, var(--accent-2) 40%, transparent); height: 30%; animation-duration: 18s; animation-direction: reverse; }
+#waves svg:nth-child(3) { fill: color-mix(in srgb, var(--accent-3) 45%, transparent); height: 22%; animation-duration: 13s; }
+@keyframes wave { to { transform: translateX(-33.333%); } }
+
+/* в покое живые обои замирают, если не выбрано «двигаться всё время» */
+body.calm:not(.wall-always) :is(#flow, #waves svg, .aurora i) { animation-play-state: paused; }
+body.wall-always .aurora i { animation-play-state: running; }
+
+/* белый текст на тёмных и пёстрых обоях */
+body.wall-contrast :is(#clock, #date, #stat, .tiles-hint, #greeting) { color: #fff; text-shadow: 0 1px 12px rgba(0, 0, 0, .45); }
+body.wall-contrast #wallbtn { color: #fff; background: rgba(0, 0, 0, .3); border-color: rgba(255, 255, 255, .2); }
+
+.walltile em {
+  position: absolute;
+  top: 5px;
+  right: 6px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, .35);
+  color: #fff;
+  font: 600 10px/1.4 "Segoe UI", sans-serif;
+  font-style: normal;
+}
+.w-waves { background: linear-gradient(180deg, #1d2140, #15161c 55%), #15161c; }
+.w-waves::after { content: ""; position: absolute; left: -10%; right: -10%; bottom: -12px; height: 34px; border-radius: 50%; background: color-mix(in srgb, var(--accent) 60%, transparent); }
+.w-stars { background: radial-gradient(1px 1px at 20% 30%, #fff, transparent), radial-gradient(1px 1px at 70% 20%, #fff, transparent),
+  radial-gradient(1.5px 1.5px at 45% 60%, #fff, transparent), radial-gradient(1px 1px at 85% 70%, #fff, transparent),
+  radial-gradient(120% 90% at 50% 115%, #2a1d5c, #0b0d1a 60%); }
+.w-particles { background: radial-gradient(2px 2px at 25% 35%, var(--accent), transparent), radial-gradient(2px 2px at 60% 25%, var(--accent), transparent),
+  radial-gradient(2px 2px at 75% 65%, var(--accent), transparent), radial-gradient(2px 2px at 35% 70%, var(--accent), transparent),
+  linear-gradient(28deg, transparent 49%, color-mix(in srgb, var(--accent) 40%, transparent) 50%, transparent 51%), #0c0e18; }
+.w-flow { background: conic-gradient(from 40deg, var(--accent), var(--accent-2), var(--accent-3), var(--accent)); filter: saturate(1.1); }
+.w-video { background: linear-gradient(135deg, #2b2d3a, #15161c); }
+.w-video span { color: #fff; }
 
 /* своё фото: на весь экран, с затемнением для читаемости */
 #wall {
@@ -699,8 +765,7 @@ body[data-wall="mono"] .aurora, body[data-wall="image"] .aurora { display: none;
 }
 #wall::after { content: ""; position: absolute; inset: 0; background: rgba(0, 0, 0, var(--dim, .35)); }
 #wall.show { opacity: 1; }
-body[data-wall="image"] #clock, body[data-wall="image"] #date, body[data-wall="image"] #stat,
-body[data-wall="image"] .tiles-hint { color: #fff; text-shadow: 0 1px 12px rgba(0, 0, 0, .45); }
+
 
 #wallbtn {
   position: absolute;
@@ -1502,3 +1567,5 @@ body.motion-off *, body.motion-off *::before, body.motion-off *::after {
     transition-duration: .01ms !important;
   }
 }
+
+body[data-wall="waves"] #stat { color: #fff; text-shadow: 0 1px 8px rgba(0, 0, 0, .5); }

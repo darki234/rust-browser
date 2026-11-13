@@ -821,11 +821,16 @@ pub fn pick_folder(owner: isize) -> Option<String> {
 
 /// Стандартный диалог выбора изображения. None — пользователь отменил выбор.
 pub fn pick_image(owner: isize) -> Option<String> {
+    pick_file(owner, "Изображения", "*.jpg;*.jpeg;*.png;*.webp;*.gif;*.bmp")
+}
+
+/// Стандартный диалог выбора файла с одним фильтром ("Видео", "*.mp4;*.webm").
+pub fn pick_file(owner: isize, kind: &str, pattern: &str) -> Option<String> {
     unsafe {
         let dialog: IFileOpenDialog =
             CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
-        let name = HSTRING::from("Изображения");
-        let spec = HSTRING::from("*.jpg;*.jpeg;*.png;*.webp;*.gif;*.bmp");
+        let name = HSTRING::from(kind);
+        let spec = HSTRING::from(pattern);
         let filter = COMDLG_FILTERSPEC { pszName: PCWSTR(name.as_ptr()), pszSpec: PCWSTR(spec.as_ptr()) };
         dialog.SetFileTypes(&[filter]).ok()?;
         let options = dialog.GetOptions().ok()?;

@@ -483,7 +483,10 @@ fn build_ui(
     let ui = WebViewBuilder::new_with_web_context(web_context)
         .with_bounds(rect(0.0, 0.0, width, height))
         // Своё фото для обоев: интерфейс берёт его по адресу http://rb.localhost/wallpaper.
-        .with_custom_protocol("rb".into(), |_, request| serve_local(request.uri().path()))
+        .with_custom_protocol("rb".into(), |_, request| {
+            let range = request.headers().get("range").and_then(|v| v.to_str().ok());
+            serve_local(request.uri().path(), range)
+        })
         .with_initialization_script(format!("window.__BOOT__ = {boot};"))
         .with_html(html)
         // Цвет до первой отрисовки, чтобы окно не вспыхивало белым в тёмной теме.
@@ -1453,6 +1456,7 @@ impl App {
             "wallpaper" => match value.as_str() {
                 // своё фото можно выбрать, только если оно уже загружено
                 Some("image") if wallpaper_file().is_none() => return,
+                Some("video") if video_file().is_none() => return,
                 Some(name) if WALLPAPERS.contains(&name) => settings.wallpaper = name.to_string(),
                 _ => return,
             },
@@ -1484,6 +1488,25 @@ impl App {
         }
         let settings = &mut self.store.settings;
         settings.wallpaper = "image".into();
+        settings.wallpaper_version += 1;
+        self.store.save_settings();
+        self.dirty = true;
+    }
+
+    /// Своё видео для обоев: копия в папке данных, как и у фото.
+    fn set_wallpaper_video(&mut self, source: &Path) {
+        let ext = source.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        if !VIDEO_TYPES.iter().any(|(known, _)| *known == ext) {
+            return;
+        }
+        if let Some((old, _)) = video_file() {
+            let _ = std::fs::remove_file(old);
+        }
+        if std::fs::copy(source, data_dir().join(format!("wallpaper-video.{ext}"))).is_err() {
+            return;
+        }
+        let settings = &mut self.store.settings;
+        settings.wallpaper = "video".into();
         settings.wallpaper_version += 1;
         self.store.save_settings();
         self.dirty = true;
@@ -1773,6 +1796,21 @@ impl App {
                 if let Some(path) = platform::pick_image(self.window.hwnd()) {
                     self.set_wallpaper_image(Path::new(&path));
                 }
+            }
+            "pick_wallpaper_video" => {
+                if let Some(path) = platform::pick_file(self.window.hwnd(), "Видео", "*.mp4;*.webm") {
+                    self.set_wallpaper_video(Path::new(&path));
+                }
+            }
+            "remove_wallpaper_video" => {
+                if let Some((file, _)) = video_file() {
+                    let _ = std::fs::remove_file(file);
+                }
+                if self.store.settings.wallpaper == "video" {
+                    self.store.settings.wallpaper = "aurora".into();
+                }
+                self.store.save_settings();
+                self.dirty = true;
             }
             "remove_wallpaper" => {
                 if let Some((file, _)) = wallpaper_file() {
@@ -2068,6 +2106,8 @@ impl App {
                 "wallpaperDim": settings.wallpaper_dim,
                 "wallpaperUrl": format!("http://rb.localhost/wallpaper?v={}", settings.wallpaper_version),
                 "hasImage": wallpaper_file().is_some(),
+                "hasVideo": video_file().is_some(),
+                "videoUrl": format!("http://rb.localhost/wallpaper-video?v={}", settings.wallpaper_version),
             },
             "ubolId": self.ubol_id,
             "isDefault": self.is_default,
@@ -2138,7 +2178,41 @@ fn is_hex_color(text: &str) -> bool {
 }
 
 /// Готовые обои; "image" — своё фото.
-const WALLPAPERS: [&str; 7] = ["aurora", "sunset", "ocean", "forest", "night", "mono", "image"];
+const WALLPAPERS: [&str; 12] = [
+    "aurora", "sunset", "ocean", "forest", "night", "mono", // спокойные
+    "waves", "stars", "particles", "flow", // живые
+    "image", "video", // свои
+];
+const VIDEO_TYPES: [(&str, &str); 2] = [("mp4", "video/mp4"), ("webm", "video/webm")];
+/// Больше за один запрос не отдаём: видео читается кусками, а не целиком в память.
+const VIDEO_CHUNK: u64 = 4 * 1024 * 1024;
+
+/// Своё видео для обоев в папке данных, если оно есть.
+fn video_file() -> Option<(PathBuf, &'static str)> {
+    VIDEO_TYPES.iter().find_map(|(ext, mime)| {
+        let path = data_dir().join(format!("wallpaper-video.{ext}"));
+        path.exists().then_some((path, *mime))
+    })
+}
+
+/// Разбирает заголовок Range ("bytes=100-" или "bytes=100-199") для файла длины `len`.
+/// Возвращает включительные границы куска, урезанного до VIDEO_CHUNK.
+fn parse_range(header: Option<&str>, len: u64) -> Option<(u64, u64)> {
+    if len == 0 {
+        return None;
+    }
+    let spec = header?.trim().strip_prefix("bytes=")?;
+    let (start, end) = spec.split_once('-')?;
+    let start: u64 = start.trim().parse().ok()?;
+    if start >= len {
+        return None;
+    }
+    let wanted_end = end.trim().parse::<u64>().unwrap_or(len - 1).min(len - 1);
+    if wanted_end < start {
+        return None;
+    }
+    Some((start, wanted_end.min(start + VIDEO_CHUNK - 1)))
+}
 const IMAGE_TYPES: [(&str, &str); 6] = [
     ("jpg", "image/jpeg"),
     ("jpeg", "image/jpeg"),
@@ -2156,8 +2230,35 @@ fn wallpaper_file() -> Option<(PathBuf, &'static str)> {
     })
 }
 
+/// Видео отдаётся кусками по заголовку Range — так его и запрашивает тег <video>.
+fn serve_video(range: Option<&str>) -> wry::http::Response<std::borrow::Cow<'static, [u8]>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let not_found = || {
+        wry::http::Response::builder().status(404).body(Vec::new().into()).unwrap_or_default()
+    };
+    let Some((path, mime)) = video_file() else { return not_found() };
+    let Ok(mut file) = std::fs::File::open(path) else { return not_found() };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let (start, end) = parse_range(range, len).unwrap_or((0, len.saturating_sub(1).min(VIDEO_CHUNK - 1)));
+    let mut bytes = vec![0u8; (end + 1 - start) as usize];
+    if file.seek(SeekFrom::Start(start)).is_err() || file.read_exact(&mut bytes).is_err() {
+        return not_found();
+    }
+    wry::http::Response::builder()
+        .status(206)
+        .header("Content-Type", mime)
+        .header("Accept-Ranges", "bytes")
+        .header("Content-Range", format!("bytes {start}-{end}/{len}"))
+        .header("Content-Length", bytes.len().to_string())
+        .body(bytes.into())
+        .unwrap_or_default()
+}
+
 /// Отвечает на запросы интерфейса к http://rb.localhost/…
-fn serve_local(path: &str) -> wry::http::Response<std::borrow::Cow<'static, [u8]>> {
+fn serve_local(path: &str, range: Option<&str>) -> wry::http::Response<std::borrow::Cow<'static, [u8]>> {
+    if path == "/wallpaper-video" {
+        return serve_video(range);
+    }
     let found = (path == "/wallpaper")
         .then(wallpaper_file)
         .flatten()
@@ -2282,8 +2383,21 @@ mod tests {
 
     #[test]
     fn local_server_answers_404_for_unknown_paths() {
-        assert_eq!(serve_local("/nothing").status(), 404);
-        assert_eq!(serve_local("/../settings.json").status(), 404);
+        assert_eq!(serve_local("/nothing", None).status(), 404);
+        assert_eq!(serve_local("/../settings.json", None).status(), 404);
+    }
+
+    #[test]
+    fn video_ranges_are_parsed_and_capped() {
+        let mb = 1024 * 1024;
+        assert_eq!(parse_range(Some("bytes=0-"), 100), Some((0, 99)));
+        assert_eq!(parse_range(Some("bytes=10-19"), 100), Some((10, 19)));
+        assert_eq!(parse_range(Some("bytes=90-500"), 100), Some((90, 99)));
+        assert_eq!(parse_range(Some("bytes=0-"), 100 * mb), Some((0, 4 * mb - 1)));
+        assert_eq!(parse_range(Some("bytes=100-"), 100), None);
+        assert_eq!(parse_range(Some("items=0-1"), 100), None);
+        assert_eq!(parse_range(None, 100), None);
+        assert_eq!(parse_range(Some("bytes=5-1"), 100), None);
     }
 
     #[test]

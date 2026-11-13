@@ -509,7 +509,10 @@ function renderToolbar() {
   if (!tab) return;
   const switched = tab.id !== lastTabId;
   lastTabId = tab.id;
-  document.body.classList.toggle('start', tab.start);
+  if (document.body.classList.contains('start') !== tab.start) {
+    document.body.classList.toggle('start', tab.start);
+    updateLive();
+  }
   if (switched && tab.start) wake();
 
   el.back.disabled = !tab.canBack;
@@ -855,19 +858,136 @@ $('#searchbox').addEventListener('click', (event) => {
 const WALLS = [
   ['aurora', 'Аврора'], ['sunset', 'Закат'], ['ocean', 'Океан'],
   ['forest', 'Лес'], ['night', 'Ночь'], ['mono', 'Без узора'],
+  ['waves', 'Волны', true], ['stars', 'Звёзды', true], ['particles', 'Частицы', true], ['flow', 'Переливы', true],
 ];
+// фон, на котором белый текст читается лучше тёмного
+const CONTRAST_WALLS = ['image', 'video', 'stars', 'particles', 'flow'];
+
+// ----- живые обои на canvas: звёзды и частицы -----
+// Рисуем не чаще 30 раз в секунду и только пока новая вкладка на экране
+// и человек что-то делает (или включено «двигаться всё время»).
+
+const live = { kind: '', raf: 0, last: 0, items: [], w: 0, h: 0, shooting: null };
+const canvas = $('#wallcanvas');
+const ctx = canvas.getContext('2d');
+
+function liveRunning() {
+  const b = document.body.classList;
+  return b.contains('start') && !document.hidden && S.settings.motion !== 'off'
+    && (S.settings.wallpaperAlways || !b.contains('calm'));
+}
+
+function updateLive() {
+  const on = liveRunning();
+  document.body.classList.toggle('wall-always', !!S.settings.wallpaperAlways);
+  const video = $('#wallvideo');
+  if (live.kind === 'video' && video.src) { if (on) video.play().catch(() => {}); else video.pause(); }
+  if ((live.kind === 'stars' || live.kind === 'particles') && on && !live.raf) {
+    live.raf = requestAnimationFrame(drawLive);
+  }
+}
+
+function resetLive() {
+  const box = $('#start').getBoundingClientRect();
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  live.w = Math.max(1, box.width);
+  live.h = Math.max(1, box.height);
+  canvas.width = Math.round(live.w * dpr);
+  canvas.height = Math.round(live.h * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const area = live.w * live.h;
+  const rnd = Math.random;
+  if (live.kind === 'stars') {
+    live.items = Array.from({ length: Math.min(420, Math.round(area / 5000)) }, () => ({
+      x: rnd() * live.w, y: rnd() * live.h, r: rnd() * 1.4 + 0.3, p: rnd() * 6.3, s: rnd() * 0.002 + 0.0006,
+    }));
+  } else {
+    live.items = Array.from({ length: Math.min(90, Math.round(area / 15000)) }, () => ({
+      x: rnd() * live.w, y: rnd() * live.h, vx: (rnd() - 0.5) * 0.35, vy: (rnd() - 0.5) * 0.35, r: rnd() * 1.8 + 1,
+    }));
+  }
+}
+
+function drawLive(t) {
+  live.raf = 0;
+  if (!liveRunning() || (live.kind !== 'stars' && live.kind !== 'particles')) return;
+  live.raf = requestAnimationFrame(drawLive);
+  if (t - live.last < 33) return;
+  live.last = t;
+  const box = $('#start').getBoundingClientRect();
+  if (Math.abs(box.width - live.w) > 1 || Math.abs(box.height - live.h) > 1 || !live.items.length) resetLive();
+  ctx.clearRect(0, 0, live.w, live.h);
+  const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#8288ff';
+  if (live.kind === 'stars') {
+    for (const s of live.items) {
+      s.x -= s.r * 0.03;
+      if (s.x < -2) s.x = live.w + 2;
+      ctx.globalAlpha = 0.25 + 0.75 * (0.5 + 0.5 * Math.sin(s.p + t * s.s));
+      ctx.fillStyle = '#fff';
+      ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, 6.283); ctx.fill();
+    }
+    // изредка падающая звезда
+    if (!live.shooting && Math.random() < 0.004) {
+      live.shooting = { x: Math.random() * live.w * 0.8 + live.w * 0.2, y: Math.random() * live.h * 0.4, life: 1 };
+    }
+    if (live.shooting) {
+      const sh = live.shooting;
+      const grad = ctx.createLinearGradient(sh.x, sh.y, sh.x + 90, sh.y - 45);
+      grad.addColorStop(0, 'rgba(255,255,255,0.9)');
+      grad.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.globalAlpha = sh.life; ctx.strokeStyle = grad; ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.moveTo(sh.x, sh.y); ctx.lineTo(sh.x + 90, sh.y - 45); ctx.stroke();
+      sh.x -= 9; sh.y += 4.5; sh.life -= 0.03;
+      if (sh.life <= 0) live.shooting = null;
+    }
+  } else {
+    const items = live.items;
+    for (const p of items) {
+      p.x += p.vx; p.y += p.vy;
+      if (p.x < 0 || p.x > live.w) p.vx *= -1;
+      if (p.y < 0 || p.y > live.h) p.vy *= -1;
+    }
+    ctx.strokeStyle = accent; ctx.lineWidth = 1;
+    for (let i = 0; i < items.length; i++) {
+      for (let j = i + 1; j < items.length; j++) {
+        const dx = items[i].x - items[j].x, dy = items[i].y - items[j].y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < 17000) {
+          ctx.globalAlpha = (1 - d2 / 17000) * 0.45;
+          ctx.beginPath(); ctx.moveTo(items[i].x, items[i].y); ctx.lineTo(items[j].x, items[j].y); ctx.stroke();
+        }
+      }
+    }
+    ctx.fillStyle = accent; ctx.globalAlpha = 0.85;
+    for (const p of items) { ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 6.283); ctx.fill(); }
+  }
+  ctx.globalAlpha = 1;
+}
+
+document.addEventListener('visibilitychange', updateLive);
 let wallKey = null;
 
 function renderWallpaper() {
   const s = S.settings;
-  const kind = s.wallpaper === 'image' && s.hasImage ? 'image' : (s.wallpaper || 'aurora');
-  const key = kind + '|' + s.wallpaperUrl + '|' + s.wallpaperDim;
-  if (key === wallKey) return;
+  let kind = s.wallpaper || 'aurora';
+  if ((kind === 'image' && !s.hasImage) || (kind === 'video' && !s.hasVideo)) kind = 'aurora';
+  const key = kind + '|' + s.wallpaperUrl + '|' + s.videoUrl + '|' + s.wallpaperDim;
+  if (key === wallKey) return updateLive();
   wallKey = key;
   document.body.dataset.wall = kind;
+  document.body.classList.toggle('wall-contrast', CONTRAST_WALLS.includes(kind));
+  live.kind = kind;
+  live.items = [];
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
   const wall = $('#wall');
+  const video = $('#wallvideo');
   wall.style.setProperty('--dim', (s.wallpaperDim ?? 35) / 100);
-  if (kind === 'image') {
+  if (kind !== 'video' && video.src) { video.pause(); video.removeAttribute('src'); video.load(); }
+  if (kind === 'video') {
+    wall.style.backgroundImage = '';
+    video.oncanplay = () => wall.classList.add('show');
+    video.src = s.videoUrl;
+  } else if (kind === 'image') {
     // показываем фото, только когда оно загрузилось, — без мигания пустого фона
     const img = new Image();
     img.onload = () => {
@@ -879,6 +999,7 @@ function renderWallpaper() {
     wall.classList.remove('show');
     wall.style.backgroundImage = '';
   }
+  updateLive();
 }
 
 $('#wallbtn').addEventListener('click', () => openHub('settings'));
@@ -910,9 +1031,11 @@ function renderStart() {
 // Фон стартовой страницы двигается, пока есть активность, и замирает через 6 секунд покоя.
 let calmTimer = 0;
 function wake() {
+  const wasCalm = document.body.classList.contains('calm');
   document.body.classList.remove('calm');
   clearTimeout(calmTimer);
-  calmTimer = setTimeout(() => document.body.classList.add('calm'), 6000);
+  calmTimer = setTimeout(() => { document.body.classList.add('calm'); updateLive(); }, 6000);
+  if (wasCalm) updateLive();
 }
 for (const type of ['mousemove', 'keydown', 'mousedown']) {
   document.addEventListener(type, wake, { passive: true });
@@ -1474,9 +1597,16 @@ function confirmButton(label, confirmLabel, onConfirm) {
 const set = (key, value) => send('set', { key, value });
 
 function wallpaperSetting() {
-  const tiles = WALLS.map(([id, name]) =>
+  const tiles = WALLS.map(([id, name, liveWall]) =>
     h('button', { class: `walltile w-${id}`, title: name, onclick: () => set('wallpaper', id) },
-      h('span', {}, name)));
+      liveWall && h('em', {}, 'живые'), h('span', {}, name)));
+  const video = h('button', { class: 'walltile w-video', title: 'Своё видео (mp4, webm)', onclick: () => send('pick_wallpaper_video') },
+    h('em', {}, 'видео'), h('span', {}, 'Своё видео'));
+  const always = setting('Живые обои двигаются всё время', 'Иначе замирают через 6 секунд без движения мыши — так меньше расход',
+    toggle(() => S.settings.wallpaperAlways, (value) => set('wallpaper_always', value)));
+  const videoRow = setting('Своё видео', 'Звук выключен, видео повторяется по кругу',
+    h('button', { class: 'text-btn outline', onclick: () => send('pick_wallpaper_video') }, 'Заменить'),
+    h('button', { class: 'text-btn outline', onclick: () => send('remove_wallpaper_video') }, 'Убрать видео'));
   const photo = h('button', { class: 'walltile w-photo', title: 'Своё фото', onclick: () => send('pick_wallpaper') },
     h('i'), h('span', {}, 'Своё фото'));
   const dim = h('input', { type: 'range', min: 0, max: 85, step: 5, class: 'range' });
@@ -1487,6 +1617,8 @@ function wallpaperSetting() {
     const s = S.settings;
     const current = s.wallpaper === 'image' && s.hasImage ? 'image' : s.wallpaper;
     tiles.forEach((tile, i) => tile.classList.toggle('on', WALLS[i][0] === current));
+    video.classList.toggle('on', s.wallpaper === 'video' && s.hasVideo);
+    videoRow.style.display = s.hasVideo ? '' : 'none';
     photo.classList.toggle('on', current === 'image');
     photo.querySelector('i').style.backgroundImage = s.hasImage ? `url("${s.wallpaperUrl}")` : '';
     photo.querySelector('span').textContent = s.hasImage ? 'Своё фото' : 'Загрузить фото';
@@ -1495,9 +1627,9 @@ function wallpaperSetting() {
   });
   return h('div', {},
     h('div', { class: 'set wallset' },
-      h('div', { class: 'label' }, 'Обои новой вкладки', h('small', {}, 'Готовый узор или ваше фото')),
-      h('div', { class: 'walls' }, ...tiles, photo)),
-    dimRow);
+      h('div', { class: 'label' }, 'Обои новой вкладки', h('small', {}, 'Готовый узор, живые обои, своё фото, GIF или видео')),
+      h('div', { class: 'walls' }, ...tiles, photo, video)),
+    dimRow, videoRow, always);
 }
 
 /** Кнопка настроек uBlock Origin Lite: его собственная страница во вкладке. */
