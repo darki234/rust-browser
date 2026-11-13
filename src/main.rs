@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 // В release-сборке не открываем консольное окно.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -1804,7 +1805,7 @@ impl App {
                 let allowed: &[&str] = match key {
                     "motion" => &["smooth", "fast", "bouncy", "off"],
                     "splash" => &["compass", "aurora", "warp", "minimal", "off"],
-                    "bar_style" => &["classic", "compact", "floating", "vertical"],
+                    "bar_style" => &["classic", "compact", "floating", "vertical", "island"],
                     _ => &["clock", "minimal", "tiles", "greeting"],
                 };
                 let Some(choice) = value.as_str().filter(|v| allowed.contains(v)) else { return };
@@ -1830,6 +1831,27 @@ impl App {
                 Some(name) if WALLPAPERS.contains(&name) => settings.wallpaper = name.to_string(),
                 _ => return,
             },
+            "island_width" => {
+                if let Some(width) = value.as_u64() {
+                    settings.island_width = width.clamp(40, 100) as u32;
+                }
+            }
+            "island_radius" => {
+                if let Some(radius) = value.as_u64() {
+                    settings.island_radius = radius.min(100) as u32;
+                }
+            }
+            "island_tabs" => settings.island_tabs = value.as_bool().unwrap_or(settings.island_tabs),
+            "buttons" => {
+                // только http(s), не больше 12 кнопок, короткие названия
+                let Ok(list) = serde_json::from_value::<Vec<store::CustomButton>>(value.clone()) else { return };
+                settings.buttons = list
+                    .into_iter()
+                    .filter(|b| (b.url.starts_with("https://") || b.url.starts_with("http://")) && b.url.len() < 2000)
+                    .map(|b| store::CustomButton { name: b.name.chars().take(40).collect(), url: b.url })
+                    .take(12)
+                    .collect();
+            }
             "glass" => {
                 if let Some(glass) = value.as_u64() {
                     settings.glass = glass.min(70) as u32;
@@ -2084,6 +2106,19 @@ impl App {
             }
 
             // слои поверх страницы
+            "my_button" => {
+                // уже открыт этот сайт — переключаемся на его вкладку, иначе открываем новую
+                let url = text("url");
+                let host = adblock::host_of(&url).map(str::to_string);
+                let open = host.as_deref().and_then(|host| {
+                    self.tabs.iter().find(|t| adblock::host_of(&t.url) == Some(host)).map(|t| t.id)
+                });
+                match open {
+                    Some(id) if !message["newTab"].as_bool().unwrap_or(false) => self.activate(id),
+                    _ if url.starts_with("http") => self.new_tab(Some(url)),
+                    _ => {}
+                }
+            }
             "ext_scan" => {
                 let installed: Vec<String> = self.ext_list.iter().map(|(id, _, _)| id.clone()).collect();
                 self.ext_browsers = webstore::browser_profiles()
@@ -2581,6 +2616,10 @@ impl App {
                 "accent": settings.accent,
                 "tintFrame": settings.tint_frame,
                 "glass": settings.glass,
+                "islandWidth": settings.island_width,
+                "islandRadius": settings.island_radius,
+                "islandTabs": settings.island_tabs,
+                "buttons": settings.buttons,
                 "splash": settings.splash,
                 "motion": settings.motion,
                 "barStyle": settings.bar_style,

@@ -220,7 +220,7 @@ const hsl = (h, s, l) => `hsl(${((h % 360) + 360) % 360} ${Math.round(s * 100)}%
 
 let appearanceKey = null;
 function applyAppearance(s) {
-  const key = [s.accent, s.tintFrame, s.motion, s.barStyle, s.newtabLayout, S.dark, s.theme, s.glass].join('|');
+  const key = [s.accent, s.tintFrame, s.motion, s.barStyle, s.newtabLayout, S.dark, s.theme, s.glass, s.islandWidth, s.islandRadius, s.islandTabs].join('|');
   if (key === appearanceKey) return;
   appearanceKey = key;
   const root = document.documentElement.style;
@@ -240,7 +240,11 @@ function applyAppearance(s) {
   const body = document.body.classList;
   body.toggle('tint', !!s.tintFrame);
   for (const m of ['smooth', 'fast', 'bouncy', 'off']) body.toggle('motion-' + m, s.motion === m);
-  for (const b of ['classic', 'compact', 'floating', 'vertical']) body.toggle('bar-' + b, s.barStyle === b);
+  for (const b of ['classic', 'compact', 'floating', 'vertical', 'island']) body.toggle('bar-' + b, s.barStyle === b);
+  // остров: ширина в процентах окна, скругление 0–100 % (100 % — капсула при высоте 46 px)
+  body.toggle('island-tabs', s.barStyle === 'island' && !!s.islandTabs);
+  root.setProperty('--island-w', String(s.islandWidth ?? 62));
+  root.setProperty('--island-r', Math.round(((s.islandRadius ?? 100) / 100) * 23) + 'px');
   for (const n of ['clock', 'minimal', 'tiles', 'greeting']) body.toggle('nt-' + n, s.newtabLayout === n);
   body.toggle('amoled', s.theme === 'amoled');
   // стекло: непрозрачность панелей 100 % − выбранная прозрачность
@@ -283,11 +287,14 @@ function setState(next) {
   $('#panelbtn').classList.toggle('on', !!S.panelOpen);
   applyAppearance(S.settings);
   renderTabs();
+  // вкладки внутри острова прокручиваются: активная всегда на виду
+  if (document.body.classList.contains('island-tabs')) tabEls.get(S.active)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   renderToolbar();
   renderFavbar();
   renderStart();
   renderPasswordKey();
   renderExtButton();
+  renderMyButtons();
   if (hubSection && hubSection !== 'history') renderHubList(false);
   if (menuKind === 'main') refreshMainMenu();
 }
@@ -318,6 +325,19 @@ $('#win-max').addEventListener('click', () => send('maximize'));
 $('#win-close').addEventListener('click', () => send('close'));
 
 // Пустое место в полосе вкладок двигает окно, двойной щелчок разворачивает.
+// вкладки внутри острова листаются колесом мыши
+el.tabs.addEventListener('wheel', (event) => {
+  if (!document.body.classList.contains('island-tabs') || el.tabs.scrollWidth <= el.tabs.clientWidth) return;
+  event.preventDefault();
+  el.tabs.scrollLeft += event.deltaY || event.deltaX;
+}, { passive: false });
+
+// в «Острове» пустые поля по бокам — тоже место, за которое тянут окно
+el.chrome.addEventListener('mousedown', (event) => {
+  if (event.button !== 0 || event.target !== el.chrome) return;
+  if (event.detail === 2) send('maximize');
+  else send('drag');
+});
 el.titlebar.addEventListener('mousedown', (event) => {
   if (event.button !== 0) return;
   const free = event.target === el.titlebar || event.target.classList.contains('drag') || event.target === el.tabs;
@@ -1800,12 +1820,14 @@ const SETTINGS_CATS = [
   ['layout', 'Панели и вкладки', () => [
     h('div', { class: 'card' }, h('h2', {}, 'Панели'),
       setting('Вид панели', 'Классика, всё в одну строку, парящая панель или вкладки слева',
-        segmented([['classic', 'Классика'], ['compact', 'Компакт'], ['floating', 'Плавающая'], ['vertical', 'Вертикальные вкладки']],
+        segmented([['classic', 'Классика'], ['compact', 'Компакт'], ['floating', 'Плавающая'], ['island', 'Остров'], ['vertical', 'Вертикальные вкладки']],
           () => S.settings.barStyle, (value) => set('bar_style', value))),
+      ...islandSettings(),
       setting('Панель избранного', 'Сайты из избранного под адресной строкой · Ctrl+Shift+B',
         toggle(() => S.settings.favbar, (value) => set('favbar', value))),
       setting('Боковая панель', 'Заметки, калькулятор и мессенджеры справа · Ctrl+Shift+E',
         toggle(() => S.panelOpen, () => send('toggle_panel')))),
+    myButtonsCard(),
     h('div', { class: 'card' }, h('h2', {}, 'Новая вкладка'),
       setting('Что показывать', 'Часы с поиском, приветствие, плитки сайтов или почти ничего',
         segmented([['clock', 'Часы и поиск'], ['greeting', 'Приветствие'], ['tiles', 'Плитки'], ['minimal', 'Минимализм']],
@@ -2402,6 +2424,117 @@ function accountCards() {
       error,
       h('div', { class: 'set' }, h('div', { class: 'label' }), h('div', { class: 'controls' }, go))),
   ];
+}
+
+
+// ---------- свои кнопки на панели ----------
+// Кнопка открывает сайт одним нажатием, а если он уже открыт — переключает на его вкладку.
+
+const MYBTN_PRESETS = [
+  ['Яндекс Музыка', 'https://music.yandex.ru/'], ['VK Музыка', 'https://vk.com/audio'],
+  ['YouTube Music', 'https://music.youtube.com/'], ['YouTube', 'https://www.youtube.com/'],
+  ['Telegram', 'https://web.telegram.org/k/'], ['ChatGPT', 'https://chatgpt.com/'],
+  ['Кинопоиск', 'https://www.kinopoisk.ru/'], ['Яндекс Почта', 'https://mail.yandex.ru/'],
+  ['Gmail', 'https://mail.google.com/'], ['Переводчик', 'https://translate.yandex.ru/'],
+];
+
+let mybtnsKey = null;
+function renderMyButtons() {
+  const list = S.settings.buttons || [];
+  const key = JSON.stringify(list);
+  if (key === mybtnsKey) return;
+  mybtnsKey = key;
+  $('#mybtns').replaceChildren(...list.map((b, index) => {
+    const button = h('button', { class: 'icon-btn mybtn', title: `${b.name} — ${hostOf(b.url)}` }, favicon(b.url, true));
+    button.addEventListener('click', (event) => send('my_button', { url: b.url, newTab: event.ctrlKey }));
+    button.addEventListener('auxclick', (event) => { if (event.button === 1) send('open', { url: b.url, newTab: true }); });
+    button.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      showMenu('mybtn', [
+        h('div', { class: 'menu-title' }, b.name),
+        item({ icon: 'open', label: 'Открыть в новой вкладке', onClick: () => send('open', { url: b.url, newTab: true }) }),
+        item({ icon: 'gear', label: 'Настроить кнопки', onClick: () => { settingsCat = 'layout'; openHub('settings'); } }),
+        item({ icon: 'trash', label: 'Убрать кнопку', danger: true, onClick: () => setButtons(list.filter((_, i) => i !== index)) }),
+      ], () => {
+        const anchor = button.getBoundingClientRect();
+        el.menu.style.left = Math.max(8, Math.min(anchor.left - 10, innerWidth - 280)) + 'px';
+        el.menu.style.top = anchor.bottom + 10 + 'px';
+      });
+    });
+    return button;
+  }));
+}
+
+const setButtons = (list) => set('buttons', list);
+
+function myButtonsCard() {
+  const list = h('div', { class: 'mybtns-list' });
+  const name = h('input', { type: 'text', class: 'field name', placeholder: 'Название', spellcheck: 'false' });
+  const url = h('input', { type: 'text', class: 'field url', placeholder: 'music.yandex.ru', spellcheck: 'false' });
+  const add = (title, address) => {
+    let link = address.trim();
+    if (!link) return toast('Укажите адрес сайта');
+    if (!/^https?:\/\//i.test(link)) link = 'https://' + link;
+    const buttons = S.settings.buttons || [];
+    if (buttons.length >= 12) return toast('Не больше 12 кнопок');
+    if (buttons.some((b) => b.url === link)) return toast('Такая кнопка уже есть');
+    setButtons([...buttons, { name: title.trim() || hostOf(link), url: link }]);
+    name.value = url.value = '';
+  };
+  url.addEventListener('keydown', (e) => { if (e.key === 'Enter') add(name.value, url.value); });
+  const move = (index, delta) => {
+    const buttons = [...(S.settings.buttons || [])];
+    const [b] = buttons.splice(index, 1);
+    buttons.splice(Math.max(0, Math.min(buttons.length, index + delta)), 0, b);
+    setButtons(buttons);
+  };
+  settingsUpdaters.push(() => {
+    const buttons = S.settings.buttons || [];
+    const key = JSON.stringify(buttons);
+    if (list.dataset.key === key) return;
+    list.dataset.key = key;
+    list.replaceChildren(...(buttons.length ? buttons.map((b, i) => h('div', { class: 'mybtn-row' },
+      favicon(b.url, true),
+      h('div', { class: 'ext-who' }, h('b', {}, b.name), h('small', {}, b.url)),
+      i > 0 && actionButton('up', 'Левее', () => move(i, -1)),
+      i < buttons.length - 1 && actionButton('down', 'Правее', () => move(i, 1)),
+      actionButton('trash', 'Убрать', () => setButtons(buttons.filter((_, j) => j !== i)))))
+      : [h('div', { class: 'pw-empty' }, 'Своих кнопок пока нет — выберите готовую или добавьте любой сайт')]));
+  });
+  const current = activeTab();
+  return h('div', { class: 'card' }, h('h2', {}, 'Свои кнопки на панели'),
+    h('div', { class: 'ext-hint acc-intro' }, 'Сайт одним нажатием. Если он уже открыт — кнопка переключит на его вкладку. Колёсико или Ctrl — в новой вкладке, правая кнопка — меню'),
+    list,
+    h('div', { class: 'mybtn-presets' }, ...MYBTN_PRESETS.map(([title, link]) =>
+      h('button', { onclick: () => add(title, link) }, favicon(link, true), title))),
+    h('div', { class: 'set mybtn-add' }, h('div', { class: 'label' }, 'Свой сайт', h('small', {}, 'Название и адрес')),
+      h('div', { class: 'controls' }, name, url,
+        current && current.url.startsWith('http') && h('button', { class: 'text-btn outline', onclick: () => add(current.title || '', current.url) }, 'Текущий сайт'),
+        h('button', { class: 'text-btn primary', onclick: () => add(name.value, url.value) }, 'Добавить'))));
+}
+
+function islandSettings() {
+  const width = h('input', { type: 'range', min: 40, max: 100, step: 2, class: 'range' });
+  const widthText = h('span', { class: 'rangeval' });
+  width.addEventListener('input', () => { widthText.textContent = width.value + ' %'; set('island_width', Number(width.value)); });
+  const round = h('input', { type: 'range', min: 0, max: 100, step: 5, class: 'range' });
+  const roundText = h('span', { class: 'rangeval' });
+  round.addEventListener('input', () => { roundText.textContent = round.value + ' %'; set('island_radius', Number(round.value)); });
+  const rows = [
+    setting('Ширина острова', 'Сколько окна занимает остров', width, widthText),
+    setting('Скругление', '100 % — капсула, 0 % — почти прямоугольник', round, roundText),
+    setting('Вкладки внутри острова', 'Одна строка: слева кнопки и адрес, справа вкладки — больше места для страниц',
+      toggle(() => S.settings.islandTabs, (value) => set('island_tabs', value))),
+  ];
+  settingsUpdaters.push(() => {
+    const island = S.settings.barStyle === 'island';
+    rows.forEach((row) => { row.style.display = island ? '' : 'none'; });
+    if (document.activeElement !== width) width.value = S.settings.islandWidth ?? 62;
+    if (document.activeElement !== round) round.value = S.settings.islandRadius ?? 100;
+    widthText.textContent = width.value + ' %';
+    roundText.textContent = round.value + ' %';
+  });
+  return rows;
 }
 
 // ---------- заставка запуска ----------

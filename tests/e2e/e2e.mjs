@@ -185,6 +185,15 @@ await check('параметры по разделам и поиск по ним'
   await waitFor(() => ui.evaluate('innerHeight < 300'), 3000);
 });
 
+await check('остров и свои кнопки на панели', async () => {
+  await ui.evaluate("send('set', { key: 'bar_style', value: 'island' }); send('set', { key: 'buttons', value: [{ name: 'Тест', url: 'https://example.org/' }] })");
+  await waitFor(() => ui.evaluate("document.body.classList.contains('bar-island') && document.querySelectorAll('#mybtns .mybtn').length === 1 && getComputedStyle($('#toolbar')).borderRadius !== '0px'"));
+  await ui.evaluate("send('set', { key: 'island_tabs', value: true })");
+  await waitFor(() => ui.evaluate("document.body.classList.contains('island-tabs') && getComputedStyle(el.chrome).display === 'grid' && $('#urlbox').offsetWidth >= 200"));
+  await ui.evaluate("send('set', { key: 'island_tabs', value: false }); send('set', { key: 'bar_style', value: 'classic' }); send('set', { key: 'buttons', value: [] })");
+  await waitFor(() => ui.evaluate("!document.body.classList.contains('bar-island') && !document.querySelectorAll('#mybtns .mybtn').length && lastChromeKey.endsWith('|0')"));
+});
+
 await check('тема AMOLED и прозрачные панели', async () => {
   await ui.evaluate("send('set', { key: 'theme', value: 'amoled' }); send('set', { key: 'glass', value: 40 })");
   await waitFor(() => ui.evaluate("document.body.classList.contains('amoled') && document.body.classList.contains('glass') && getComputedStyle(document.body).getPropertyValue('--bg').trim() === '#000000'"));

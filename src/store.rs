@@ -25,6 +25,12 @@ pub struct Visit {
     pub time: u64,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct CustomButton {
+    pub name: String,
+    pub url: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct Settings {
@@ -54,6 +60,12 @@ pub struct Settings {
     pub tint_frame: bool,
     /// Прозрачность панелей в процентах (0 — непрозрачные).
     pub glass: u32,
+    /// «Остров»: ширина в процентах окна, скругление в процентах, вкладки внутри.
+    pub island_width: u32,
+    pub island_radius: u32,
+    pub island_tabs: bool,
+    /// Свои кнопки на панели: сайт одним нажатием.
+    pub buttons: Vec<CustomButton>,
     /// Когда журнал очищали (секунды Unix) — чтобы очистка дошла до других компьютеров.
     pub history_cleared: u64,
     /// Заставка при запуске: compass, aurora, warp, minimal или off.
@@ -101,6 +113,10 @@ impl Default for Settings {
             accent: String::new(),
             tint_frame: false,
             glass: 0,
+            island_width: 62,
+            island_radius: 100,
+            island_tabs: false,
+            buttons: Vec::new(),
             history_cleared: 0,
             splash: "compass".to_string(),
             motion: "smooth".to_string(),

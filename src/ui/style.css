@@ -1361,12 +1361,12 @@ body.inprivate #privatenote { display: flex; }
 /* ---------- виды панели ---------- */
 
 /* общее для «Компакт», «Плавающая» и «Вертикальные»: вкладки-«таблетки» без ножек */
-body:is(.bar-compact, .bar-floating, .bar-vertical) .tab { border-radius: 10px; padding-bottom: 0; }
-body:is(.bar-compact, .bar-floating, .bar-vertical) .tab .foot { display: none; }
-body:is(.bar-compact, .bar-floating, .bar-vertical) .tab::before { display: none; }
-body:is(.bar-compact, .bar-floating, .bar-vertical) .tab.active { box-shadow: var(--shadow-sm), inset 0 0 0 1px var(--border); }
-body:is(.bar-compact, .bar-floating, .bar-vertical) .tab .bg { inset: 0; border-radius: 10px; }
-body:is(.bar-compact, .bar-floating, .bar-vertical) #chrome::after { display: none; }
+body:is(.bar-compact, .bar-floating, .bar-vertical, .bar-island) .tab { border-radius: 10px; padding-bottom: 0; }
+body:is(.bar-compact, .bar-floating, .bar-vertical, .bar-island) .tab .foot { display: none; }
+body:is(.bar-compact, .bar-floating, .bar-vertical, .bar-island) .tab::before { display: none; }
+body:is(.bar-compact, .bar-floating, .bar-vertical, .bar-island) .tab.active { box-shadow: var(--shadow-sm), inset 0 0 0 1px var(--border); }
+body:is(.bar-compact, .bar-floating, .bar-vertical, .bar-island) .tab .bg { inset: 0; border-radius: 10px; }
+body:is(.bar-compact, .bar-floating, .bar-vertical, .bar-island) #chrome::after { display: none; }
 
 /* «Компакт»: навигация и вкладки в одной строке */
 body.bar-compact #chrome {
@@ -1841,3 +1841,105 @@ body.glass .setcats { background: transparent; }
 .acc-error { margin: 4px 18px; padding: 8px 12px; border-radius: 10px; background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
 
 .fav.lg img { border-radius: inherit; }
+
+/* ---------- «Остров»: панель — компактная капсула по центру ---------- */
+/* ширину (--island-w, проценты окна) и скругление (--island-r) задают параметры */
+body.bar-island { --island-w: 62; --island-r: 23px; }
+body.bar-island #chrome {
+  padding-bottom: 8px;
+  background: radial-gradient(120% 220% at 0% 0%, var(--frame-glow), transparent 55%), var(--frame);
+}
+body.bar-island #titlebar { background: transparent; }
+body.bar-island #toolbar,
+body.bar-island :is(#favbar, #findbar) {
+  width: calc(var(--island-w) * 1%);
+  min-width: min(560px, calc(100% - 24px));
+  max-width: calc(100% - 24px);
+  margin: 6px auto 0;
+}
+body.bar-island #toolbar {
+  height: 46px;
+  padding: 0 6px;
+  border-radius: var(--island-r);
+  background: var(--toolbar);
+  box-shadow: 0 8px 26px rgba(0, 0, 0, .22), inset 0 0 0 1px var(--border);
+  transition: box-shadow .2s, border-radius .2s;
+}
+body.bar-island #toolbar:hover { box-shadow: 0 10px 32px rgba(0, 0, 0, .28), inset 0 0 0 1px color-mix(in srgb, var(--accent) 30%, var(--border)); }
+:root[data-theme="light"] body.bar-island #toolbar { box-shadow: 0 6px 22px rgba(24, 28, 70, .12), inset 0 0 0 1px var(--border); }
+body.bar-island #urlbox { border-radius: min(17px, calc(var(--island-r) * .75 + 2px)); }
+body.bar-island :is(#favbar, #findbar) { border-radius: min(14px, var(--island-r)); padding: 4px 10px; height: auto; min-height: 36px; }
+body.bar-island .tab.active { background: var(--toolbar); }
+body.bar-island #progress { left: 50%; right: auto; width: calc(var(--island-w) * 1% - 40px); transform: translateX(-50%); bottom: 4px; border-radius: 2px; }
+
+/* вкладки внутри острова: одна строка — слева кнопки и адрес, справа вкладки */
+body.bar-island.island-tabs #chrome {
+  display: grid;
+  grid-template-columns:
+    minmax(10px, 1fr)
+    auto
+    minmax(120px, calc(var(--island-w) * .42%))
+    minmax(10px, 1fr)
+    auto;
+  grid-template-areas: "dl tool tabs dr win" "fav fav fav fav fav" "find find find find find";
+  align-items: center;
+  padding: 7px 0 7px;
+}
+body.bar-island.island-tabs #titlebar { display: contents; }
+body.bar-island.island-tabs #privatebadge { grid-area: dl; justify-self: start; margin-left: 10px; }
+body.bar-island.island-tabs .drag { grid-area: dl; align-self: stretch; }
+body.bar-island.island-tabs #winctl { grid-area: win; align-self: start; height: 36px; margin-top: -7px; }
+body.bar-island.island-tabs #urlbox { min-width: 200px; }
+body.bar-island.island-tabs #toolbar {
+  grid-area: tool;
+  /* адресу — не меньше 200 px: остров растёт, а не сжимает строку */
+  width: calc(var(--island-w) * .58vw);
+  min-width: max-content;
+  max-width: none;
+  margin: 0;
+  border-radius: var(--island-r) 0 0 var(--island-r);
+  box-shadow: 0 8px 26px rgba(0, 0, 0, .22), inset 1px 0 0 var(--border), inset 0 1px 0 var(--border), inset 0 -1px 0 var(--border);
+}
+body.bar-island.island-tabs #tabs {
+  grid-area: tabs;
+  height: 46px;
+  align-items: center;
+  padding: 0 6px;
+  border-radius: 0 var(--island-r) var(--island-r) 0;
+  background: var(--toolbar);
+  box-shadow: 0 8px 26px rgba(0, 0, 0, .22), inset -1px 0 0 var(--border), inset 0 1px 0 var(--border), inset 0 -1px 0 var(--border);
+  border-left: 1px solid var(--border);
+  /* много вкладок — листаются колесом мыши, а не вылезают из острова */
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+body.bar-island.island-tabs #tabs::-webkit-scrollbar { display: none; }
+body.bar-island.island-tabs .tab { min-width: 40px; flex-shrink: 0; flex-basis: 150px; }
+body.bar-island.island-tabs .tab.pinned { flex-basis: 40px; }
+body.bar-island.island-tabs .tab { height: 34px; }
+body.bar-island.island-tabs .tab.active { background: var(--hover); box-shadow: inset 0 0 0 1px var(--border); }
+body.bar-island.island-tabs :is(#favbar, #findbar) { grid-column: 2 / 4; width: auto; min-width: 0; max-width: none; margin: 6px 0 0; }
+body.bar-island.island-tabs #favbar { grid-area: fav; }
+body.bar-island.island-tabs #findbar { grid-area: find; }
+body.bar-island.island-tabs #progress { width: calc(var(--island-w) * 1% - 40px); }
+
+/* прозрачные панели: остров — матовое стекло */
+body.glass.bar-island #chrome { background: radial-gradient(120% 220% at 0% 0%, var(--frame-glow), transparent 55%), var(--glass-frame); }
+body.glass.bar-island #toolbar, body.glass.bar-island.island-tabs #tabs { background: var(--glass-toolbar); }
+
+/* ---------- свои кнопки на панели ---------- */
+#mybtns { display: contents; }
+.mybtn .fav.lg { width: 20px; height: 20px; border-radius: 5px; font-size: 11px; }
+.mybtn:hover .fav.lg { transform: scale(1.08); }
+.mybtn .fav.lg { transition: transform .2s var(--spring); }
+.mybtns-list { padding: 0 10px 8px; }
+.mybtn-row { display: flex; align-items: center; gap: 12px; height: 52px; padding: 0 8px; border-radius: 10px; }
+.mybtn-row:hover { background: var(--hover); }
+.mybtn-row .fav.lg { width: 30px; height: 30px; border-radius: 9px; }
+.mybtn-presets { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 18px 14px; }
+.mybtn-presets button { display: inline-flex; align-items: center; gap: 8px; height: 32px; padding: 0 12px 0 6px; border: 1px solid var(--border); border-radius: 16px; background: var(--surface-2); color: var(--text); font: inherit; }
+.mybtn-presets button:hover { background: var(--hover); }
+.mybtn-presets .fav.lg { width: 20px; height: 20px; border-radius: 6px; font-size: 11px; }
+.mybtn-add .field.name { width: 150px; }
+.mybtn-add .field.url { width: 230px; }
