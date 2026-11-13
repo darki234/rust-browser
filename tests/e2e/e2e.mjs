@@ -188,6 +188,8 @@ await check('параметры по разделам и поиск по ним'
 await check('остров и свои кнопки на панели', async () => {
   await ui.evaluate("send('set', { key: 'bar_style', value: 'island' }); send('set', { key: 'buttons', value: [{ name: 'Тест', url: 'https://example.org/' }] })");
   await waitFor(() => ui.evaluate("document.body.classList.contains('bar-island') && document.querySelectorAll('#mybtns .mybtn').length === 1 && getComputedStyle($('#toolbar')).borderRadius !== '0px'"));
+  // над страницей остров висит: форма окна интерфейса — полоса вкладок и сам остров
+  await waitFor(() => ui.evaluate("document.body.classList.contains('island-float') && chromeShape().parts.length >= 2"));
   await ui.evaluate("send('set', { key: 'island_tabs', value: true })");
   await waitFor(() => ui.evaluate("document.body.classList.contains('island-tabs') && getComputedStyle(el.chrome).display === 'grid' && $('#urlbox').offsetWidth >= 200"));
   await ui.evaluate("send('set', { key: 'island_tabs', value: false }); send('set', { key: 'bar_style', value: 'classic' }); send('set', { key: 'buttons', value: [] })");

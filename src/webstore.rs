@@ -408,10 +408,10 @@ pub const STORE_SCRIPT: &str = r#"(() => {
     button.onmouseleave = () => { button.style.transform = ''; };
     button.onclick = () => {
       button.textContent = 'Устанавливается…';
-      window.ipc.postMessage(JSON.stringify({ cmd: 'ext_store_install' }));
+      window.chrome.webview.postMessage(JSON.stringify({ cmd: 'ext_store_install' }));
     };
     document.documentElement.append(button);
-    window.ipc.postMessage(JSON.stringify({ cmd: 'ext_store_check' }));
+    window.chrome.webview.postMessage(JSON.stringify({ cmd: 'ext_store_check' }));
   };
   window.__rbStoreDone = (text) => { if (button) button.textContent = text; };
   // магазин — одностраничное приложение: следим за сменой адреса

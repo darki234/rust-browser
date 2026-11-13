@@ -245,6 +245,7 @@ function applyAppearance(s) {
   body.toggle('island-tabs', s.barStyle === 'island' && !!s.islandTabs);
   root.setProperty('--island-w', String(s.islandWidth ?? 62));
   root.setProperty('--island-r', Math.round(((s.islandRadius ?? 100) / 100) * 23) + 'px');
+  requestAnimationFrame(reportChrome);
   for (const n of ['clock', 'minimal', 'tiles', 'greeting']) body.toggle('nt-' + n, s.newtabLayout === n);
   body.toggle('amoled', s.theme === 'amoled');
   // стекло: непрозрачность панелей 100 % − выбранная прозрачность
@@ -276,6 +277,7 @@ function colorSetting() {
     h('div', { class: 'walls swatches' }, ...swatches, picker));
 }
 
+let lastActiveTab = null;
 function setState(next) {
   // Rust присылает только изменившиеся части: закладки, загрузки и параметры — не каждый раз.
   S = { ...S, ...next };
@@ -286,6 +288,7 @@ function setState(next) {
   document.body.classList.toggle('panel-open', !!S.panelOpen);
   $('#panelbtn').classList.toggle('on', !!S.panelOpen);
   applyAppearance(S.settings);
+  if (S.active !== lastActiveTab) { lastActiveTab = S.active; setIslandHidden(false); }
   renderTabs();
   // вкладки внутри острова прокручиваются: активная всегда на виду
   if (document.body.classList.contains('island-tabs')) tabEls.get(S.active)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
@@ -304,19 +307,68 @@ let lastChrome = 0;
 // При вертикальных вкладках панель — колонка слева: тогда важна её ширина.
 let lastChromeKey = '';
 const vertical = () => document.body.classList.contains('bar-vertical');
-new ResizeObserver(() => {
+// «Остров» висит над страницей: Rust показывает интерфейс только в полосе вкладок
+// и в самом острове (с его скруглением), а страница начинается сразу под вкладками.
+const islandFloats = () => document.body.classList.contains('bar-island') && !document.body.classList.contains('island-tabs');
+let islandHidden = false;
+let floatKey = '';
+function chromeShape() {
+  if (!islandFloats() || document.body.classList.contains('fullscreen')) return null;
+  const top = Math.round(el.titlebar.getBoundingClientRect().bottom);
+  const parts = [[0, 0, innerWidth, top, 0]];
+  if (!islandHidden) {
+    for (const node of [$('#toolbar'), $('#favbar'), $('#findbar'), ...(sheetOpen ? [el.sheet] : [])]) {
+      const r = node.getBoundingClientRect();
+      if (r.width < 2 || r.height < 2 || getComputedStyle(node).display === 'none') continue;
+      const radius = parseFloat(getComputedStyle(node).borderTopLeftRadius) || 0;
+      parts.push([Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height) + 1, Math.round(radius)]);
+    }
+  }
+  return { top, parts };
+}
+function reportChrome() {
   const box = el.chrome.getBoundingClientRect();
   const side = vertical() ? Math.round(box.width) : 0;
   const height = side ? 0 : Math.round(box.height);
   if (!height && !side) return;
-  const key = height + '|' + side;
-  if (key === lastChromeKey) return;
-  lastChromeKey = key;
+  const float = chromeShape();
+  const key = height + '|' + side + '|' + JSON.stringify(float);
+  if (key === floatKey) return;
+  floatKey = key;
+  lastChromeKey = height + '|' + side;
   lastChrome = height || side;
   document.documentElement.style.setProperty('--bar-h', height + 'px');
   document.documentElement.style.setProperty('--side-w', side + 'px');
-  send('chrome', { height, side });
-}).observe(el.chrome);
+  // страница начинается под вкладками: снимок под меню и библиотекой — оттуда же
+  document.body.classList.toggle('island-float', !!float);
+  if (float) document.documentElement.style.setProperty('--page-top', float.top + 'px');
+  send('chrome', { height, side, float });
+}
+new ResizeObserver(reportChrome).observe(el.chrome);
+addEventListener('resize', reportChrome);
+
+// Прокрутка вниз прячет остров (страницу видно целиком), вверх — возвращает.
+// Не прячем, пока в нём что-то делают: печатают адрес, открыто меню, идёт поиск.
+let islandTimer = 0;
+function setIslandHidden(hidden) {
+  if (hidden && (document.activeElement === el.url || menuKind || document.body.classList.contains('finding'))) return;
+  if (hidden === islandHidden) return;
+  clearTimeout(islandTimer);
+  if (hidden) {
+    document.body.classList.add('island-hidden');
+    // форму окна меняем, когда остров уже уехал, — иначе он обрезался бы на глазах
+    islandTimer = setTimeout(() => { islandHidden = true; reportChrome(); }, 220);
+  } else {
+    islandHidden = false;
+    reportChrome();
+    document.body.classList.remove('island-hidden');
+  }
+}
+function pageScroll(down, y) {
+  if (!islandFloats()) return;
+  setIslandHidden(down && y > 80);
+}
+el.titlebar.addEventListener('mouseenter', () => setIslandHidden(false));
 
 // ---------- окно ----------
 
@@ -758,6 +810,7 @@ function closeSheet() {
   suggestRows = [];
   el.sheet.classList.remove('open');
   if (!layerKind) send('overlay', { mode: 'none' });
+  if (islandFloats()) reportChrome();
 }
 
 function go(text) {
@@ -809,6 +862,8 @@ function setSuggestions(seq, list) {
   if (!layerKind && height !== sheetHeight) {
     sheetHeight = height;
     send('overlay', { mode: 'sheet', height });
+    // остров поверх страницы: список подсказок — карточка, вокруг неё видна страница
+    if (islandFloats()) reportChrome();
   }
 }
 
@@ -2096,6 +2151,7 @@ window.ui = {
   dataCleared: () => toast('Данные сайтов удалены'),
   toast,
   passwordOffer,
+  pageScroll,
   iconsUpdated: () => { iconsVersion++; tilesKey = null; renderStart(); },
   accountError,
   extPopupBox,

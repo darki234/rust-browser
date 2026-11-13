@@ -28,7 +28,8 @@ use webview2_com::{
     IsDocumentPlayingAudioChangedEventHandler, Microsoft::Web::WebView2::Win32::*,
     NavigationCompletedEventHandler,
     ProfileAddBrowserExtensionCompletedHandler, ProfileGetBrowserExtensionsCompletedHandler,
-    StateChangedEventHandler, TrySuspendCompletedHandler, WebResourceRequestedEventHandler,
+    StateChangedEventHandler, TrySuspendCompletedHandler, WebMessageReceivedEventHandler,
+    WebResourceRequestedEventHandler,
     ZoomFactorChangedEventHandler,
 };
 use windows::{
@@ -195,6 +196,40 @@ pub fn raise(webview: &WebView) {
     }
 }
 
+/// Форма окна webview: видно и нажимается только внутри этих прямоугольников
+/// (x, y, ширина, высота, радиус скругления — в физических пикселях). None — всё окно.
+/// Так интерфейс «Острова» висит над страницей, а по бокам виден и нажимается сайт.
+pub fn set_shape(webview: &WebView, shape: Option<&[[i32; 5]]>) {
+    use windows::Win32::Graphics::Gdi::{
+        CombineRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, SetWindowRgn, HGDIOBJ, HRGN, RGN_OR,
+    };
+    unsafe {
+        let mut hwnd = HWND::default();
+        if webview.controller().ParentWindow(&mut hwnd).is_err() {
+            return;
+        }
+        let Some(parts) = shape else {
+            let _ = SetWindowRgn(hwnd, None, true);
+            return;
+        };
+        let region = CreateRectRgn(0, 0, 0, 0);
+        for &[x, y, w, h, r] in parts {
+            if w <= 0 || h <= 0 {
+                continue;
+            }
+            let part: HRGN = if r > 0 {
+                CreateRoundRectRgn(x, y, x + w + 1, y + h + 1, r * 2, r * 2)
+            } else {
+                CreateRectRgn(x, y, x + w, y + h)
+            };
+            CombineRgn(Some(region), Some(region), Some(part), RGN_OR);
+            let _ = DeleteObject(HGDIOBJ(part.0));
+        }
+        // после SetWindowRgn регионом владеет система — удалять его нельзя
+        let _ = SetWindowRgn(hwnd, Some(region), true);
+    }
+}
+
 /// Ловит сочетания клавиш, где бы ни был фокус: в панели или на странице.
 pub fn hook_hotkeys(webview: &WebView, keys: Arc<KeyState>, proxy: Proxy) {
     let handler = AcceleratorKeyPressedEventHandler::create(Box::new(move |_, args| {
@@ -284,6 +319,28 @@ pub fn hook_history(webview: &WebView, tab: u32, proxy: Proxy) {
     }));
     unsafe {
         let _ = webview.webview().add_HistoryChanged(&handler, &mut 0i64);
+    }
+}
+
+/// Сообщения от скриптов страницы (пароли, магазин, прокрутка). Свой обработчик вместо
+/// ipc из wry: тот падает на адресах, которые не разбирает (file://, необычные символы).
+/// Адрес берётся у самого WebView2 — страница не может его подделать.
+pub fn hook_messages(webview: &WebView, tab: u32, proxy: Proxy) {
+    let handler = WebMessageReceivedEventHandler::create(Box::new(move |_, args| {
+        let Some(args) = args else { return Ok(()) };
+        let mut source = PWSTR::null();
+        let mut text = PWSTR::null();
+        unsafe {
+            if args.Source(&mut source).is_err() || args.TryGetWebMessageAsString(&mut text).is_err() {
+                return Ok(());
+            }
+        }
+        let (url, body) = (take_pwstr(source), take_pwstr(text));
+        let _ = proxy.send_event(UserEvent::Page(tab, url, body));
+        Ok(())
+    }));
+    unsafe {
+        let _ = webview.webview().add_WebMessageReceived(&handler, &mut 0i64);
     }
 }
 

@@ -242,7 +242,7 @@ fn csv_rows(text: &str) -> Vec<Vec<String>> {
 pub const PAGE_SCRIPT: &str = r#"(() => {
   if (window.top !== window || window.__rbpw) return;
   window.__rbpw = true;
-  const post = (m) => { try { window.ipc.postMessage(JSON.stringify(m)); } catch (e) {} };
+  const post = (m) => { try { window.chrome.webview.postMessage(JSON.stringify(m)); } catch (e) {} };
   const visible = (i) => !!(i.offsetWidth || i.offsetHeight || i.getClientRects().length);
   const userField = (pw) => {
     const scope = pw.form || document;

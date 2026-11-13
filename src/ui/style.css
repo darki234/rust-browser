@@ -1943,3 +1943,31 @@ body.glass.bar-island #toolbar, body.glass.bar-island.island-tabs #tabs { backgr
 .mybtn-presets .fav.lg { width: 20px; height: 20px; border-radius: 6px; font-size: 11px; }
 .mybtn-add .field.name { width: 150px; }
 .mybtn-add .field.url { width: 230px; }
+
+/* «Остров» поверх страницы: полоса под ним прозрачна для страницы (её отрезает Rust),
+   поэтому фон и тень острову не нужны снаружи — тень ушла бы за край формы окна */
+body.bar-island:not(.island-tabs):not(.start) #toolbar { box-shadow: inset 0 0 0 1px var(--border); }
+body.bar-island:not(.island-tabs):not(.start) #progress { bottom: 9px; }
+body.bar-island:not(.island-tabs) #toolbar { transition: transform .22s var(--ease), opacity .22s var(--ease), box-shadow .2s, border-radius .2s; }
+body.bar-island.island-hidden:not(.start) #toolbar,
+body.bar-island.island-hidden:not(.start) :is(#favbar, #findbar) { transform: translateY(-140%); opacity: 0; pointer-events: none; }
+
+/* «Остров» поверх страницы: подсказки — карточка под островом, меню и библиотека
+   лежат на снимке страницы, который начинается сразу под вкладками */
+body.island-float #sheet {
+  top: calc(var(--bar-h) - 2px);
+  left: 50%;
+  right: auto;
+  width: calc(var(--island-w) * 1%);
+  min-width: min(560px, calc(100% - 24px));
+  max-width: calc(100% - 24px);
+  transform: translateX(-50%);
+  border: 1px solid var(--border);
+  border-radius: min(18px, var(--island-r));
+  box-shadow: none;
+}
+body.island-float #layer { top: var(--page-top); z-index: 4; }
+body.island-float #hub { top: calc(var(--bar-h) - var(--page-top) + 14px); }
+body.island-float #chrome { background: transparent; }
+body.island-float #titlebar { background: radial-gradient(120% 220% at 0% 0%, var(--frame-glow), transparent 55%), var(--frame); }
+body.glass.island-float #titlebar { background: radial-gradient(120% 220% at 0% 0%, var(--frame-glow), transparent 55%), var(--glass-frame); }

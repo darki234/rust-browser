@@ -321,6 +321,9 @@ struct App {
     chrome_height: f64,
     /// Ширина боковой колонки при вертикальных вкладках; 0 — панель сверху.
     chrome_side: f64,
+    /// «Остров» поверх страницы: страница начинается с этой высоты (под вкладками),
+    /// а интерфейс виден только в этих местах (x, y, ширина, высота, радиус — в CSS-пикселях).
+    chrome_float: Option<(f64, Vec<[f64; 5]>)>,
     /// Боковая панель справа (создаётся при первом открытии).
     panel: Option<WebView>,
     /// Мессенджеры в боковой панели: живут, пока окно открыто, чтобы не входить заново.
@@ -463,6 +466,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         overlay_requested: Instant::now(),
         chrome_height: DEFAULT_CHROME,
         chrome_side: 0.0,
+        chrome_float: None,
         panel: None,
         panel_apps: HashMap::new(),
         fullscreen: false,
@@ -730,7 +734,6 @@ fn build_panel_app(app: &mut App, url: &str) -> wry::Result<WebView> {
 fn build_tab(app: &mut App, id: u32, bounds: Rect) -> wry::Result<WebView> {
     let proxy = app.proxy.clone();
     let (nav, title, load, popup) = (proxy.clone(), proxy.clone(), proxy.clone(), proxy.clone());
-    let page = proxy.clone();
     let theme = app.page_theme();
     // Пока страница не отрисовалась, под ней цвет темы, а не белая вспышка.
     let background = backdrop_color(app.dark());
@@ -745,11 +748,7 @@ fn build_tab(app: &mut App, id: u32, bounds: Rect) -> wry::Result<WebView> {
         // менеджер паролей: замечает формы входа (сам пароль — только при отправке)
         .with_initialization_script(passwords::PAGE_SCRIPT)
         .with_initialization_script(webstore::STORE_SCRIPT)
-        // адрес берём из самого запроса WebView2, а не из сообщения: сайт не может притвориться другим
-        .with_ipc_handler(move |request: Request<String>| {
-            let url = request.uri().to_string();
-            let _ = page.send_event(UserEvent::Page(id, url, request.into_body()));
-        })
+        .with_initialization_script(SCROLL_SCRIPT)
         .with_navigation_handler(move |url| {
             let _ = nav.send_event(UserEvent::UrlChanged(id, url));
             true
@@ -772,6 +771,7 @@ fn build_tab(app: &mut App, id: u32, bounds: Rect) -> wry::Result<WebView> {
     platform::hook_hotkeys(&webview, app.keys.clone(), proxy.clone());
     platform::hook_adblock(&webview, id, app.adblock.clone(), proxy.clone());
     platform::hook_history(&webview, id, proxy.clone());
+    platform::hook_messages(&webview, id, proxy.clone());
     platform::hook_page_state(&webview, id, proxy.clone());
     platform::hook_find(&webview, id, proxy.clone());
     platform::hook_load_errors(&webview, id, proxy.clone());
@@ -835,6 +835,8 @@ impl App {
             rect(0.0, 0.0, width, height)
         } else if self.chrome_side > 0.0 {
             rect(self.chrome_side, 0.0, width - self.chrome_side, height)
+        } else if let Some((top, _)) = &self.chrome_float {
+            rect(0.0, *top, width, height - top)
         } else {
             rect(0.0, self.chrome_height, width, height - self.chrome_height)
         }
@@ -856,6 +858,25 @@ impl App {
             Overlay::None => rect(0.0, 0.0, width, chrome),
         };
         let _ = self.ui.set_bounds(ui_rect);
+        // «Остров» поверх страницы: окно интерфейса обрезается по полосе вкладок и острову.
+        // Меню, подсказки, стартовая страница и полный экран — снова целиком.
+        let floating = matches!(self.overlay, Overlay::None | Overlay::Sheet(_))
+            && !on_start_page
+            && !self.splash
+            && !self.is_fullscreen()
+            && side == 0.0;
+        match (&self.chrome_float, floating) {
+            (Some((_, parts)), true) => {
+                let scale = self.window.scale_factor();
+                let shape: Vec<[i32; 5]> = parts
+                    .iter()
+                    .map(|p| p.map(|v| (v * scale).round() as i32))
+                    .collect();
+                platform::set_shape(&self.ui, Some(&shape));
+                platform::raise(&self.ui);
+            }
+            _ => platform::set_shape(&self.ui, None),
+        }
 
         // Сначала показываем новую вкладку и только потом прячем остальные: иначе
         // на миг не видно ни одной, и сквозь щель мелькает фон окна.
@@ -1934,9 +1955,26 @@ impl App {
             "chrome" => {
                 let height = message["height"].as_f64().unwrap_or(DEFAULT_CHROME);
                 let side = message["side"].as_f64().unwrap_or(0.0);
-                if (height - self.chrome_height).abs() > 0.5 || (side - self.chrome_side).abs() > 0.5 {
+                let float = message["float"]["top"].as_f64().map(|top| {
+                    let parts = message["float"]["parts"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|p| {
+                            let v: Vec<f64> = p.as_array()?.iter().filter_map(Value::as_f64).collect();
+                            (v.len() == 5).then(|| [v[0], v[1], v[2], v[3], v[4]])
+                        })
+                        .take(8)
+                        .collect();
+                    (top, parts)
+                });
+                let changed = (height - self.chrome_height).abs() > 0.5
+                    || (side - self.chrome_side).abs() > 0.5
+                    || float != self.chrome_float;
+                if changed {
                     self.chrome_height = height;
                     self.chrome_side = side;
+                    self.chrome_float = float;
                     self.layout();
                 }
             }
@@ -2736,6 +2774,13 @@ impl App {
                     self.dirty = true;
                 }
             }
+            "scroll_dir" => {
+                if id == self.active && self.chrome_float.is_some() {
+                    let down = message["dir"] == "down";
+                    let y = message["y"].as_f64().unwrap_or(0.0);
+                    let _ = self.ui.evaluate_script(&format!("ui.pageScroll({down}, {y})"));
+                }
+            }
             "ext_store_check" => {
                 let installed = webstore::store_id(url)
                     .is_some_and(|ext| self.ext_list.iter().any(|(id, _, _)| *id == ext));
@@ -3139,6 +3184,26 @@ fn extension_icon(id: &str) -> Option<PathBuf> {
     let guard = EXT_ICONS.lock().ok()?;
     guard.iter().find(|(k, _)| k == id).map(|(_, p)| p.clone())
 }
+
+/// Сообщает браузеру, куда листают страницу: «Остров» прячется при прокрутке вниз.
+/// Ловим прокрутку и самой страницы, и вложенных блоков (у многих сайтов листается div).
+const SCROLL_SCRIPT: &str = r#"(() => {
+  if (window.top !== window || window.__rbScroll) return;
+  window.__rbScroll = true;
+  let last = 0, sent = '';
+  addEventListener('scroll', (e) => {
+    const t = e.target;
+    const el = t === document || t === document.documentElement ? document.scrollingElement || document.documentElement : t;
+    if (!el || el.scrollHeight - el.clientHeight < 200) return;
+    const y = el.scrollTop;
+    if (Math.abs(y - last) < 30) return;
+    const dir = y > last ? 'down' : 'up';
+    last = y;
+    if (dir === sent && y > 0) return;
+    sent = dir;
+    try { window.chrome.webview.postMessage(JSON.stringify({ cmd: 'scroll_dir', dir, y })); } catch (e) {}
+  }, { capture: true, passive: true });
+})();"#;
 
 /// Поля параметров, которые относятся к этому компьютеру и не синхронизируются.
 const LOCAL_SETTINGS: [&str; 10] = [
