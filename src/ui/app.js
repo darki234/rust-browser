@@ -116,17 +116,19 @@ function favicon(url, large = false, known = '') {
     box.append(icon('globe', large ? 22 : 14));
     return box;
   }
+  // Сразу цветная буква, а картинка подменяет её, только когда загрузилась:
+  // через медленную сеть значок может идти секунды, пустого места не будет.
   const host = hostOf(url) || '?';
-  const letter = () => {
-    box.textContent = host[0].toUpperCase();
-    box.classList.add('letter');
-    box.style.setProperty('--hue', hashHue(host));
-  };
+  box.textContent = host[0].toUpperCase();
+  box.classList.add('letter');
+  box.style.setProperty('--hue', hashHue(host));
   const img = new Image();
-  img.onerror = letter;
-  img.onload = () => { if (img.naturalWidth < 2) letter(); };
+  img.onload = () => {
+    if (img.naturalWidth < 2) return;
+    box.classList.remove('letter');
+    box.replaceChildren(img);
+  };
   img.src = known || parsed.origin + '/favicon.ico';
-  box.append(img);
   return box;
 }
 
@@ -181,6 +183,75 @@ const el = {
 document.body.classList.toggle('inprivate', BOOT.inprivate);
 $('#hubfoot').textContent = `Rust Browser ${BOOT.version}` + (BOOT.engine ? ` · WebView2 ${BOOT.engine}` : '');
 
+// ---------- оформление: цвет, анимации, виды панели и новой вкладки ----------
+
+function hexToHsl(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  const [r, g, b] = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) => v / 255);
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  let h = 0, s = 0;
+  const l = (max + min) / 2;
+  if (max !== min) {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    h = max === r ? (g - b) / d + (g < b ? 6 : 0) : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+    h *= 60;
+  }
+  return [h, s, l];
+}
+
+const hsl = (h, s, l) => `hsl(${((h % 360) + 360) % 360} ${Math.round(s * 100)}% ${Math.round(l * 100)}%)`;
+
+let appearanceKey = null;
+function applyAppearance(s) {
+  const key = [s.accent, s.tintFrame, s.motion, s.barStyle, s.newtabLayout, S.dark].join('|');
+  if (key === appearanceKey) return;
+  appearanceKey = key;
+  const root = document.documentElement.style;
+  if (s.accent) {
+    // из одного цвета — вся палитра: оттенок для тёмной и светлой темы и два соседних для узоров
+    const [h, sat, l] = hexToHsl(s.accent);
+    const light = S.dark ? Math.max(l, 0.68) : Math.min(Math.max(l, 0.42), 0.56);
+    const satx = Math.min(1, Math.max(sat, 0.55));
+    root.setProperty('--accent', hsl(h, satx, light));
+    root.setProperty('--accent-2', hsl(h + 50, satx, light));
+    root.setProperty('--accent-3', hsl(h - 140, satx * 0.9, light));
+    root.setProperty('--on-accent', light > 0.6 ? '#10111a' : '#ffffff');
+    root.setProperty('--frame-glow', hsl(h, satx, light).replace(')', ' / 0.14)'));
+  } else {
+    for (const name of ['--accent', '--accent-2', '--accent-3', '--on-accent', '--frame-glow']) root.removeProperty(name);
+  }
+  const body = document.body.classList;
+  body.toggle('tint', !!s.tintFrame);
+  for (const m of ['smooth', 'fast', 'bouncy', 'off']) body.toggle('motion-' + m, s.motion === m);
+  for (const b of ['classic', 'compact', 'floating', 'vertical']) body.toggle('bar-' + b, s.barStyle === b);
+  for (const n of ['clock', 'minimal', 'tiles', 'greeting']) body.toggle('nt-' + n, s.newtabLayout === n);
+}
+
+const PALETTE = [
+  ['', 'Индиго', '#4f5bf5'], ['#2f7cf6', 'Синий'], ['#12a4b5', 'Бирюза'], ['#22a06b', 'Зелёный'],
+  ['#7bb31a', 'Лайм'], ['#e39b0e', 'Янтарь'], ['#f2672a', 'Оранжевый'], ['#e5484d', 'Красный'],
+  ['#e04a9a', 'Розовый'], ['#8b5cf6', 'Фиолетовый'], ['#6b7280', 'Графит'],
+];
+
+function colorSetting() {
+  const swatches = PALETTE.map(([value, name, shown]) => {
+    const button = h('button', { class: 'swatch', title: name, style: `--c:${shown || value}`, onclick: () => set('accent', value) });
+    settingsUpdaters.push(() => button.classList.toggle('on', (S.settings.accent || '') === value));
+    return button;
+  });
+  const picker = h('input', { type: 'color', class: 'swatch custom', title: 'Свой цвет' });
+  picker.addEventListener('input', () => set('accent', picker.value));
+  settingsUpdaters.push(() => {
+    const custom = S.settings.accent && !PALETTE.some(([v]) => v === S.settings.accent);
+    picker.classList.toggle('on', !!custom);
+    picker.value = S.settings.accent || '#4f5bf5';
+  });
+  return h('div', { class: 'set wallset' },
+    h('div', { class: 'label' }, 'Цвет браузера', h('small', {}, 'Кнопки, выделение, узоры обоев — последний кружок для своего цвета')),
+    h('div', { class: 'walls swatches' }, ...swatches, picker));
+}
+
 function setState(next) {
   // Rust присылает только изменившиеся части: закладки, загрузки и параметры — не каждый раз.
   S = { ...S, ...next };
@@ -188,6 +259,7 @@ function setState(next) {
   document.body.classList.toggle('maximized', S.maximized);
   document.body.classList.toggle('fullscreen', S.fullscreen);
   document.body.classList.toggle('favbar', !!S.settings.favbar);
+  applyAppearance(S.settings);
   renderTabs();
   renderToolbar();
   renderFavbar();
@@ -795,10 +867,12 @@ $('#wallbtn').addEventListener('click', () => openHub('settings'));
 function renderStart() {
   renderEngines();
   renderWallpaper();
-  const key = JSON.stringify(S.bookmarks);
+  // в виде «Плитки» сайтов больше
+  const limit = S.settings.newtabLayout === 'tiles' ? 24 : 12;
+  const key = limit + JSON.stringify(S.bookmarks);
   if (key !== tilesKey) {
     tilesKey = key;
-    const tiles = S.bookmarks.slice(0, 12).map((bookmark, index) =>
+    const tiles = S.bookmarks.slice(0, limit).map((bookmark, index) =>
       h('div', {
         class: 'tile', style: `--i:${index}`, title: bookmark.url,
         onclick: () => send('open', { url: bookmark.url }),
@@ -826,8 +900,16 @@ for (const type of ['mousemove', 'keydown', 'mousedown']) {
 }
 wake();
 
+function greetingFor(hour) {
+  if (hour >= 5 && hour < 12) return 'Доброе утро';
+  if (hour >= 12 && hour < 17) return 'Добрый день';
+  if (hour >= 17 && hour < 23) return 'Добрый вечер';
+  return 'Доброй ночи';
+}
+
 function tick() {
   const now = new Date();
+  $('#greeting').textContent = greetingFor(now.getHours());
   el.clock.textContent = now.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
   el.date.textContent = now.toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' });
 }
@@ -1446,6 +1528,15 @@ function settingsPage() {
       setting('Тема', 'Как в Windows или всегда светлая/тёмная',
         segmented([['system', 'Как в системе'], ['light', 'Светлая'], ['dark', 'Тёмная']],
           () => S.settings.theme, (value) => set('theme', value))),
+      colorSetting(),
+      setting('Подкрасить рамку окна', 'Полоса вкладок и панель слегка окрашиваются в цвет браузера',
+        toggle(() => S.settings.tintFrame, (value) => set('tint_frame', value))),
+      setting('Новая вкладка', 'Что показывать на новой вкладке',
+        segmented([['clock', 'Часы и поиск'], ['greeting', 'Приветствие'], ['tiles', 'Плитки'], ['minimal', 'Минимализм']],
+          () => S.settings.newtabLayout, (value) => set('newtab_layout', value))),
+      setting('Анимации', 'Как быстро и с каким характером всё появляется',
+        segmented([['smooth', 'Плавные'], ['fast', 'Быстрые'], ['bouncy', 'Пружинистые'], ['off', 'Без анимаций']],
+          () => S.settings.motion, (value) => set('motion', value))),
       setting('Панель избранного', 'Сайты из избранного под адресной строкой · Ctrl+Shift+B',
         toggle(() => S.settings.favbar, (value) => set('favbar', value))),
       wallpaperSetting()),

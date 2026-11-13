@@ -1408,6 +1408,27 @@ impl App {
                 return;
             }
             "battery_saver" => settings.battery_saver = value.as_bool().unwrap_or(settings.battery_saver),
+            "accent" => match value.as_str() {
+                Some(color) if color.is_empty() || is_hex_color(color) => settings.accent = color.to_lowercase(),
+                _ => return,
+            },
+            "tint_frame" => settings.tint_frame = value.as_bool().unwrap_or(settings.tint_frame),
+            "wallpaper_always" => {
+                settings.wallpaper_always = value.as_bool().unwrap_or(settings.wallpaper_always)
+            }
+            "motion" | "bar_style" | "newtab_layout" => {
+                let allowed: &[&str] = match key {
+                    "motion" => &["smooth", "fast", "bouncy", "off"],
+                    "bar_style" => &["classic", "compact", "floating", "vertical"],
+                    _ => &["clock", "minimal", "tiles", "greeting"],
+                };
+                let Some(choice) = value.as_str().filter(|v| allowed.contains(v)) else { return };
+                match key {
+                    "motion" => settings.motion = choice.to_string(),
+                    "bar_style" => settings.bar_style = choice.to_string(),
+                    _ => settings.newtab_layout = choice.to_string(),
+                }
+            }
             "sleep_minutes" => {
                 if let Some(minutes) = value.as_u64() {
                     settings.sleep_minutes = minutes.min(24 * 60) as u32;
@@ -2017,6 +2038,12 @@ impl App {
                 "passwords": settings.passwords,
                 "efficiencyMode": settings.efficiency_mode,
                 "batterySaver": settings.battery_saver,
+                "accent": settings.accent,
+                "tintFrame": settings.tint_frame,
+                "motion": settings.motion,
+                "barStyle": settings.bar_style,
+                "newtabLayout": settings.newtab_layout,
+                "wallpaperAlways": settings.wallpaper_always,
                 "downloadDir": settings.download_dir,
                 "defaultDownloadDir": default_download_dir(),
                 "wallpaper": settings.wallpaper,
@@ -2085,6 +2112,11 @@ fn rest_action(
     } else {
         Rest::Keep
     }
+}
+
+/// "#rrggbb" — шесть шестнадцатеричных цифр после решётки.
+fn is_hex_color(text: &str) -> bool {
+    text.len() == 7 && text.starts_with('#') && text[1..].chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Готовые обои; "image" — своё фото.
@@ -2234,6 +2266,16 @@ mod tests {
     fn local_server_answers_404_for_unknown_paths() {
         assert_eq!(serve_local("/nothing").status(), 404);
         assert_eq!(serve_local("/../settings.json").status(), 404);
+    }
+
+    #[test]
+    fn accent_colors_are_validated() {
+        assert!(is_hex_color("#4f5bf5"));
+        assert!(is_hex_color("#ABCDEF"));
+        assert!(!is_hex_color("4f5bf5"));
+        assert!(!is_hex_color("#4f5bf"));
+        assert!(!is_hex_color("#4f5bfz"));
+        assert!(!is_hex_color("red;}body{"));
     }
 
     #[test]

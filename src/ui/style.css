@@ -1277,6 +1277,97 @@ body.inprivate #privatenote { display: flex; }
   .set { flex-wrap: wrap; }
 }
 
+/* ---------- виды новой вкладки ---------- */
+
+#greeting { display: none; }
+
+/* «Приветствие»: крупное доброе слово, время под ним */
+body.nt-greeting #greeting {
+  display: block;
+  font: 300 clamp(40px, 7vw, 72px)/1.1 "Segoe UI Variable Display", "Segoe UI", sans-serif;
+  letter-spacing: -.02em;
+  background: linear-gradient(100deg, var(--text), var(--accent) 60%, var(--accent-2));
+  -webkit-background-clip: text;
+          background-clip: text;
+  color: transparent;
+}
+body.nt-greeting #clock { margin-top: 10px; font-size: 22px; font-weight: 500; letter-spacing: 0; color: var(--muted); }
+body.nt-greeting #date { margin-top: 2px; }
+
+/* «Минимализм»: только поиск */
+body.nt-minimal :is(#clock, #date, #tiles, #stat) { display: none; }
+body.nt-minimal .searchbox { margin-top: 0; width: min(720px, 100%); height: 60px; }
+body.nt-minimal #startq { font-size: 18px; }
+
+/* «Плитки»: время скромно сверху, большая сетка избранного */
+body.nt-tiles .start-inner { justify-content: flex-start; padding-top: 7vh; }
+body.nt-tiles #clock { font-size: 44px; font-weight: 300; }
+body.nt-tiles #date { margin-top: 4px; }
+body.nt-tiles .searchbox { margin-top: 22px; }
+body.nt-tiles #tiles { width: min(1080px, 100%); gap: 16px; margin-top: 30px; }
+body.nt-tiles .tile { width: 132px; height: 118px; border-radius: 22px; }
+body.nt-tiles .tile .fav.lg { width: 44px; height: 44px; border-radius: 13px; }
+/* в длинной сетке счётчик рекламы идёт следом за плитками, а не поверх них */
+body.nt-tiles #stat { position: static; margin-top: 28px; }
+.start-inner::-webkit-scrollbar { width: 10px; }
+.start-inner::-webkit-scrollbar-thumb { background: var(--press); border-radius: 5px; border: 2px solid transparent; background-clip: padding-box; }
+
+/* ---------- цвет рамки и наборы анимаций ---------- */
+
+body.tint #titlebar {
+  background:
+    radial-gradient(120% 220% at 0% 0%, var(--frame-glow), transparent 55%),
+    color-mix(in srgb, var(--accent) 16%, var(--frame));
+}
+body.tint #toolbar, body.tint #favbar, body.tint #findbar, body.tint .tab.active {
+  background: color-mix(in srgb, var(--accent) 7%, var(--toolbar));
+}
+body.tint .tab .foot.l { background: radial-gradient(circle at 0 0, transparent 9.5px, color-mix(in srgb, var(--accent) 7%, var(--toolbar)) 10px); }
+body.tint .tab .foot.r { background: radial-gradient(circle at 100% 0, transparent 9.5px, color-mix(in srgb, var(--accent) 7%, var(--toolbar)) 10px); }
+
+/* «Быстрые»: всё появляется почти сразу */
+body.motion-fast *, body.motion-fast *::before, body.motion-fast *::after { transition-duration: .08s !important; }
+body.motion-fast :is(.tab, .menu.open, #layer.hub #hub, .sug, .tile, .row, .card, .start-inner > *,
+  #enginemenu.open, .chip, .empty, #findbar, .walltile, .sug.appear) {
+  animation-duration: .14s !important;
+  animation-delay: 0s !important;
+}
+
+/* «Пружинистые»: заметный отскок у всего, что выезжает и увеличивается */
+body.motion-bouncy {
+  --ease: cubic-bezier(.34, 1.7, .55, 1);
+  --spring: cubic-bezier(.3, 2.1, .5, .9);
+}
+body.motion-bouncy :is(.menu.open, #layer.hub #hub, #enginemenu.open) { animation-duration: .45s !important; }
+body.motion-bouncy .start-inner > * { animation-timing-function: cubic-bezier(.3, 1.8, .5, 1); }
+
+/* «Без анимаций»: всё мгновенно, фон новой вкладки стоит */
+body.motion-off *, body.motion-off *::before, body.motion-off *::after {
+  animation-duration: .01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: .01ms !important;
+}
+
+/* выбор цвета */
+.swatches { gap: 8px; }
+.swatch {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 50%;
+  background: var(--c);
+  border: 3px solid var(--surface-2);
+  box-shadow: 0 0 0 1px var(--border);
+  cursor: pointer;
+  transition: transform .2s var(--spring), box-shadow .2s;
+}
+.swatch:hover { transform: scale(1.12); }
+.swatch.on { box-shadow: 0 0 0 2px var(--text); }
+.swatch.custom { -webkit-appearance: none; appearance: none; background: conic-gradient(red, yellow, lime, cyan, blue, magenta, red); }
+.swatch.custom::-webkit-color-swatch-wrapper { padding: 0; }
+.swatch.custom::-webkit-color-swatch { border: 0; border-radius: 50%; opacity: 0; }
+.swatch.custom.on::-webkit-color-swatch { opacity: 1; }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: .01ms !important;

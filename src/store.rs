@@ -48,6 +48,18 @@ pub struct Settings {
     pub efficiency_mode: bool,
     /// От батареи вкладки засыпают через 5 минут.
     pub battery_saver: bool,
+    /// Цвет акцента "#rrggbb"; пусто — фирменный индиго.
+    pub accent: String,
+    /// Подкрашивать рамку окна цветом акцента.
+    pub tint_frame: bool,
+    /// "smooth" | "fast" | "bouncy" | "off"
+    pub motion: String,
+    /// "classic" | "compact" | "floating" | "vertical"
+    pub bar_style: String,
+    /// "clock" | "minimal" | "tiles" | "greeting"
+    pub newtab_layout: String,
+    /// Живые обои двигаются всё время, а не только пока человек что-то делает.
+    pub wallpaper_always: bool,
     /// Обои новой вкладки: имя готового варианта или "image" — своё фото.
     pub wallpaper: String,
     /// Затемнение своего фото, 0–85 %, чтобы текст на нём читался.
@@ -72,6 +84,12 @@ impl Default for Settings {
             passwords: true,
             efficiency_mode: true,
             battery_saver: true,
+            accent: String::new(),
+            tint_frame: false,
+            motion: "smooth".to_string(),
+            bar_style: "classic".to_string(),
+            newtab_layout: "clock".to_string(),
+            wallpaper_always: false,
             wallpaper: "aurora".to_string(),
             wallpaper_dim: 35,
             wallpaper_version: 0,
