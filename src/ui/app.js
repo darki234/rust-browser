@@ -270,12 +270,21 @@ function setState(next) {
 
 // Высоту панели знает только интерфейс: сообщаем её Rust, чтобы страница встала ровно под ней.
 let lastChrome = 0;
+// При вертикальных вкладках панель — колонка слева: тогда важна её ширина.
+let lastChromeKey = '';
+const vertical = () => document.body.classList.contains('bar-vertical');
 new ResizeObserver(() => {
-  const height = Math.round(el.chrome.getBoundingClientRect().height);
-  if (!height || height === lastChrome) return;
-  lastChrome = height;
+  const box = el.chrome.getBoundingClientRect();
+  const side = vertical() ? Math.round(box.width) : 0;
+  const height = side ? 0 : Math.round(box.height);
+  if (!height && !side) return;
+  const key = height + '|' + side;
+  if (key === lastChromeKey) return;
+  lastChromeKey = key;
+  lastChrome = height || side;
   document.documentElement.style.setProperty('--bar-h', height + 'px');
-  send('chrome', { height });
+  document.documentElement.style.setProperty('--side-w', side + 'px');
+  send('chrome', { height, side });
 }).observe(el.chrome);
 
 // ---------- окно ----------
@@ -408,8 +417,13 @@ function startTabDrag(event, id, node) {
 
   const nodes = aliveTabNodes();
   const from = nodes.indexOf(node);
+  // вкладки в строку тянутся по горизонтали, в колонку — по вертикали
+  const vert = vertical();
+  const axis = vert
+    ? { pos: (e) => e.clientY, start: (r) => r.top, end: (r) => r.bottom, size: (r) => r.height, move: 'translateY' }
+    : { pos: (e) => e.clientX, start: (r) => r.left, end: (r) => r.right, size: (r) => r.width, move: 'translateX' };
   const rects = nodes.map((n) => n.getBoundingClientRect());
-  const startX = event.clientX;
+  const startX = axis.pos(event);
   let dragging = false;
   let target = from;
   node.setPointerCapture(event.pointerId);
@@ -418,36 +432,37 @@ function startTabDrag(event, id, node) {
   const strip = el.tabs.getBoundingClientRect();
   const move = (ev) => {
     // протянули вниз далеко за полосу вкладок — вкладка уедет в новое окно
-    detach = dragging && ev.clientY > strip.bottom + 70 && !S.tabs.find((t) => t.id === id)?.start;
+    const away = vert ? ev.clientX > strip.right + 70 : ev.clientY > strip.bottom + 70;
+    detach = dragging && away && !S.tabs.find((t) => t.id === id)?.start;
     node.classList.toggle('detaching', detach);
-    const dx = ev.clientX - startX;
+    const dx = axis.pos(ev) - startX;
     if (!dragging && Math.abs(dx) < 6) return;
     if (!dragging) {
       dragging = true;
       node.classList.add('dragging');
       nodes.forEach((n) => n !== node && n.classList.add('shifting'));
     }
-    const min = rects[0].left - rects[from].left;
-    const max = rects[rects.length - 1].right - rects[from].right;
+    const min = axis.start(rects[0]) - axis.start(rects[from]);
+    const max = axis.end(rects[rects.length - 1]) - axis.end(rects[from]);
     const shift = Math.max(min, Math.min(max, dx));
-    node.style.transform = `translateX(${shift}px)`;
+    node.style.transform = `${axis.move}(${shift}px)`;
 
-    const center = rects[from].left + rects[from].width / 2 + shift;
+    const center = axis.start(rects[from]) + axis.size(rects[from]) / 2 + shift;
     target = from;
     rects.forEach((r, i) => {
-      const middle = r.left + r.width / 2;
+      const middle = axis.start(r) + axis.size(r) / 2;
       // запас в пиксель: дотянутая до края вкладка должна встать на крайнее место,
       // даже если дробные координаты чуть разошлись
       if (i < from && center <= middle + 1) target = Math.min(target, i);
       if (i > from && center >= middle - 1) target = Math.max(target, i);
     });
-    const width = rects[from].width;
+    const width = axis.size(rects[from]) + (vert ? 2 : 0);
     nodes.forEach((n, i) => {
       if (n === node) return;
       let offset = 0;
       if (from < i && i <= target) offset = -width;
       else if (target <= i && i < from) offset = width;
-      n.style.transform = offset ? `translateX(${offset}px)` : '';
+      n.style.transform = offset ? `${axis.move}(${offset}px)` : '';
     });
   };
 
@@ -735,6 +750,10 @@ function setSuggestions(seq, list) {
     return node;
   }));
 
+  if (vertical()) {
+    const box = $('#urlbox').getBoundingClientRect();
+    document.documentElement.style.setProperty('--sheet-top', Math.round(box.bottom + 6) + 'px');
+  }
   el.sheet.classList.add('open');
   sheetOpen = true;
   // Размер окна интерфейса меняем, только если высота списка правда изменилась.
@@ -1531,6 +1550,9 @@ function settingsPage() {
       colorSetting(),
       setting('Подкрасить рамку окна', 'Полоса вкладок и панель слегка окрашиваются в цвет браузера',
         toggle(() => S.settings.tintFrame, (value) => set('tint_frame', value))),
+      setting('Вид панели', 'Классика, всё в одну строку, парящая панель или вкладки слева',
+        segmented([['classic', 'Классика'], ['compact', 'Компакт'], ['floating', 'Плавающая'], ['vertical', 'Вертикальные вкладки']],
+          () => S.settings.barStyle, (value) => set('bar_style', value))),
       setting('Новая вкладка', 'Что показывать на новой вкладке',
         segmented([['clock', 'Часы и поиск'], ['greeting', 'Приветствие'], ['tiles', 'Плитки'], ['minimal', 'Минимализм']],
           () => S.settings.newtabLayout, (value) => set('newtab_layout', value))),

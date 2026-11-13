@@ -235,6 +235,8 @@ struct App {
     /// Когда запросили снимок: если он не пришёл быстро, меню открывается без него.
     overlay_requested: Instant,
     chrome_height: f64,
+    /// Ширина боковой колонки при вертикальных вкладках; 0 — панель сверху.
+    chrome_side: f64,
     /// Полноэкранный режим по F11.
     fullscreen: bool,
     /// Полноэкранный режим, который запросила страница (видео).
@@ -334,6 +336,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         overlay_pending: false,
         overlay_requested: Instant::now(),
         chrome_height: DEFAULT_CHROME,
+        chrome_side: 0.0,
         fullscreen: false,
         page_fullscreen: false,
         maximized: false,
@@ -577,23 +580,38 @@ impl App {
     // ---------- раскладка и фокус ----------
 
     /// Расставляет webview: интерфейс сверху, под ним активная страница.
+    /// Где страница: под панелью или справа от боковой колонки.
+    fn page_rect(&self) -> Rect {
+        let (width, height) = window_size(&self.window);
+        if self.is_fullscreen() {
+            rect(0.0, 0.0, width, height)
+        } else if self.chrome_side > 0.0 {
+            rect(self.chrome_side, 0.0, width - self.chrome_side, height)
+        } else {
+            rect(0.0, self.chrome_height, width, height - self.chrome_height)
+        }
+    }
+
     fn layout(&self) {
         let (width, height) = window_size(&self.window);
         let chrome = if self.is_fullscreen() { 0.0 } else { self.chrome_height };
+        let side = if self.is_fullscreen() { 0.0 } else { self.chrome_side };
         let on_start_page = self.active_webview().is_none();
 
-        let ui_height = match self.overlay {
-            _ if on_start_page => height,
-            Overlay::Full => height,
-            Overlay::Sheet(extra) => (chrome + extra).min(height),
-            Overlay::None => chrome,
+        let ui_rect = match self.overlay {
+            _ if on_start_page => rect(0.0, 0.0, width, height),
+            Overlay::Full => rect(0.0, 0.0, width, height),
+            // боковая колонка и так на всю высоту — подсказки помещаются в ней
+            _ if side > 0.0 => rect(0.0, 0.0, side, height),
+            Overlay::Sheet(extra) => rect(0.0, 0.0, width, (chrome + extra).min(height)),
+            Overlay::None => rect(0.0, 0.0, width, chrome),
         };
-        let _ = self.ui.set_bounds(rect(0.0, 0.0, width, ui_height));
+        let _ = self.ui.set_bounds(ui_rect);
 
         // Сначала показываем новую вкладку и только потом прячем остальные: иначе
         // на миг не видно ни одной, и сквозь щель мелькает фон окна.
         if let Some(webview) = self.active_webview() {
-            let _ = webview.set_bounds(rect(0.0, chrome, width, height - chrome));
+            let _ = webview.set_bounds(self.page_rect());
             let _ = webview.set_visible(true);
         }
         for tab in &self.tabs {
@@ -864,9 +882,7 @@ impl App {
         let Some(index) = self.index_of(id) else { return };
 
         if self.tabs[index].webview.is_none() {
-            let (width, height) = window_size(&self.window);
-            let chrome = if self.is_fullscreen() { 0.0 } else { self.chrome_height };
-            let bounds = rect(0.0, chrome, width, height - chrome);
+            let bounds = self.page_rect();
             match build_tab(self, id, bounds) {
                 Ok(webview) => {
                     self.tabs[index].webview = Some(webview);
@@ -1497,8 +1513,10 @@ impl App {
             }
             "chrome" => {
                 let height = message["height"].as_f64().unwrap_or(DEFAULT_CHROME);
-                if (height - self.chrome_height).abs() > 0.5 {
+                let side = message["side"].as_f64().unwrap_or(0.0);
+                if (height - self.chrome_height).abs() > 0.5 || (side - self.chrome_side).abs() > 0.5 {
                     self.chrome_height = height;
+                    self.chrome_side = side;
                     self.layout();
                 }
             }

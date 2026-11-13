@@ -1277,6 +1277,133 @@ body.inprivate #privatenote { display: flex; }
   .set { flex-wrap: wrap; }
 }
 
+/* ---------- виды панели ---------- */
+
+/* общее для «Компакт», «Плавающая» и «Вертикальные»: вкладки-«таблетки» без ножек */
+body:is(.bar-compact, .bar-floating, .bar-vertical) .tab { border-radius: 10px; padding-bottom: 0; }
+body:is(.bar-compact, .bar-floating, .bar-vertical) .tab .foot { display: none; }
+body:is(.bar-compact, .bar-floating, .bar-vertical) .tab::before { display: none; }
+body:is(.bar-compact, .bar-floating, .bar-vertical) .tab.active { box-shadow: var(--shadow-sm), inset 0 0 0 1px var(--border); }
+body:is(.bar-compact, .bar-floating, .bar-vertical) .tab .bg { inset: 0; border-radius: 10px; }
+body:is(.bar-compact, .bar-floating, .bar-vertical) #chrome::after { display: none; }
+
+/* «Компакт»: навигация и вкладки в одной строке */
+body.bar-compact #chrome {
+  display: grid;
+  grid-template-columns: minmax(380px, 46%) minmax(0, 1fr);
+  grid-template-areas: "tool title" "fav fav" "find find";
+  background: radial-gradient(120% 220% at 0% 0%, var(--frame-glow), transparent 55%), var(--frame);
+  border-bottom: 1px solid var(--border);
+}
+body.bar-compact #toolbar { grid-area: tool; height: 46px; background: transparent; }
+body.bar-compact #titlebar { grid-area: title; height: 46px; align-items: center; background: transparent; padding-left: 2px; }
+body.bar-compact #tabs { height: 34px; align-items: center; padding: 0 6px; }
+body.bar-compact .tab { height: 34px; }
+body.bar-compact #newtab { margin: 0 0 0 4px; }
+body.bar-compact #winctl { align-self: stretch; }
+body.bar-compact #favbar { grid-area: fav; background: transparent; }
+body.bar-compact #findbar { grid-area: find; background: transparent; }
+body.bar-compact.tint #toolbar { background: transparent; }
+
+/* «Плавающая»: панель навигации парит над страницей со скруглёнными краями */
+body.bar-floating #chrome {
+  padding-bottom: 8px;
+  background: radial-gradient(120% 220% at 0% 0%, var(--frame-glow), transparent 55%), var(--frame);
+}
+body.bar-floating #titlebar { height: 44px; align-items: center; background: transparent; }
+body.bar-floating #tabs { height: 34px; align-items: center; }
+body.bar-floating .tab { height: 32px; }
+body.bar-floating .tab.active { background: var(--toolbar); }
+body.bar-floating #newtab { margin: 0 0 0 6px; }
+body.bar-floating #winctl { align-self: stretch; }
+body.bar-floating #toolbar {
+  margin: 0 10px;
+  border-radius: 16px;
+  box-shadow: var(--shadow-sm), inset 0 0 0 1px var(--border);
+}
+body.bar-floating :is(#favbar, #findbar) { margin: 8px 10px 0; border-radius: 12px; padding-bottom: 0; }
+body.bar-floating #findbar { padding: 6px 10px; height: auto; }
+body.bar-floating #progress { left: 22px; right: 22px; bottom: 6px; }
+
+/* «Вертикальные вкладки»: вся панель — колонка слева, как в Arc */
+body.bar-vertical { --side-w: 272px; }
+body.bar-vertical #chrome {
+  position: fixed;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 272px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: 38px auto auto minmax(0, 1fr);
+  grid-template-areas: "drag win" "tool tool" "find find" "tabs tabs";
+  background: radial-gradient(160% 60% at 0% 0%, var(--frame-glow), transparent 60%), var(--frame);
+  border-right: 1px solid var(--border);
+}
+body.bar-vertical #titlebar { display: contents; }
+body.bar-vertical .drag { grid-area: drag; }
+body.bar-vertical #privatebadge { grid-area: drag; justify-self: start; margin-left: 10px; z-index: 1; }
+body.bar-vertical #winctl { grid-area: win; height: 38px; }
+body.bar-vertical #winctl button { width: 40px; }
+body.bar-vertical #toolbar {
+  grid-area: tool;
+  height: auto;
+  flex-wrap: wrap;
+  padding: 2px 10px 10px;
+  background: transparent;
+}
+body.bar-vertical #toolbar .icon-btn { width: 32px; height: 32px; }
+body.bar-vertical #urlbox { order: 10; flex: 1 1 100%; margin: 6px 0 0; }
+body.bar-vertical #findbar { grid-area: find; height: auto; padding: 0 10px 10px; background: transparent; flex-wrap: wrap; }
+body.bar-vertical .findfield { width: 100%; }
+body.bar-vertical #favbar { display: none !important; }
+body.bar-vertical #tabs {
+  grid-area: tabs;
+  height: auto;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  padding: 6px 8px 14px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+}
+body.bar-vertical .tab { flex: none; height: 38px; max-width: none; min-width: 0; padding: 0 6px 0 12px; animation: fade-in .2s; }
+body.bar-vertical .tab.active { background: var(--toolbar); }
+body.bar-vertical .tab.pinned { flex: none; justify-content: flex-start; padding: 0 6px 0 12px; }
+body.bar-vertical .tab.pinned .title { display: block; }
+body.bar-vertical .tab.pinned + .tab:not(.pinned) { margin: 8px 0 0; }
+body.bar-vertical .tab.leave { height: 0; opacity: 0; }
+body.bar-vertical #newtab {
+  width: 100%;
+  height: 36px;
+  margin: 6px 0 0;
+  display: flex;
+  justify-content: flex-start;
+  gap: 10px;
+  padding-left: 12px;
+  border-radius: 10px;
+  color: var(--muted);
+}
+body.bar-vertical #newtab::after { content: "Новая вкладка"; font-size: 13px; }
+body.bar-vertical #newtab:hover { transform: none; color: var(--text); }
+body.bar-vertical #progress { top: 0; bottom: auto; }
+body.bar-vertical #tabs::-webkit-scrollbar { width: 8px; }
+body.bar-vertical #tabs::-webkit-scrollbar-thumb { background: var(--press); border-radius: 4px; }
+body.bar-vertical #start { margin-left: var(--side-w); }
+body.bar-vertical #layer { top: 0; left: var(--side-w); }
+body.bar-vertical #sheet {
+  position: fixed;
+  top: var(--sheet-top, 120px);
+  left: 8px;
+  right: auto;
+  width: calc(var(--side-w) - 16px);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+}
+body.bar-vertical #suggestions { padding: 6px; }
+body.bar-vertical .sug .u { display: none; }
+body.vertical-tint, body.bar-vertical.tint #toolbar { background: transparent; }
+
 /* ---------- виды новой вкладки ---------- */
 
 #greeting { display: none; }
