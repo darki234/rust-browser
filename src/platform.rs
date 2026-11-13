@@ -20,7 +20,8 @@ use tao::event_loop::EventLoopProxy;
 use webview2_com::{
     take_pwstr, AcceleratorKeyPressedEventHandler, BytesReceivedChangedEventHandler,
     BrowserExtensionEnableCompletedHandler, BrowserExtensionRemoveCompletedHandler,
-    CapturePreviewCompletedHandler, ContainsFullScreenElementChangedEventHandler,
+    CallDevToolsProtocolMethodCompletedHandler, CapturePreviewCompletedHandler,
+    ContainsFullScreenElementChangedEventHandler,
     DownloadStartingEventHandler, FaviconChangedEventHandler,
     FindActiveMatchIndexChangedEventHandler, FindMatchCountChangedEventHandler,
     FindStartCompletedHandler, HistoryChangedEventHandler,
@@ -31,7 +32,7 @@ use webview2_com::{
     ZoomFactorChangedEventHandler,
 };
 use windows::{
-    core::{Interface, BOOL, HSTRING, PCWSTR, PWSTR},
+    core::{w, Interface, BOOL, HSTRING, PCWSTR, PWSTR},
     Win32::{
         Foundation::{HANDLE, HGLOBAL, HWND},
         Graphics::Dwm::{
@@ -493,6 +494,122 @@ pub fn enable_extension(webview: &WebView, id: &str, enabled: bool) {
     }));
     unsafe {
         let _ = profile.GetBrowserExtensions(&handler);
+    }
+}
+
+/// Расширение в профиле WebView2: (id, имя, включено).
+pub type ProfileExtension = (String, String, bool);
+
+/// Все расширения профиля.
+pub fn list_extensions(webview: &WebView, done: impl FnOnce(Vec<ProfileExtension>) + 'static) {
+    let Some(profile) = profile7(webview) else { return done(Vec::new()) };
+    let mut done = Some(done);
+    let handler = ProfileGetBrowserExtensionsCompletedHandler::create(Box::new(move |result, list| unsafe {
+        let mut out = Vec::new();
+        if let (Ok(()), Some(list)) = (result, list) {
+            let mut count = 0u32;
+            list.Count(&mut count)?;
+            for index in 0..count {
+                let ext = list.GetValueAtIndex(index)?;
+                let mut enabled = BOOL::default();
+                let _ = ext.IsEnabled(&mut enabled);
+                if let (Some(id), Some(name)) = (extension_text(|p| ext.Id(p)), extension_text(|p| ext.Name(p))) {
+                    out.push((id, name, enabled.as_bool()));
+                }
+            }
+        }
+        if let Some(done) = done.take() {
+            done(out);
+        }
+        Ok(())
+    }));
+    unsafe {
+        let _ = profile.GetBrowserExtensions(&handler);
+    }
+}
+
+/// Ставит распакованное расширение; прежнюю версию с тем же id сначала убирает.
+pub fn add_extension(webview: &WebView, folder: &Path, id: &str, done: impl FnOnce(Result<String, String>) + 'static) {
+    let Some(profile) = profile7(webview) else { return done(Err("расширения недоступны".into())) };
+    let folder = HSTRING::from(folder.as_os_str());
+    let id = id.to_string();
+    let adder = profile.clone();
+    let mut done = Some(done);
+    let handler = ProfileGetBrowserExtensionsCompletedHandler::create(Box::new(move |result, list| unsafe {
+        if let (Ok(()), Some(list)) = (result, list) {
+            let mut count = 0u32;
+            list.Count(&mut count)?;
+            for index in 0..count {
+                let ext = list.GetValueAtIndex(index)?;
+                if extension_text(|p| ext.Id(p)).as_deref() == Some(id.as_str()) {
+                    let _ = ext.Remove(&BrowserExtensionRemoveCompletedHandler::create(Box::new(|_| Ok(()))));
+                }
+            }
+        }
+        let mut done = done.take();
+        let added = ProfileAddBrowserExtensionCompletedHandler::create(Box::new(move |result, ext| {
+            let outcome = match (result, ext) {
+                (Ok(()), Some(ext)) => extension_text(|p| ext.Id(p)).ok_or_else(|| "нет id".to_string()),
+                (Err(error), _) => Err(error.message().to_string()),
+                _ => Err("WebView2 не принял расширение".to_string()),
+            };
+            if let Some(done) = done.take() {
+                done(outcome);
+            }
+            Ok(())
+        }));
+        adder.AddBrowserExtension(&folder, &added)?;
+        Ok(())
+    }));
+    unsafe {
+        let _ = profile.GetBrowserExtensions(&handler);
+    }
+}
+
+pub fn remove_extension(webview: &WebView, id: &str, done: impl FnOnce() + 'static) {
+    let Some(profile) = profile7(webview) else { return };
+    let id = id.to_string();
+    let mut done = Some(done);
+    let handler = ProfileGetBrowserExtensionsCompletedHandler::create(Box::new(move |result, list| unsafe {
+        let (Ok(()), Some(list)) = (result, list) else { return Ok(()) };
+        let mut count = 0u32;
+        list.Count(&mut count)?;
+        for index in 0..count {
+            let ext = list.GetValueAtIndex(index)?;
+            if extension_text(|p| ext.Id(p)).as_deref() == Some(id.as_str()) {
+                let mut done = done.take();
+                let removed = BrowserExtensionRemoveCompletedHandler::create(Box::new(move |_| {
+                    if let Some(done) = done.take() {
+                        done();
+                    }
+                    Ok(())
+                }));
+                ext.Remove(&removed)?;
+            }
+        }
+        Ok(())
+    }));
+    unsafe {
+        let _ = profile.GetBrowserExtensions(&handler);
+    }
+}
+
+/// Размер содержимого страницы в CSS-пикселях. Через протокол DevTools —
+/// так можно мерить и страницы расширений, где ExecuteScript не работает.
+pub fn content_size(webview: &WebView, done: impl FnOnce(f64, f64) + 'static) {
+    let mut done = Some(done);
+    let handler = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |result, json| {
+        let size = result.ok().and_then(|_| serde_json::from_str::<serde_json::Value>(&json).ok()).and_then(|v| {
+            let content = &v["cssContentSize"];
+            Some((content["width"].as_f64()?, content["height"].as_f64()?))
+        });
+        if let (Some((width, height)), Some(done)) = (size, done.take()) {
+            done(width, height);
+        }
+        Ok(())
+    }));
+    unsafe {
+        let _ = webview.webview().CallDevToolsProtocolMethod(w!("Page.getLayoutMetrics"), w!("{}"), &handler);
     }
 }
 

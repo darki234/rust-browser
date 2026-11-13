@@ -14,6 +14,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # Прямой доступ к WebView2: горячие клавиши, перехват запросов, загрузки.
 webview2-com = "0.38"
 windows-future = "0.2"
+sha2 = "0.10"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",

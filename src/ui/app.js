@@ -74,6 +74,7 @@ const ICONS = {
   key: '<circle cx="7.5" cy="15.5" r="4.5"/><path d="m10.7 12.3 9.3-9.3"/><path d="m16 7 3 3"/><path d="m14 9 2 2"/>',
   eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
   eyeoff: '<path d="M10.6 5.1A10 10 0 0 1 12 5c6.5 0 10 7 10 7a17 17 0 0 1-2.2 3.1"/><path d="M6.6 6.6C3.7 8.4 2 12 2 12s3.5 7 10 7a9.7 9.7 0 0 0 5.4-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/><path d="m3 3 18 18"/>',
+  puzzle: '<path d="M10 3.5a2 2 0 0 1 4 0V6h4a1 1 0 0 1 1 1v4h-2.5a2 2 0 0 0 0 4H19v4a1 1 0 0 1-1 1h-4v-2.5a2 2 0 0 0-4 0V20H6a1 1 0 0 1-1-1v-4h2.5a2 2 0 0 0 0-4H5V7a1 1 0 0 1 1-1h4z"/>',
   cut: '<circle cx="6" cy="18" r="3"/><circle cx="18" cy="18" r="3"/><path d="M8.1 15.9 18 4"/><path d="M15.9 15.9 6 4"/>',
   paste: '<rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4h6v2H9z"/>',
   pastego: '<rect x="4" y="4" width="11" height="16" rx="2"/><path d="M7 4h5v2H7z"/><path d="M14 15h7"/><path d="m18 12 3 3-3 3"/>',
@@ -275,6 +276,7 @@ function setState(next) {
   renderFavbar();
   renderStart();
   renderPasswordKey();
+  renderExtButton();
   if (hubSection && hubSection !== 'history') renderHubList(false);
   if (menuKind === 'main') refreshMainMenu();
 }
@@ -1184,6 +1186,11 @@ async function showMenu(kind, nodes, place) {
 function closeMenu() {
   if (!menuKind) return;
   const kind = menuKind;
+  if (kind === 'ext') send('ext_popup_close');
+  if (el.menu.classList.contains('extbox')) {
+    el.menu.classList.remove('extbox');
+    el.menu.style.width = el.menu.style.height = '';
+  }
   menuKind = null;
   el.menubtn.classList.remove('on');
   el.catcher.classList.remove('open');
@@ -1833,6 +1840,7 @@ const SETTINGS_CATS = [
         h('button', { class: 'text-btn outline', onclick: () => send('reset_download_dir') }, 'По умолчанию'),
         h('button', { class: 'text-btn primary', onclick: () => send('pick_download_dir') }, 'Изменить'))),
   ]],
+  ['ext', 'Расширения', () => extensionsCards()],
   ['network', 'Сеть', () => [proxyCard()]],
   ['startup', 'Запуск', () => [
     h('div', { class: 'card' }, h('h2', {}, 'Запуск'),
@@ -2053,6 +2061,8 @@ window.ui = {
   dataCleared: () => toast('Данные сайтов удалены'),
   toast,
   passwordOffer,
+  extPopupBox,
+  extensionInstalled: (name) => toast(`Расширение «${name}» установлено — оно в меню «пазла» на панели`),
   passwordRevealed,
   passwordsImported: (count) => toast(count ? `Перенесено паролей: ${count}. Не забудьте удалить CSV-файл` : 'Новых паролей в файле не нашлось'),
   pasteText,
@@ -2177,6 +2187,115 @@ function passwordsCard() {
     h('div', { class: 'set pw-search' }, h('div', { class: 'label' }, 'Сохранённые пароли',
       h('small', {}, 'Посмотреть или скопировать пароль можно после Windows Hello — ПИН-кода, отпечатка или лица')), query),
     list, never);
+}
+
+
+// ---------- расширения ----------
+// WebView2 не рисует кнопки расширений, поэтому у браузера своя: «пазл» на панели.
+// Окошко расширения — отдельный webview, который Rust ставит под кнопкой.
+
+const extbtn = $('#extbtn');
+const STORE_URL = 'https://chromewebstore.google.com/category/extensions?hl=ru';
+
+function extIcon(ext, size = 18) {
+  if (!ext.icon) return h('span', { class: 'exticon none' }, icon('puzzle', size - 2));
+  return h('img', { class: 'exticon', src: `http://rb.localhost/exticon/${ext.id}`, width: size, height: size, alt: '' });
+}
+
+function renderExtButton() {
+  extbtn.classList.toggle('show', (S.extensions || []).length > 0);
+}
+
+function openExtPopup(ext) {
+  if (!ext.popup) {
+    if (ext.options) send('ext_options', { id: ext.id });
+    return;
+  }
+  const box = h('div', { class: 'extframe' });
+  showMenu('ext', [box], () => {
+    const anchor = extbtn.getBoundingClientRect();
+    const right = Math.min(innerWidth - 8, anchor.right + 6);
+    const top = anchor.bottom + 8;
+    el.menu.classList.add('extbox');
+    Object.assign(el.menu.style, { left: right - 360 + 'px', top: top + 'px', width: '360px', height: '120px' });
+    send('ext_popup', { id: ext.id, right, top });
+  });
+}
+
+function extPopupBox(r) {
+  if (menuKind !== 'ext') return;
+  Object.assign(el.menu.style, { left: r.left + 'px', top: r.top + 'px', width: r.width + 'px', height: r.height + 'px' });
+}
+
+function showExtMenu() {
+  const list = S.extensions || [];
+  const nodes = [
+    h('div', { class: 'menu-title' }, 'Расширения'),
+    ...list.map((ext) => {
+      const node = h('button', { class: 'mi ext-mi' + (ext.enabled ? '' : ' off'), disabled: !ext.enabled },
+        h('span', { class: 'ic' }, extIcon(ext, 18)),
+        h('span', { class: 'lbl' }, ext.name),
+        !ext.popup && ext.options ? h('span', { class: 'kb' }, 'настройки') : null);
+      node.addEventListener('click', () => {
+        if (ext.popup) { closeMenu(); setTimeout(() => openExtPopup(ext), 140); }
+        else { closeMenu(); if (ext.options) send('ext_options', { id: ext.id }); }
+      });
+      return node;
+    }),
+    sep(),
+    item({ icon: 'open', label: 'Chrome Web Store', onClick: () => send('open', { url: STORE_URL, newTab: true }) }),
+    item({ icon: 'gear', label: 'Управление расширениями', onClick: () => { settingsCat = 'ext'; openHub('settings'); } }),
+  ];
+  showMenu('extlist', nodes, () => {
+    const anchor = extbtn.getBoundingClientRect();
+    el.menu.style.left = Math.max(8, Math.min(anchor.right - 300, innerWidth - 310)) + 'px';
+    el.menu.style.top = anchor.bottom + 10 + 'px';
+    el.menu.style.transformOrigin = 'top right';
+  });
+}
+
+extbtn.addEventListener('click', () => {
+  if (menuKind === 'extlist' || menuKind === 'ext') return closeMenu();
+  showExtMenu();
+});
+
+let extScanned = false;
+function extensionsCards() {
+  if (!extScanned) { extScanned = true; send('ext_scan'); }
+  const list = h('div', { class: 'ext-list' });
+  const browsers = h('div', {});
+  settingsUpdaters.push(() => {
+    const exts = S.extensions || [];
+    list.replaceChildren(...(exts.length ? exts.map((ext) => h('div', { class: 'ext-row' + (ext.enabled ? '' : ' off') },
+      extIcon(ext, 32),
+      h('div', { class: 'ext-who' }, h('b', {}, ext.name),
+        h('small', {}, [ext.version && `версия ${ext.version}`, ext.source].filter(Boolean).join(' · '))),
+      ext.options && h('button', { class: 'text-btn outline', onclick: () => { send('ext_options', { id: ext.id }); closeHub(); } }, 'Настройки'),
+      ext.builtin
+        ? h('small', { class: 'ext-note' }, 'вкл./выкл. — «Блокировка рекламы»')
+        : h('label', { class: 'switch' },
+          (() => { const i = h('input', { type: 'checkbox' }); i.checked = ext.enabled; i.addEventListener('change', () => send('ext_enable', { id: ext.id, on: i.checked })); return i; })(),
+          h('i')),
+      !ext.builtin && actionButton('trash', 'Удалить', () => send('ext_remove', { id: ext.id }))))
+      : [h('div', { class: 'pw-empty' }, 'Расширений пока нет')]));
+    const found = S.extBrowsers || [];
+    browsers.replaceChildren(...(found.length
+      ? found.map(([name, count]) => setting(name,
+        count ? `Можно перенести: ${count}` : 'Всё уже перенесено или переносить нечего',
+        h('button', { class: 'text-btn ' + (count ? 'primary' : 'outline'), disabled: !count, onclick: () => send('ext_import', { browser: name }) }, 'Перенести')))
+      : [h('div', { class: 'pw-empty' }, 'Других браузеров с расширениями не нашлось')]));
+  });
+  return [
+    h('div', { class: 'card' }, h('h2', {}, 'Установленные расширения'), list),
+    h('div', { class: 'card' }, h('h2', {}, 'Добавить'),
+      setting('Chrome Web Store', 'Откройте страницу расширения в магазине и нажмите «Установить в Rust Browser» внизу справа. Пакет проверяется по подписи магазина',
+        h('button', { class: 'text-btn primary', onclick: () => { send('open', { url: STORE_URL, newTab: true }); closeHub(); } }, 'Открыть магазин')),
+      h('div', { class: 'ext-warn' }, icon('alert', 14),
+        'Движок Chromium 157 поддерживает только расширения нового формата (Manifest V3). Старые расширения MV2 не установятся — так же, как в Chrome и Edge')),
+    h('div', { class: 'card' }, h('h2', {}, 'Перенести из другого браузера'),
+      h('div', { class: 'ext-hint' }, 'Копируются сами расширения. Их настройки и вход остаются в том браузере'),
+      browsers),
+  ];
 }
 
 // ---------- заставка запуска ----------

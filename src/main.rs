@@ -7,6 +7,7 @@ mod extension;
 mod platform;
 mod pages;
 mod passwords;
+mod webstore;
 mod store;
 mod system;
 
@@ -125,6 +126,16 @@ pub enum UserEvent {
     Page(u32, String, String),
     /// Windows Hello ответил: (номер пароля, скопировать, итог).
     Verified(usize, bool, passwords::Verdict),
+    /// Расширение распаковано (или ошибка: id, текст); вкладка магазина, откуда ставили.
+    ExtReady(Result<webstore::Installed, (String, String)>, Option<u32>),
+    /// Профиль ответил на установку расширения.
+    ExtAdded(webstore::Installed, Result<String, String>, Option<u32>),
+    /// Список расширений профиля.
+    ExtList(Vec<platform::ProfileExtension>),
+    /// Расширение удалено или включено — перечитать список.
+    ExtChanged,
+    ExtPopupMeasure,
+    ExtPopupSize(f64, f64),
     /// Процессы WebView2; true — показать их в диспетчере вкладок.
     Processes(Vec<efficiency::ProcessInfo>, bool),
     /// Страница не загрузилась: (вкладка, вид ошибки для своей страницы ошибки).
@@ -259,6 +270,18 @@ struct App {
     last_download: Option<Instant>,
     /// id установленного uBlock Origin Lite.
     ubol_id: Option<String>,
+    ubol_folder: Option<PathBuf>,
+    /// Поставленные нами расширения (папка, окошко, страница настроек) — extensions.json.
+    extensions: Vec<webstore::Installed>,
+    /// Что на самом деле стоит в профиле: (id, имя, включено).
+    ext_list: Vec<platform::ProfileExtension>,
+    ext_queue: std::collections::VecDeque<(webstore::Installed, Option<u32>)>,
+    ext_installing: bool,
+    ext_busy: std::collections::HashSet<String>,
+    /// Открытое окошко расширения: webview, правый край и верх кнопки.
+    ext_popup: Option<(WebView, f64, f64)>,
+    /// Найденные браузеры с расширениями: (название, сколько можно перенести).
+    ext_browsers: Vec<(String, usize)>,
     /// Сохранённые пароли (зашифрованы) и сайты «никогда не сохранять».
     vault: passwords::Vault,
     /// Пароль, который только что ввели на сайте: ждёт ответа «Сохранить?».
@@ -385,6 +408,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         import_sources: pages::import_sources(),
         last_download: None,
         ubol_id: None,
+        ubol_folder: None,
+        extensions: Vec::new(),
+        ext_list: Vec::new(),
+        ext_queue: Default::default(),
+        ext_installing: false,
+        ext_busy: Default::default(),
+        ext_popup: None,
+        ext_browsers: Vec::new(),
         vault,
         pw_offer: None,
         pw_verified: None,
@@ -435,6 +466,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let url = to_url(&url, search_url(&app.store.settings.search));
         app.new_tab(Some(url));
     }
+    app.extensions = app.store.read_named("extensions.json");
+    register_icons(&app.extensions, None);
+    app.refresh_extensions();
     if app.primary && system::is_registered() {
         // exe могли перенести — обновляем путь в регистрации Windows
         std::thread::spawn(system::register);
@@ -649,6 +683,7 @@ fn build_tab(app: &mut App, id: u32, bounds: Rect) -> wry::Result<WebView> {
         .with_theme(theme)
         // менеджер паролей: замечает формы входа (сам пароль — только при отправке)
         .with_initialization_script(passwords::PAGE_SCRIPT)
+        .with_initialization_script(webstore::STORE_SCRIPT)
         // адрес берём из самого запроса WebView2, а не из сообщения: сайт не может притвориться другим
         .with_ipc_handler(move |request: Request<String>| {
             let url = request.uri().to_string();
@@ -1255,6 +1290,15 @@ impl App {
             UserEvent::Captured(bytes) => self.finish_overlay(bytes),
             UserEvent::Panel(raw) => self.handle_panel(&raw),
             UserEvent::Page(id, url, raw) => self.handle_page(id, &url, &raw),
+            UserEvent::ExtReady(result, tab) => self.extension_ready(result, tab),
+            UserEvent::ExtAdded(info, result, tab) => self.extension_added(info, result, tab),
+            UserEvent::ExtList(list) => {
+                self.ext_list = list;
+                self.dirty = true;
+            }
+            UserEvent::ExtChanged => self.refresh_extensions(),
+            UserEvent::ExtPopupMeasure => self.measure_ext_popup(),
+            UserEvent::ExtPopupSize(w, h) => self.resize_ext_popup(w, h),
             UserEvent::Verified(index, copy, verdict) => self.password_verified(index, copy, verdict),
             UserEvent::Processes(list, report) => {
                 self.processes = list;
@@ -1292,6 +1336,7 @@ impl App {
                 self.window.set_focus();
             }
             UserEvent::ExtensionReady(path) => {
+                self.ubol_folder = Some(path.clone());
                 let reinstall = self.store.settings.ubol_version != extension::VERSION;
                 let proxy = self.proxy.clone();
                 platform::install_extension(&self.ui, &path, "uBlock", reinstall, move |id| {
@@ -1309,6 +1354,9 @@ impl App {
                 }
                 platform::enable_extension(&self.ui, &id, self.store.settings.adblock);
                 self.ubol_id = Some(id);
+                let ubol = self.ubol_id.as_deref().zip(self.ubol_folder.as_deref());
+                register_icons(&self.extensions, ubol);
+                self.refresh_extensions();
                 self.dirty = true;
             }
         }
@@ -1971,6 +2019,44 @@ impl App {
             }
 
             // слои поверх страницы
+            "ext_scan" => {
+                let installed: Vec<String> = self.ext_list.iter().map(|(id, _, _)| id.clone()).collect();
+                self.ext_browsers = webstore::browser_profiles()
+                    .into_iter()
+                    .map(|(name, profiles)| {
+                        let count = webstore::scan(&profiles).iter().filter(|f| !installed.contains(&f.id)).count();
+                        (name.to_string(), count)
+                    })
+                    .collect();
+                self.dirty = true;
+            }
+            "ext_import" => self.import_extensions(&text("browser")),
+            "ext_enable" => {
+                let id = text("id");
+                if self.ubol_id.as_deref() == Some(id.as_str()) {
+                    return; // у блокировщика свой переключатель
+                }
+                platform::enable_extension(&self.ui, &id, message["on"].as_bool().unwrap_or(true));
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(300));
+                    let _ = proxy.send_event(UserEvent::ExtChanged);
+                });
+            }
+            "ext_remove" => self.remove_extension(&text("id")),
+            "ext_options" => {
+                let id = text("id");
+                if let Some(info) = self.extension_info(&id).filter(|i| !i.options.is_empty()) {
+                    self.new_tab(Some(format!("chrome-extension://{id}/{}", info.options)));
+                }
+            }
+            "ext_popup" => {
+                let id = text("id");
+                let right = message["right"].as_f64().unwrap_or(0.0);
+                let top = message["top"].as_f64().unwrap_or(0.0);
+                self.open_ext_popup(&id, right, top);
+            }
+            "ext_popup_close" => self.close_ext_popup(),
             "pw_save" => self.save_offered_password(),
             "pw_never" => {
                 if let Some(offer) = self.pw_offer.take() {
@@ -2441,13 +2527,15 @@ impl App {
             })).collect::<Vec<_>>(),
             "pwNever": self.vault.never.iter().map(|o| json!([o, passwords::display_host(o)])).collect::<Vec<_>>(),
             "pwHere": self.passwords_here(),
+            "extensions": self.extensions_state(),
+            "extBrowsers": self.ext_browsers,
             "dark": self.dark(),
             "maximized": self.maximized,
             "fullscreen": self.is_fullscreen(),
         });
         let mut state = state;
         if let Value::Object(fields) = &mut state {
-            for key in ["bookmarks", "downloads", "engines", "settings", "logins", "pwNever"] {
+            for key in ["bookmarks", "downloads", "engines", "settings", "logins", "pwNever", "extensions", "extBrowsers"] {
                 let Some(value) = fields.get(key) else { continue };
                 let text = value.to_string();
                 if self.sent.get(key) == Some(&text) {
@@ -2491,6 +2579,19 @@ impl App {
                 if passwords::origin_of(&tab.url) == passwords::origin_of(url) {
                     tab.pw_form = true;
                     self.dirty = true;
+                }
+            }
+            "ext_store_check" => {
+                let installed = webstore::store_id(url)
+                    .is_some_and(|ext| self.ext_list.iter().any(|(id, _, _)| *id == ext));
+                if installed {
+                    self.store_page_status(Some(id), "Установлено ✓");
+                }
+            }
+            "ext_store_install" => {
+                // кнопка есть только на страницах магазина: адрес проверяем по самому WebView2
+                if url.starts_with("https://chromewebstore.google.com/") {
+                    self.install_from_store(id, url);
                 }
             }
             "pw_capture" => {
@@ -2609,6 +2710,272 @@ impl App {
 
 fn unix_now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+impl App {
+    // ---------- расширения ----------
+
+    fn extensions_dir() -> PathBuf {
+        data_dir().join("extensions").join("installed")
+    }
+
+    fn save_extensions(&mut self) {
+        self.store.write_named("extensions.json", &self.extensions);
+        let ubol = self.ubol_id.as_deref().zip(self.ubol_folder.as_deref());
+        register_icons(&self.extensions, ubol);
+        self.dirty = true;
+    }
+
+    /// Спрашивает у профиля, какие расширения стоят и включены.
+    fn refresh_extensions(&self) {
+        let proxy = self.proxy.clone();
+        platform::list_extensions(&self.ui, move |list| {
+            let _ = proxy.send_event(UserEvent::ExtList(list));
+        });
+    }
+
+    /// Расширения для интерфейса: что стоит в профиле, плюс сведения из manifest.json.
+    fn extensions_state(&self) -> Vec<Value> {
+        self.ext_list
+            .iter()
+            // служебные компоненты WebView2 (просмотр PDF, буфер обмена) не показываем
+            .filter(|(id, _, _)| self.ubol_id.as_deref() == Some(id.as_str()) || self.extensions.iter().any(|e| &e.id == id))
+            .map(|(id, name, enabled)| {
+                let ubol = self.ubol_id.as_deref() == Some(id.as_str());
+                let info = self.extensions.iter().find(|e| &e.id == id).cloned().or_else(|| {
+                    ubol.then(|| self.ubol_folder.as_deref().and_then(webstore::describe)).flatten()
+                });
+                let info = info.unwrap_or_default();
+                json!({
+                    "id": id,
+                    "name": if info.name.is_empty() { name.clone() } else { info.name.clone() },
+                    "enabled": enabled,
+                    "version": info.version,
+                    "source": if ubol { "встроено".to_string() } else { info.source.clone() },
+                    "popup": !info.popup.is_empty(),
+                    "options": !info.options.is_empty(),
+                    "icon": !info.icon.is_empty(),
+                    "builtin": ubol,
+                })
+            })
+            .collect()
+    }
+
+    fn extension_info(&self, id: &str) -> Option<webstore::Installed> {
+        if self.ubol_id.as_deref() == Some(id) {
+            return self.ubol_folder.as_deref().and_then(webstore::describe);
+        }
+        self.extensions.iter().find(|e| e.id == id).cloned()
+    }
+
+    /// Кнопка на странице магазина: id берём из адреса вкладки, который знает браузер, а не страница.
+    fn install_from_store(&mut self, tab: u32, page_url: &str) {
+        let tab_url = self.tab(tab).map(|t| t.url.clone()).unwrap_or_default();
+        let Some(id) = webstore::store_id(&tab_url).or_else(|| webstore::store_id(page_url)) else { return };
+        if self.ext_busy.contains(&id) {
+            return;
+        }
+        self.ext_busy.insert(id.clone());
+        let _ = self.ui.evaluate_script("ui.toast('Скачиваю расширение из Chrome Web Store…')");
+        let proxy = self.proxy.clone();
+        let engine = wry::webview_version().unwrap_or_default();
+        std::thread::spawn(move || {
+            let result = webstore::download(&id, &Self::extensions_dir(), &engine).map_err(|e| (id, e));
+            let _ = proxy.send_event(UserEvent::ExtReady(result, Some(tab)));
+        });
+    }
+
+    /// Перенос из другого браузера: копируем в фоне, ставим по одному.
+    fn import_extensions(&mut self, browser: &str) {
+        let Some((name, profiles)) = webstore::browser_profiles().into_iter().find(|(n, _)| *n == browser) else { return };
+        let installed: Vec<String> = self.ext_list.iter().map(|(id, _, _)| id.clone()).collect();
+        let found: Vec<_> = webstore::scan(&profiles).into_iter().filter(|f| !installed.contains(&f.id)).collect();
+        if found.is_empty() {
+            let _ = self.ui.evaluate_script(&format!("ui.toast({:?})", format!("Из {name} переносить нечего — всё уже есть")));
+            return;
+        }
+        let _ = self.ui.evaluate_script(&format!("ui.toast({:?})", format!("Переношу расширения из {name}: {}", found.len())));
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            for item in found {
+                let result = webstore::copy_from(&item, &Self::extensions_dir(), name).map_err(|e| (item.id.clone(), e));
+                let _ = proxy.send_event(UserEvent::ExtReady(result, None));
+            }
+        });
+    }
+
+    /// Папка с расширением готова — ставим в профиль (по очереди, чтобы не мешать друг другу).
+    fn extension_ready(&mut self, result: Result<webstore::Installed, (String, String)>, tab: Option<u32>) {
+        match result {
+            Ok(info) => {
+                self.ext_queue.push_back((info, tab));
+                self.install_next_extension();
+            }
+            Err((id, error)) => {
+                self.ext_busy.remove(&id);
+                self.store_page_status(tab, "Не получилось");
+                let _ = self.ui.evaluate_script(&format!("ui.toast({:?})", format!("Расширение не установилось: {error}")));
+            }
+        }
+    }
+
+    fn install_next_extension(&mut self) {
+        if self.ext_installing {
+            return;
+        }
+        let Some((info, tab)) = self.ext_queue.pop_front() else { return };
+        self.ext_installing = true;
+        let proxy = self.proxy.clone();
+        let pending = info.clone();
+        platform::add_extension(&self.ui, &info.folder, &info.id, move |result| {
+            let _ = proxy.send_event(UserEvent::ExtAdded(pending, result, tab));
+        });
+    }
+
+    fn extension_added(&mut self, mut info: webstore::Installed, result: Result<String, String>, tab: Option<u32>) {
+        self.ext_installing = false;
+        self.ext_busy.remove(&info.id);
+        match result {
+            Ok(id) => {
+                info.id = id;
+                self.extensions.retain(|e| e.id != info.id);
+                let name = info.name.clone();
+                self.extensions.push(info);
+                self.save_extensions();
+                self.refresh_extensions();
+                self.store_page_status(tab, "Установлено ✓");
+                let _ = self.ui.evaluate_script(&format!("ui.extensionInstalled({:?})", name));
+            }
+            Err(error) => {
+                let _ = std::fs::remove_dir_all(&info.folder);
+                self.store_page_status(tab, "Не поддерживается");
+                let reason = if info.mv < 3 {
+                    "старый формат (Manifest V2) больше не работает в движке Chromium".to_string()
+                } else {
+                    error
+                };
+                let _ = self.ui.evaluate_script(&format!(
+                    "ui.toast({:?})",
+                    format!("«{}» не установилось: {reason}", info.name)
+                ));
+            }
+        }
+        self.install_next_extension();
+    }
+
+    fn store_page_status(&self, tab: Option<u32>, text: &str) {
+        let webview = tab.and_then(|id| self.tab(id)).and_then(|t| t.webview.as_ref());
+        if let Some(webview) = webview {
+            let _ = webview.evaluate_script(&format!("window.__rbStoreDone && __rbStoreDone({text:?})"));
+        }
+    }
+
+    fn remove_extension(&mut self, id: &str) {
+        if self.ubol_id.as_deref() == Some(id) {
+            return; // встроенный блокировщик выключается переключателем рекламы
+        }
+        self.close_ext_popup();
+        let folder = self.extensions.iter().find(|e| e.id == id).map(|e| e.folder.clone());
+        let proxy = self.proxy.clone();
+        platform::remove_extension(&self.ui, id, move || {
+            if let Some(folder) = folder.filter(|f| f.starts_with(Self::extensions_dir())) {
+                let _ = std::fs::remove_dir_all(folder);
+            }
+            let _ = proxy.send_event(UserEvent::ExtChanged);
+        });
+        self.extensions.retain(|e| e.id != id);
+        self.save_extensions();
+    }
+
+    // ----- окошко расширения (его кнопка на панели) -----
+
+    fn open_ext_popup(&mut self, id: &str, right: f64, top: f64) {
+        self.close_ext_popup();
+        let Some(info) = self.extension_info(id) else { return };
+        if info.popup.is_empty() {
+            if !info.options.is_empty() {
+                self.new_tab(Some(format!("chrome-extension://{id}/{}", info.options)));
+            }
+            let _ = self.ui.evaluate_script("ui.closeOverlays()");
+            return;
+        }
+        let url = format!("chrome-extension://{id}/{}", info.popup);
+        let (width, height) = (360.0, 120.0);
+        let bounds = rect((right - width).max(8.0), top, width, height);
+        let network = proxy_config(&self.store.settings);
+        let popup = self.proxy.clone();
+        let (dark, inprivate, theme) = (self.dark(), self.inprivate, self.page_theme());
+        let built = WebViewBuilder::new_with_web_context(&mut self.web_context)
+            .with_bounds(bounds)
+            .with_url(url)
+            .with_background_color(if dark { (32, 33, 40, 255) } else { (255, 255, 255, 255) })
+            .with_incognito(inprivate)
+            .with_browser_extensions_enabled(true)
+            .with_network(network)
+            .with_theme(theme)
+            .with_new_window_req_handler(move |url, _| {
+                let _ = popup.send_event(UserEvent::NewTabRequested(url, false));
+                NewWindowResponse::Deny
+            })
+            .build_as_child(&self.window);
+        let Ok(webview) = built else { return };
+        platform::hook_hotkeys(&webview, self.keys.clone(), self.proxy.clone());
+        let _ = webview.focus();
+        self.ext_popup = Some((webview, right, top));
+        // окошко само подстраивается под содержимое, как в Chrome: меряем несколько раз, пока оно рисуется
+        for delay in [150u64, 450, 1000, 2000] {
+            let proxy = self.proxy.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(delay));
+                let _ = proxy.send_event(UserEvent::ExtPopupMeasure);
+            });
+        }
+    }
+
+    fn measure_ext_popup(&self) {
+        let Some((webview, _, _)) = &self.ext_popup else { return };
+        let proxy = self.proxy.clone();
+        platform::content_size(webview, move |width, height| {
+            let _ = proxy.send_event(UserEvent::ExtPopupSize(width, height));
+        });
+    }
+
+    fn resize_ext_popup(&mut self, width: f64, height: f64) {
+        let Some((webview, right, top)) = &self.ext_popup else { return };
+        let (window_width, window_height) = window_size(&self.window);
+        let width = width.clamp(240.0, 800.0).min(window_width - 16.0);
+        let height = height.clamp(80.0, 600.0).min(window_height - top - 8.0);
+        let left = (right - width).max(8.0);
+        let _ = webview.set_bounds(rect(left, *top, width, height));
+        let box_rect = json!({ "left": left, "top": top, "width": width, "height": height });
+        let _ = self.ui.evaluate_script(&format!("ui.extPopupBox({box_rect})"));
+    }
+
+    fn close_ext_popup(&mut self) {
+        self.ext_popup = None;
+    }
+}
+
+/// Значки расширений для интерфейса: http://rb.localhost/exticon/<id>.
+static EXT_ICONS: std::sync::Mutex<Vec<(String, PathBuf)>> = std::sync::Mutex::new(Vec::new());
+
+fn register_icons(list: &[webstore::Installed], ubol: Option<(&str, &Path)>) {
+    let mut icons: Vec<(String, PathBuf)> = list
+        .iter()
+        .filter(|e| !e.icon.is_empty())
+        .map(|e| (e.id.clone(), e.folder.join(&e.icon)))
+        .collect();
+    if let Some((id, info)) = ubol.and_then(|(id, f)| webstore::describe(f).map(|i| (id, i))).filter(|(_, i)| !i.icon.is_empty()) {
+        icons.push((id.to_string(), info.folder.join(&info.icon)));
+    }
+    if let Ok(mut guard) = EXT_ICONS.lock() {
+        *guard = icons;
+    }
+}
+
+fn extension_icon(id: &str) -> Option<PathBuf> {
+    let guard = EXT_ICONS.lock().ok()?;
+    guard.iter().find(|(k, _)| k == id).map(|(_, p)| p.clone())
 }
 
 /// Выгружает вкладку: webview и процесс страницы уничтожаются, адрес остаётся;
@@ -2812,6 +3179,18 @@ fn serve_local(path: &str, range: Option<&str>) -> wry::http::Response<std::borr
     if path == "/wallpaper-video" {
         return serve_video(video_file(), range);
     }
+    if let Some(icon) = path.strip_prefix("/exticon/").and_then(extension_icon) {
+        let mime = match icon.extension().and_then(|e| e.to_str()).unwrap_or("") {
+            "svg" => "image/svg+xml",
+            "jpg" | "jpeg" => "image/jpeg",
+            "webp" => "image/webp",
+            _ => "image/png",
+        };
+        return match std::fs::read(icon) {
+            Ok(bytes) => wry::http::Response::builder().header("Content-Type", mime).body(bytes.into()).unwrap_or_default(),
+            Err(_) => wry::http::Response::builder().status(404).body(Vec::new().into()).unwrap_or_default(),
+        };
+    }
     if let Some(id) = path.strip_prefix("/live/") {
         return serve_video(live_wall_file(id).map(|p| (p, "video/webm")), range);
     }
@@ -2855,6 +3234,29 @@ fn percent_encode(text: &str) -> String {
         }
     }
     out
+}
+
+/// Обратное к base64; None — если в тексте посторонние символы.
+fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len() * 3 / 4);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for c in text.bytes().filter(|c| !c.is_ascii_whitespace() && *c != b'=') {
+        let value = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            _ => return None,
+        };
+        acc = (acc << 6) | u32::from(value);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
 }
 
 fn base64(bytes: &[u8]) -> String {
@@ -2985,6 +3387,10 @@ mod tests {
 
     #[test]
     fn base64_matches_reference() {
+        for sample in [&b""[..], b"f", b"fo", b"foo", b"foob", &[0xff, 0, 0x10]] {
+            assert_eq!(base64_decode(&base64(sample)).as_deref(), Some(sample));
+        }
+        assert_eq!(base64_decode("a*b"), None);
         assert_eq!(base64(b""), "");
         assert_eq!(base64(b"f"), "Zg==");
         assert_eq!(base64(b"fo"), "Zm8=");

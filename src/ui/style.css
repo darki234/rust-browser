@@ -1805,3 +1805,24 @@ body.glass .setcats { background: transparent; }
 .wallcredit a { color: var(--accent); }
 .livetile::after { content: ""; position: absolute; inset: 40% 0 0; background: linear-gradient(transparent, rgba(0, 0, 0, .65)); pointer-events: none; }
 .livetile span, .livetile em { z-index: 1; }
+
+/* ---------- расширения ---------- */
+#extbtn { display: none; }
+#extbtn.show { display: grid; }
+.exticon { display: block; border-radius: 4px; object-fit: contain; }
+.exticon.none { display: grid; place-items: center; color: var(--muted); }
+.ext-mi.off { opacity: .5; }
+.menu.extbox { padding: 0; overflow: hidden; min-width: 0; transition: width .18s var(--ease), height .18s var(--ease), left .18s var(--ease); }
+.extframe { width: 100%; height: 100%; }
+.ext-list { padding: 0 10px 8px; }
+.ext-row { display: flex; align-items: center; gap: 12px; min-height: 58px; padding: 6px 8px; border-radius: 10px; }
+.ext-row:hover { background: var(--hover); }
+.ext-row.off .exticon, .ext-row.off .ext-who { opacity: .55; }
+.ext-row .exticon { width: 32px; height: 32px; flex: none; }
+.ext-who { flex: 1; min-width: 0; }
+.ext-who b, .ext-who small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ext-who b { font-weight: 500; }
+.ext-who small, .ext-note { color: var(--muted); }
+.ext-warn { display: flex; gap: 8px; align-items: flex-start; margin: 0 18px 14px; padding: 10px 12px; border-radius: 10px; background: var(--hover); color: var(--muted); line-height: 1.45; }
+.ext-warn svg { flex: none; margin-top: 2px; }
+.ext-hint { padding: 0 18px 4px; color: var(--muted); }
