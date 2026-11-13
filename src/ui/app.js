@@ -78,6 +78,8 @@ const ICONS = {
   translate: '<path d="M4 5h8"/><path d="M8 3v2"/><path d="M5.5 5c.8 3 3.3 5.6 6 6.5"/><path d="M10.5 5c-.7 3.2-3 6-6.5 7.5"/><path d="m12 20 4-9 4 9"/><path d="M13.4 17h5.2"/>',
   pip: '<rect x="2.5" y="4.5" width="19" height="15" rx="2.5"/><rect x="12" y="11.5" width="7" height="5" rx="1" fill="currentColor"/>',
   moon2: '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>',
+  card: '<rect x="2.5" y="5" width="19" height="14" rx="2.5"/><path d="M2.5 10h19"/><path d="M6 15h4"/>',
+  home: '<path d="M3 11 12 4l9 7"/><path d="M5 10v10h14V10"/><path d="M10 20v-6h4v6"/>',
   cut: '<circle cx="6" cy="18" r="3"/><circle cx="18" cy="18" r="3"/><path d="M8.1 15.9 18 4"/><path d="M15.9 15.9 6 4"/>',
   paste: '<rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4h6v2H9z"/>',
   pastego: '<rect x="4" y="4" width="11" height="16" rx="2"/><path d="M7 4h5v2H7z"/><path d="M14 15h7"/><path d="m18 12 3 3-3 3"/>',
@@ -301,6 +303,7 @@ function setState(next) {
   renderPasswordKey();
   renderExtButton();
   renderMyButtons();
+  renderAutofillButton();
   if (hubSection && hubSection !== 'history') renderHubList(false);
   if (menuKind === 'main') refreshMainMenu();
 }
@@ -1928,10 +1931,8 @@ const SETTINGS_CATS = [
         segmented(S.engines.map((e) => [e.id, e.name]), () => S.search, (value) => set('search', value)))),
   ]],
   ['privacy', 'Пароли и безопасность', () => [
-    typeof passwordsCard === 'function' ? passwordsCard()
-      : h('div', { class: 'card' }, h('h2', {}, 'Пароли'),
-        setting('Предлагать сохранять пароли', 'Пароли хранятся в профиле браузера в зашифрованном виде',
-          toggle(() => S.settings.passwords, (value) => set('passwords', value)))),
+    passwordsCard(),
+    autofillCard(),
     h('div', { class: 'card' }, h('h2', {}, 'Конфиденциальность'),
       setting('Блокировка рекламы и трекеров',
         () => S.ubolId
@@ -2296,6 +2297,7 @@ function passwordsCard() {
     list.replaceChildren(...(rows.length ? rows.map((l) => h('div', { class: 'pw-row' },
       h('span', { class: 'pw-fav' }, l.site.replace(/^www\./, '').charAt(0).toUpperCase()),
       h('div', { class: 'pw-who' }, h('b', {}, l.site), h('small', {}, l.username || 'без логина')),
+      healthBadge(l.index),
       h('code', { class: 'pw-secret' + (revealed.has(l.index) ? ' open' : '') }, revealed.get(l.index) ?? '••••••••••'),
       actionButton(revealed.has(l.index) ? 'eyeoff' : 'eye', revealed.has(l.index) ? 'Скрыть' : 'Показать (Windows Hello)', () => {
         if (revealed.has(l.index)) { revealed.delete(l.index); draw(); } else send('pw_reveal', { index: l.index });
@@ -2308,10 +2310,23 @@ function passwordsCard() {
       h('span', { class: 'pw-chip' }, site, h('button', { title: 'Снова предлагать', onclick: () => send('pw_unblock', { origin }) }, '×')))] : []));
   };
   query.addEventListener('input', draw);
-  settingsUpdaters.push(draw);
+  settingsUpdaters.push(() => {
+    const key = JSON.stringify([S.logins, S.pwHealth, [...revealed]]);
+    if (list.dataset.key === key) return;
+    list.dataset.key = key;
+    draw();
+  });
   return h('div', { class: 'card' }, h('h2', {}, 'Пароли'),
     setting('Предлагать сохранять пароли', 'Пароли шифруются Windows (DPAPI) и хранятся только на этом компьютере. На сайт подставляются по щелчку на ключ в адресной строке и только по HTTPS',
       toggle(() => S.settings.passwords, (value) => set('passwords', value))),
+    setting('Проверить пароли', () => S.pwChecking
+        ? 'Проверяю… Наружу уходят только первые 5 знаков отпечатка пароля, сам пароль никуда не отправляется'
+        : 'Ищет пароли в известных утечках (Have I Been Pwned), а ещё повторы и слишком простые пароли',
+      (() => {
+        const b = h('button', { class: 'text-btn outline', onclick: () => send('pw_check') }, 'Проверить');
+        settingsUpdaters.push(() => { b.disabled = !!S.pwChecking || !(S.logins || []).length; });
+        return b;
+      })()),
     setting('Перенести из другого браузера', 'В Chrome, Edge или Firefox выгрузите пароли в CSV-файл и выберите его здесь. Потом удалите этот файл — в нём пароли открытым текстом',
       h('button', { class: 'text-btn outline', onclick: () => send('pw_import') }, 'Импорт из CSV')),
     h('div', { class: 'set pw-search' }, h('div', { class: 'label' }, 'Сохранённые пароли',
@@ -2628,6 +2643,91 @@ function islandSettings() {
     roundText.textContent = round.value + ' %';
   });
   return rows;
+}
+
+
+// ---------- автозаполнение адресов и карт ----------
+
+const afbtn = $('#afbtn');
+function renderAutofillButton() {
+  const here = S.afHere;
+  afbtn.classList.toggle('show', !!(here && (here.card || here.address)));
+}
+afbtn.addEventListener('click', () => {
+  if (menuKind === 'autofill') return closeMenu();
+  const here = S.afHere || {};
+  const data = S.autofill || { addresses: [], cards: [] };
+  const nodes = [];
+  if (here.card) {
+    nodes.push(h('div', { class: 'menu-title' }, 'Карта'));
+    data.cards.forEach((c, index) => nodes.push(item({ icon: 'card', label: `${c.label} · ${c.expires}`, onClick: () => send('af_fill', { kind: 'card', index }) })));
+    if (!data.cards.length) nodes.push(h('div', { class: 'pw-empty' }, 'Карт пока нет'));
+  }
+  if (here.address) {
+    nodes.push(h('div', { class: 'menu-title' }, 'Адрес и контакты'));
+    data.addresses.forEach((a, index) => nodes.push(item({ icon: 'home', label: a.label || 'Адрес', onClick: () => send('af_fill', { kind: 'address', index }) })));
+    if (!data.addresses.length) nodes.push(h('div', { class: 'pw-empty' }, 'Адресов пока нет'));
+  }
+  nodes.push(sep(), item({ icon: 'gear', label: 'Адреса и карты…', onClick: () => { settingsCat = 'privacy'; openHub('settings'); } }));
+  showMenu('autofill', nodes, () => {
+    const anchor = afbtn.getBoundingClientRect();
+    el.menu.style.left = Math.max(8, Math.min(anchor.right - 320, innerWidth - 330)) + 'px';
+    el.menu.style.top = anchor.bottom + 10 + 'px';
+  });
+});
+
+function autofillCard() {
+  const list = h('div', { class: 'mybtns-list' });
+  const f = (placeholder, cls = '') => h('input', { type: 'text', class: 'field ' + cls, placeholder, spellcheck: 'false' });
+  const addr = { name: f('ФИО'), phone: f('Телефон'), email: f('Почта'), country: f('Страна'), city: f('Город'), street: f('Улица, дом, кв.'), zip: f('Индекс', 'port') };
+  const card = { holder: f('Имя на карте'), number: f('Номер карты'), month: f('ММ', 'port'), year: f('ГГ', 'port') };
+  card.number.inputMode = 'numeric';
+  const addAddress = h('button', { class: 'text-btn primary', onclick: () => {
+    const value = Object.fromEntries(Object.entries(addr).map(([k, i]) => [k, i.value.trim()]));
+    if (!Object.values(value).some(Boolean)) return toast('Заполните хотя бы одно поле');
+    send('af_save', { kind: 'address', value });
+    Object.values(addr).forEach((i) => { i.value = ''; });
+  } }, 'Сохранить адрес');
+  const addCard = h('button', { class: 'text-btn primary', onclick: () => {
+    const value = Object.fromEntries(Object.entries(card).map(([k, i]) => [k, i.value.trim()]));
+    if (!value.number) return toast('Укажите номер карты');
+    send('af_save', { kind: 'card', value });
+    Object.values(card).forEach((i) => { i.value = ''; });
+  } }, 'Сохранить карту');
+  settingsUpdaters.push(() => {
+    const data = S.autofill || { addresses: [], cards: [] };
+    const key = JSON.stringify(data);
+    if (list.dataset.key === key) return;
+    list.dataset.key = key;
+    const rows = [
+      ...data.addresses.map((a, index) => h('div', { class: 'mybtn-row' },
+        h('span', { class: 'pw-fav' }, icon('home', 16)),
+        h('div', { class: 'ext-who' }, h('b', {}, a.label || 'Адрес'), h('small', {}, [a.address.phone, a.address.email].filter(Boolean).join(' · '))),
+        actionButton('trash', 'Удалить', () => send('af_delete', { kind: 'address', index })))),
+      ...data.cards.map((c, index) => h('div', { class: 'mybtn-row' },
+        h('span', { class: 'pw-fav' }, icon('card', 16)),
+        h('div', { class: 'ext-who' }, h('b', {}, c.label), h('small', {}, `${c.holder || ''} · до ${c.expires}`)),
+        actionButton('trash', 'Удалить', () => send('af_delete', { kind: 'card', index })))),
+    ];
+    list.replaceChildren(...(rows.length ? rows : [h('div', { class: 'pw-empty' }, 'Сохранённых адресов и карт пока нет')]));
+  });
+  return h('div', { class: 'card' }, h('h2', {}, 'Адреса и карты'),
+    h('div', { class: 'ext-hint acc-intro' }, 'Шифруются Windows и хранятся только у вас. На сайте нажмите значок карты в адресной строке — поля заполнятся сами. Карта подставляется после Windows Hello и только на защищённые (HTTPS) сайты. Код CVC не сохраняется никогда'),
+    list,
+    h('div', { class: 'set af-form' }, h('div', { class: 'label' }, 'Новый адрес'),
+      h('div', { class: 'controls af-grid' }, ...Object.values(addr), addAddress)),
+    h('div', { class: 'set af-form' }, h('div', { class: 'label' }, 'Новая карта'),
+      h('div', { class: 'controls af-grid' }, card.holder, card.number, card.month, card.year, addCard)));
+}
+
+/** Отметка у пароля после проверки. */
+function healthBadge(index) {
+  const health = (S.pwHealth || [])[index];
+  if (!health) return null;
+  if (health.leaked > 0) return h('span', { class: 'pw-badge-bad', title: `Встречался в утечках ${health.leaked.toLocaleString('ru-RU')} раз` }, 'в утечке');
+  if (health.reused) return h('span', { class: 'pw-badge-warn', title: 'Тот же пароль стоит на другом сайте' }, 'повторяется');
+  if (health.weak) return h('span', { class: 'pw-badge-warn', title: 'Короткий или простой' }, 'простой');
+  return h('span', { class: 'pw-badge-ok' }, 'надёжный');
 }
 
 // ---------- заставка запуска ----------

@@ -1978,3 +1978,14 @@ body.glass.island-float #titlebar { background: radial-gradient(120% 220% at 0% 
 #translatebtn, #pipbtn { display: none; color: var(--muted); }
 #translatebtn.show, #pipbtn.show { display: grid; }
 #translatebtn.on { color: var(--accent); }
+
+#afbtn { display: none; color: var(--muted); }
+#afbtn.show { display: grid; }
+.af-grid { flex-wrap: wrap; justify-content: flex-end; max-width: 640px; }
+.af-grid .field { width: 190px; }
+.af-grid .field.port { width: 90px; }
+.af-form { align-items: flex-start; padding-top: 12px; padding-bottom: 12px; }
+.pw-badge-bad, .pw-badge-warn, .pw-badge-ok { flex: none; padding: 2px 8px; border-radius: 10px; font-size: 11.5px; font-weight: 600; }
+.pw-badge-bad { background: color-mix(in srgb, var(--danger) 18%, transparent); color: var(--danger); }
+.pw-badge-warn { background: color-mix(in srgb, var(--gold) 20%, transparent); color: color-mix(in srgb, var(--gold) 80%, var(--text)); }
+.pw-badge-ok { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }

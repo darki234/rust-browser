@@ -15,6 +15,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 webview2-com = "0.38"
 windows-future = "0.2"
 sha2 = "0.10"
+sha1 = "0.10"
 aes-gcm = "0.10"
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 windows = { version = "0.61", features = [

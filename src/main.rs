@@ -11,6 +11,7 @@ mod passwords;
 mod webstore;
 mod sync;
 mod icons;
+mod autofill;
 mod store;
 mod system;
 
@@ -139,6 +140,10 @@ pub enum UserEvent {
     ExtChanged,
     ExtPopupMeasure,
     ExtPopupSize(f64, f64),
+    /// Итог проверки паролей на утечки, повторы и простоту.
+    PwHealth(Vec<autofill::Health>),
+    /// Windows Hello ответил на просьбу подставить карту (номер карты, итог).
+    CardVerified(usize, passwords::Verdict),
     /// Упал весь движок WebView2 — перезапуск браузера.
     EngineCrashed,
     /// Язык открытой страницы (lang у html).
@@ -198,6 +203,9 @@ struct Tab {
     pw_form: bool,
     /// Язык страницы — чтобы предложить перевод.
     lang: String,
+    /// На странице поля карты / адреса — у адреса появляется кнопка автозаполнения.
+    af_card: bool,
+    af_address: bool,
     /// id скрипта тёмной темы для сайтов в этой вкладке (его снимают при смене настройки).
     dark_script: Arc<Mutex<Option<String>>>,
 }
@@ -227,6 +235,8 @@ impl Tab {
             pw_form: false,
             lang: String::new(),
             dark_script: Default::default(),
+            af_card: false,
+            af_address: false,
         }
     }
 
@@ -303,6 +313,11 @@ struct App {
     ext_quiet: std::collections::HashSet<String>,
     /// Предзагрузка с плитки: (вкладка, адрес, скрытый webview, который уже грузит сайт).
     prewarm: Option<(u32, String, WebView)>,
+    /// Адреса и карты для автозаполнения (на диске — под DPAPI).
+    autofill: autofill::Profile,
+    /// Результат проверки паролей (по номерам в хранилище) и идёт ли проверка.
+    pw_health: Vec<autofill::Health>,
+    pw_checking: bool,
     /// Аккаунт для синхронизации (None — не вошли).
     account: Option<sync::Account>,
     account_busy: bool,
@@ -459,6 +474,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ext_browsers: Vec::new(),
         ext_quiet: Default::default(),
         prewarm: None,
+        autofill: Default::default(),
+        pw_health: Vec::new(),
+        pw_checking: false,
         account: None,
         account_busy: false,
         account_folder: None,
@@ -516,6 +534,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.new_tab(Some(url));
     }
     app.extensions = app.store.read_named("extensions.json");
+    app.autofill = autofill::Profile::load(&app.store.read_named("autofill.json"));
     // аккаунт: первая синхронизация — сразу после запуска, когда окно уже на экране
     if !app.inprivate {
         let account: sync::Account = app.store.read_named("account.json");
@@ -763,6 +782,7 @@ fn build_tab(app: &mut App, id: u32, bounds: Rect) -> wry::Result<WebView> {
         .with_initialization_script(webstore::STORE_SCRIPT)
         .with_initialization_script(SCROLL_SCRIPT)
         .with_initialization_script(PREFETCH_SCRIPT)
+        .with_initialization_script(autofill::DETECT_SCRIPT)
         .with_navigation_handler(move |url| {
             let _ = nav.send_event(UserEvent::UrlChanged(id, url));
             true
@@ -1340,6 +1360,8 @@ impl App {
                     tab.failed = false;
                     tab.blocked = 0;
                     tab.pw_form = false;
+                    tab.af_card = false;
+                    tab.af_address = false;
                     self.dirty = true;
                     self.session_dirty = true;
                 }
@@ -1421,6 +1443,27 @@ impl App {
             UserEvent::Page(id, url, raw) => self.handle_page(id, &url, &raw),
             UserEvent::ExtReady(result, tab) => self.extension_ready(result, tab),
             UserEvent::AccountReady(result) => self.account_ready(result),
+            UserEvent::PwHealth(health) => {
+                self.pw_checking = false;
+                let leaked = health.iter().filter(|h| h.leaked > 0).count();
+                self.pw_health = health;
+                self.dirty = true;
+                let text = if self.pw_health.iter().any(|h| h.leaked < 0) {
+                    "Сервис проверки утечек не ответил — проверьте интернет".to_string()
+                } else if leaked > 0 {
+                    format!("Найдено в утечках: {leaked}. Смените эти пароли")
+                } else {
+                    "Ни один пароль не найден в известных утечках".to_string()
+                };
+                let _ = self.ui.evaluate_script(&format!("ui.toast({text:?})"));
+            }
+            UserEvent::CardVerified(index, verdict) => match verdict {
+                passwords::Verdict::Verified => self.fill_autofill("card", index),
+                passwords::Verdict::Canceled => {}
+                passwords::Verdict::Unavailable => {
+                    let _ = self.ui.evaluate_script("ui.toast('Включите ПИН-код Windows Hello — без него карты не подставляются')");
+                }
+            },
             UserEvent::EngineCrashed => {
                 // движок упал целиком: все вкладки мертвы — перезапускаемся, сеанс восстановится
                 self.save_session();
@@ -2340,6 +2383,73 @@ impl App {
                 self.save_account();
                 self.dirty = true;
             }
+            "pw_check" => {
+                if self.pw_checking {
+                    return;
+                }
+                self.pw_checking = true;
+                self.dirty = true;
+                let list: Vec<String> = self.vault.logins.iter().map(|l| passwords::unprotect(&l.secret).unwrap_or_default()).collect();
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let _ = proxy.send_event(UserEvent::PwHealth(autofill::check(&list)));
+                });
+            }
+            "af_save" => {
+                // новый или изменённый адрес / карта; index — что заменить
+                let index = message["index"].as_u64().map(|i| i as usize);
+                match message["kind"].as_str() {
+                    Some("address") => {
+                        let Ok(address) = serde_json::from_value::<autofill::Address>(message["value"].clone()) else { return };
+                        let list = &mut self.autofill.addresses;
+                        match index.filter(|i| *i < list.len()) {
+                            Some(i) => list[i] = address,
+                            None => list.push(address),
+                        }
+                    }
+                    Some("card") => {
+                        let Ok(card) = serde_json::from_value::<autofill::Card>(message["value"].clone()) else { return };
+                        if !autofill::luhn_ok(&card.number) {
+                            let _ = self.ui.evaluate_script("ui.toast('Проверьте номер карты — в нём ошибка')");
+                            return;
+                        }
+                        self.autofill.cards.push(autofill::Card { number: autofill::digits(&card.number), ..card });
+                    }
+                    _ => return,
+                }
+                self.save_autofill();
+            }
+            "af_delete" => {
+                let index = number("index") as usize;
+                match message["kind"].as_str() {
+                    Some("address") if index < self.autofill.addresses.len() => {
+                        self.autofill.addresses.remove(index);
+                    }
+                    Some("card") if index < self.autofill.cards.len() => {
+                        self.autofill.cards.remove(index);
+                    }
+                    _ => return,
+                }
+                self.save_autofill();
+            }
+            "af_fill" => {
+                let index = number("index") as usize;
+                match message["kind"].as_str() {
+                    Some("address") => self.fill_autofill("address", index),
+                    Some("card") if index < self.autofill.cards.len() => {
+                        // номер карты — только после Windows Hello
+                        if self.pw_verified.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
+                            self.fill_autofill("card", index);
+                            return;
+                        }
+                        let proxy = self.proxy.clone();
+                        passwords::verify(self.window.hwnd(), "Rust Browser: подтвердите, что это вы, чтобы подставить карту", move |verdict| {
+                            let _ = proxy.send_event(UserEvent::CardVerified(index, verdict));
+                        });
+                    }
+                    _ => {}
+                }
+            }
             "pw_save" => self.save_offered_password(),
             "pw_never" => {
                 if let Some(offer) = self.pw_offer.take() {
@@ -2356,6 +2466,9 @@ impl App {
                 let index = number("index") as usize;
                 if index < self.vault.logins.len() {
                     self.vault.logins.remove(index);
+                    if index < self.pw_health.len() {
+                        self.pw_health.remove(index);
+                    }
                     self.save_vault();
                 }
             }
@@ -2819,6 +2932,10 @@ impl App {
             })).collect::<Vec<_>>(),
             "pwNever": self.vault.never.iter().map(|o| json!([o, passwords::display_host(o)])).collect::<Vec<_>>(),
             "pwHere": self.passwords_here(),
+            "pwHealth": self.pw_health,
+            "pwChecking": self.pw_checking,
+            "autofill": self.autofill.summary(),
+            "afHere": self.active_tab().filter(|t| passwords::origin_of(&t.url).is_some()).map(|t| json!({ "card": t.af_card, "address": t.af_address })),
             "extensions": self.extensions_state(),
             "account": self.account_state(),
             "extBrowsers": self.ext_browsers,
@@ -2828,7 +2945,7 @@ impl App {
         });
         let mut state = state;
         if let Value::Object(fields) = &mut state {
-            for key in ["bookmarks", "downloads", "engines", "settings", "logins", "pwNever", "extensions", "extBrowsers"] {
+            for key in ["bookmarks", "downloads", "engines", "settings", "logins", "pwNever", "extensions", "extBrowsers", "autofill"] {
                 let Some(value) = fields.get(key) else { continue };
                 let text = value.to_string();
                 if self.sent.get(key) == Some(&text) {
@@ -2904,6 +3021,29 @@ impl App {
 
     // ---------- пароли ----------
 
+    fn save_autofill(&mut self) {
+        if let Some(stored) = self.autofill.store() {
+            self.store.write_named("autofill.json", &stored);
+        }
+        self.dirty = true;
+    }
+
+    /// Подставляет адрес или карту в страницу на экране — только на HTTPS-сайт.
+    fn fill_autofill(&mut self, kind: &str, index: usize) {
+        let fields = match kind {
+            "address" => self.autofill.addresses.get(index).map(autofill::address_fields),
+            _ => self.autofill.cards.get(index).map(autofill::card_fields),
+        };
+        let Some(fields) = fields else { return };
+        if kind == "card" {
+            self.pw_verified = Some(Instant::now());
+        }
+        let Some(tab) = self.active_tab().filter(|t| passwords::origin_of(&t.url).is_some()) else { return };
+        let Some(webview) = tab.webview.as_ref() else { return };
+        let _ = webview.evaluate_script(&autofill::fill_script(&fields));
+        let _ = webview.focus();
+    }
+
     fn save_vault(&mut self) {
         self.store.write_named("passwords.json", &self.vault);
         self.dirty = true;
@@ -2938,6 +3078,15 @@ impl App {
                     let down = message["dir"] == "down";
                     let y = message["y"].as_f64().unwrap_or(0.0);
                     let _ = self.ui.evaluate_script(&format!("ui.pageScroll({down}, {y})"));
+                }
+            }
+            "af_form" => {
+                // поля карты и адреса — только на HTTPS (и localhost), как и пароли
+                let Some(tab) = self.tab_mut(id) else { return };
+                if passwords::origin_of(url).is_some() && passwords::origin_of(&tab.url) == passwords::origin_of(url) {
+                    tab.af_card |= message["card"].as_bool().unwrap_or(false);
+                    tab.af_address |= message["address"].as_bool().unwrap_or(false);
+                    self.dirty = true;
                 }
             }
             "ext_store_check" => {
@@ -3511,6 +3660,7 @@ impl App {
         sections.insert("zoom".into(), json!(self.store.site_zoom));
         let notes: String = self.store.read_named("notes.json");
         sections.insert("notes".into(), json!(notes));
+        sections.insert("autofill".into(), json!(self.autofill));
         sections
     }
 
@@ -3592,6 +3742,12 @@ impl App {
                     });
                 }
             }
+            "autofill" => {
+                if let Ok(profile) = serde_json::from_value::<autofill::Profile>(value) {
+                    self.autofill = profile;
+                    self.save_autofill();
+                }
+            }
             "zoom" => {
                 if let Ok(map) = serde_json::from_value(value) {
                     self.store.site_zoom = map;
@@ -3630,6 +3786,10 @@ impl App {
                 "never": sync::union_by(&remote["never"], &local["never"], |o| o.to_string()),
             }),
             "extensions" => sync::union_by(remote, local, |e| e["id"].to_string()),
+            "autofill" => json!({
+                "addresses": sync::union_by(&remote["addresses"], &local["addresses"], |a| a.to_string()),
+                "cards": sync::union_by(&remote["cards"], &local["cards"], |c| c["number"].to_string()),
+            }),
             "notes" => {
                 let (r, l) = (remote.as_str().unwrap_or(""), local.as_str().unwrap_or(""));
                 if r.is_empty() || l.contains(r) {
