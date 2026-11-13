@@ -64,6 +64,7 @@ const ICONS = {
   moon: '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>',
   leaf: '<path d="M5 19c0-8 5-13 14-14 0 9-5 14-13 14z"/><path d="M5 19 13 11"/>',
   bolt: '<path d="M13 3 5 14h6l-1 7 8-11h-6z"/>',
+  sidebar: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/><path d="M17.5 8h1M17.5 11h1"/>',
   window: '<rect x="3" y="5" width="18" height="15" rx="2"/><path d="M3 9h18"/>',
   image: '<rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-9 9"/>',
   smile: '<circle cx="12" cy="12" r="9.5"/><path d="M8 14.5a5 5 0 0 0 8 0"/><path d="M9 9.5h.01M15 9.5h.01" stroke-width="2.6"/>',
@@ -259,6 +260,8 @@ function setState(next) {
   document.body.classList.toggle('maximized', S.maximized);
   document.body.classList.toggle('fullscreen', S.fullscreen);
   document.body.classList.toggle('favbar', !!S.settings.favbar);
+  document.body.classList.toggle('panel-open', !!S.panelOpen);
+  $('#panelbtn').classList.toggle('on', !!S.panelOpen);
   applyAppearance(S.settings);
   renderTabs();
   renderToolbar();
@@ -628,6 +631,7 @@ el.shield.addEventListener('click', () => {
 });
 el.downloads.addEventListener('click', () => openHub('downloads'));
 el.hubbtn.addEventListener('click', () => openHub(hubSection || 'bookmarks'));
+$('#panelbtn').addEventListener('click', () => send('toggle_panel'));
 el.menubtn.addEventListener('click', () => (menuKind === 'main' ? closeMenu() : openMainMenu()));
 
 // ---------- панель избранного ----------
@@ -1764,7 +1768,8 @@ function settingsPage() {
         ['Адресная строка', 'Ctrl+L, Alt+D'], ['Найти на странице', 'Ctrl+F'],
         ['Масштаб', 'Ctrl + / Ctrl − / Ctrl+0'], ['Во весь экран', 'F11'],
         ['Избранное / журнал / загрузки', 'Ctrl+Shift+O / Ctrl+H / Ctrl+J'],
-        ['Диспетчер вкладок', 'Shift+Esc'], ['Меню', 'Alt+F'],
+        ['Диспетчер вкладок', 'Shift+Esc'],
+        ['Боковая панель', 'Ctrl+Shift+E'], ['Меню', 'Alt+F'],
       ].flatMap(([what, keys]) => [h('span', {}, what), h('kbd', {}, keys)]))),
   ];
   // значения выставляем после вставки в документ, когда известны размеры кнопок

@@ -90,6 +90,8 @@ pub enum Hotkey {
     PasteGo,
     /// Shift+Esc — диспетчер вкладок, как в Edge.
     TaskManager,
+    /// Ctrl+Shift+E — боковая панель.
+    Panel,
     Find,
     ZoomIn,
     ZoomOut,
@@ -127,6 +129,7 @@ impl Hotkey {
         Some(match (ctrl, shift, alt) {
             (false, false, false) if key == ESC => Self::Escape,
             (false, true, false) if key == ESC => Self::TaskManager,
+            (true, true, false) if letter('E') => Self::Panel,
             (false, false, false) if key == F5 => Self::Reload,
             (false, false, false) if key == F6 => Self::FocusUrl,
             (false, false, false) if key == F11 => Self::Fullscreen,

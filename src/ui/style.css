@@ -492,7 +492,11 @@ body.inprivate #winctl { color: #f2efff; }
   100% { transform: none; }
 }
 
-#hubbtn.on, #menubtn.on { background: var(--press); color: var(--accent); }
+#hubbtn.on, #menubtn.on, #panelbtn.on { background: var(--press); color: var(--accent); }
+/* при открытой боковой панели кнопки окна живут в ней */
+body.panel-open #winctl { display: none; }
+body.panel-open #titlebar .drag { flex-basis: 24px; }
+body.panel-open .rz-ne { display: none; }
 
 /* панель избранного */
 #favbar {

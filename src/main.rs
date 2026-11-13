@@ -60,6 +60,17 @@ fn backdrop_color(dark: bool) -> (u8, u8, u8, u8) {
     if dark { (18, 19, 24, 255) } else { (255, 255, 255, 255) }
 }
 
+/// Ширина боковой панели и высота её шапки.
+const PANEL_WIDTH: f64 = 380.0;
+const PANEL_HEADER: f64 = 44.0;
+/// Приложения боковой панели: заметки и калькулятор — сама панель, мессенджеры — сайты.
+const PANEL_APPS: [(&str, &str); 4] = [
+    ("notes", ""),
+    ("calc", ""),
+    ("telegram", "https://web.telegram.org/k/"),
+    ("whatsapp", "https://web.whatsapp.com/"),
+];
+
 /// Ступени масштаба, как в Edge.
 const ZOOM_LEVELS: [f64; 15] =
     [0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
@@ -90,6 +101,8 @@ pub enum UserEvent {
     Find(u32, i32, i32),
     /// Снимок страницы для фона меню и библиотеки.
     Captured(Option<Vec<u8>>),
+    /// JSON-команда от боковой панели.
+    Panel(String),
     /// uBlock Origin Lite распакован в эту папку.
     ExtensionReady(PathBuf),
     /// uBlock Origin Lite установлен в профиль; id нужен для включения и настроек.
@@ -237,6 +250,10 @@ struct App {
     chrome_height: f64,
     /// Ширина боковой колонки при вертикальных вкладках; 0 — панель сверху.
     chrome_side: f64,
+    /// Боковая панель справа (создаётся при первом открытии).
+    panel: Option<WebView>,
+    /// Мессенджеры в боковой панели: живут, пока окно открыто, чтобы не входить заново.
+    panel_apps: HashMap<&'static str, WebView>,
     /// Полноэкранный режим по F11.
     fullscreen: bool,
     /// Полноэкранный режим, который запросила страница (видео).
@@ -344,6 +361,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         overlay_requested: Instant::now(),
         chrome_height: DEFAULT_CHROME,
         chrome_side: 0.0,
+        panel: None,
+        panel_apps: HashMap::new(),
         fullscreen: false,
         page_fullscreen: false,
         maximized: false,
@@ -358,6 +377,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     app.apply_theme();
     app.load_downloads();
+    if app.store.settings.sidebar_open {
+        app.store.settings.sidebar_open = false;
+        app.toggle_panel();
+    }
     // Пустую новую вкладку открываем, только если не пришло ни сеанса, ни адресов.
     app.restore_session(urls.is_empty());
     // Распаковка uBlock Origin Lite (31 МБ при первом запуске) — в фоне, чтобы не тормозить старт.
@@ -390,6 +413,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if maximized != app.maximized {
                         app.maximized = maximized;
                         app.dirty = true;
+                        app.push_panel_state();
                     }
                 }
                 WindowEvent::Focused(true) => {
@@ -517,6 +541,54 @@ fn build_ui(
     Ok(ui)
 }
 
+/// Боковая панель: своя страница с заметками, калькулятором и кнопками окна.
+fn build_panel(app: &mut App) -> wry::Result<WebView> {
+    let (width, height) = window_size(&app.window);
+    let proxy = app.proxy.clone();
+    let network = proxy_config(&app.store.settings);
+    let (dark, inprivate) = (app.dark(), app.inprivate);
+    let panel = WebViewBuilder::new_with_web_context(&mut app.web_context)
+        .with_bounds(rect(width - PANEL_WIDTH, 0.0, PANEL_WIDTH, height))
+        .with_html(include_str!("ui/panel.html"))
+        .with_background_color(backdrop_color(dark))
+        .with_incognito(inprivate)
+        .with_browser_extensions_enabled(true)
+        .with_network(network)
+        .with_browser_accelerator_keys(false)
+        .with_hotkeys_zoom(false)
+        .with_navigation_handler(|url| !url.starts_with("http"))
+        .with_ipc_handler(move |request: Request<String>| {
+            let _ = proxy.send_event(UserEvent::Panel(request.into_body()));
+        })
+        .build_as_child(&app.window)?;
+    platform::hook_hotkeys(&panel, app.keys.clone(), app.proxy.clone());
+    Ok(panel)
+}
+
+/// Мессенджер в боковой панели — обычный сайт в своём окошке под шапкой панели.
+fn build_panel_app(app: &mut App, url: &str) -> wry::Result<WebView> {
+    let (width, height) = window_size(&app.window);
+    let popup = app.proxy.clone();
+    let network = proxy_config(&app.store.settings);
+    let (dark, inprivate, theme) = (app.dark(), app.inprivate, app.page_theme());
+    let webview = WebViewBuilder::new_with_web_context(&mut app.web_context)
+        .with_bounds(rect(width - PANEL_WIDTH, PANEL_HEADER, PANEL_WIDTH, height - PANEL_HEADER))
+        .with_url(url)
+        .with_background_color(backdrop_color(dark))
+        .with_incognito(inprivate)
+        .with_browser_extensions_enabled(true)
+        .with_network(network)
+        .with_theme(theme)
+        // ссылки из чатов открываются вкладками браузера
+        .with_new_window_req_handler(move |url, _| {
+            let _ = popup.send_event(UserEvent::NewTabRequested(url, false));
+            NewWindowResponse::Deny
+        })
+        .build_as_child(&app.window)?;
+    platform::hook_hotkeys(&webview, app.keys.clone(), app.proxy.clone());
+    Ok(webview)
+}
+
 /// Webview страницы. Адрес загружается позже, когда все перехватчики уже стоят.
 fn build_tab(app: &mut App, id: u32, bounds: Rect) -> wry::Result<WebView> {
     let proxy = app.proxy.clone();
@@ -595,8 +667,23 @@ impl App {
 
     /// Расставляет webview: интерфейс сверху, под ним активная страница.
     /// Где страница: под панелью или справа от боковой колонки.
-    fn page_rect(&self) -> Rect {
+    /// Ширина боковой панели справа (0 — закрыта или полный экран).
+    fn panel_width(&self) -> f64 {
+        if self.panel.is_none() || !self.store.settings.sidebar_open || self.is_fullscreen() {
+            return 0.0;
+        }
+        let (width, _) = window_size(&self.window);
+        PANEL_WIDTH.min(width * 0.5)
+    }
+
+    /// Окно без боковой панели: в этой части живут интерфейс и страницы.
+    fn content_size(&self) -> (f64, f64) {
         let (width, height) = window_size(&self.window);
+        (width - self.panel_width(), height)
+    }
+
+    fn page_rect(&self) -> Rect {
+        let (width, height) = self.content_size();
         if self.is_fullscreen() {
             rect(0.0, 0.0, width, height)
         } else if self.chrome_side > 0.0 {
@@ -607,7 +694,8 @@ impl App {
     }
 
     fn layout(&self) {
-        let (width, height) = window_size(&self.window);
+        let (width, height) = self.content_size();
+        self.layout_panel();
         let chrome = if self.is_fullscreen() { 0.0 } else { self.chrome_height };
         let side = if self.is_fullscreen() { 0.0 } else { self.chrome_side };
         let on_start_page = self.active_webview().is_none();
@@ -635,6 +723,104 @@ impl App {
             if let Some(webview) = &tab.webview {
                 let _ = webview.set_visible(false);
             }
+        }
+    }
+
+    /// Колонка справа: сама панель, а под её шапкой — окно мессенджера.
+    fn layout_panel(&self) {
+        let panel_width = self.panel_width();
+        let (width, height) = window_size(&self.window);
+        let left = width - panel_width;
+        let app = self.store.settings.sidebar_app.as_str();
+        if let Some(panel) = &self.panel {
+            if panel_width > 0.0 {
+                let _ = panel.set_bounds(rect(left, 0.0, panel_width, height));
+            }
+            let _ = panel.set_visible(panel_width > 0.0);
+        }
+        for (name, webview) in &self.panel_apps {
+            let shown = panel_width > 0.0 && *name == app;
+            if shown {
+                let _ = webview.set_bounds(rect(left, PANEL_HEADER, panel_width, height - PANEL_HEADER));
+            }
+            let _ = webview.set_visible(shown);
+        }
+    }
+
+    fn toggle_panel(&mut self) {
+        if self.panel.is_none() {
+            match build_panel(self) {
+                Ok(panel) => self.panel = Some(panel),
+                Err(error) => {
+                    eprintln!("не удалось открыть боковую панель: {error}");
+                    return;
+                }
+            }
+        }
+        let settings = &mut self.store.settings;
+        settings.sidebar_open = !settings.sidebar_open;
+        self.store.save_settings();
+        let app = self.store.settings.sidebar_app.clone();
+        self.set_panel_app(&app);
+        self.dirty = true;
+    }
+
+    /// Переключает приложение в панели; мессенджер создаётся при первом открытии.
+    fn set_panel_app(&mut self, app: &str) {
+        let Some((name, url)) = PANEL_APPS.iter().find(|(id, _)| *id == app).copied() else { return };
+        if !url.is_empty() && !self.panel_apps.contains_key(name) && self.store.settings.sidebar_open {
+            match build_panel_app(self, url) {
+                Ok(webview) => {
+                    self.panel_apps.insert(name, webview);
+                }
+                Err(error) => eprintln!("не удалось открыть {name}: {error}"),
+            }
+        }
+        self.store.settings.sidebar_app = name.to_string();
+        self.store.save_settings();
+        self.layout();
+        self.push_panel_state();
+        if let Some(webview) = self.panel_apps.get(name).filter(|_| self.store.settings.sidebar_open) {
+            let _ = webview.focus();
+        }
+    }
+
+    fn push_panel_state(&self) {
+        let Some(panel) = &self.panel else { return };
+        let notes: String = self.store.read_named("notes.json");
+        let state = json!({
+            "app": self.store.settings.sidebar_app,
+            "notes": notes,
+            "dark": self.dark(),
+            "accent": self.store.settings.accent,
+            "maximized": self.maximized,
+        });
+        let _ = panel.evaluate_script(&format!("panel.setState({state})"));
+    }
+
+    fn handle_panel(&mut self, raw: &str) {
+        let Ok(message) = serde_json::from_str::<Value>(raw) else { return };
+        match message["cmd"].as_str().unwrap_or("") {
+            "ready" => self.push_panel_state(),
+            "app" => {
+                let app = message["id"].as_str().unwrap_or("notes").to_string();
+                self.set_panel_app(&app);
+            }
+            "close" => self.toggle_panel(),
+            "notes" => {
+                let text = message["text"].as_str().unwrap_or("").to_string();
+                self.store.write_named("notes.json", &text);
+            }
+            "minimize" => self.window.set_minimized(true),
+            "maximize" => self.window.set_maximized(!self.window.is_maximized()),
+            "quit" => self.quit = true,
+            "drag" => {
+                let _ = self.window.drag_window();
+            }
+            "resize" => {
+                let _ = self.window.drag_resize_window(ResizeDirection::North);
+            }
+            _ => {}
         }
     }
 
@@ -693,6 +879,7 @@ impl App {
     }
 
     fn apply_theme(&mut self) {
+        self.push_panel_state();
         let dark = self.dark();
         platform::style_window(self.window.hwnd(), dark);
         let backdrop = backdrop_color(dark);
@@ -1013,6 +1200,7 @@ impl App {
                 }
             }
             UserEvent::Captured(bytes) => self.finish_overlay(bytes),
+            UserEvent::Panel(raw) => self.handle_panel(&raw),
             UserEvent::Processes(list, report) => {
                 self.processes = list;
                 self.apply_efficiency();
@@ -1129,6 +1317,7 @@ impl App {
             Hotkey::Find => self.open_find(),
             Hotkey::PasteGo => self.paste_and_go(),
             Hotkey::TaskManager => self.open_hub("tasks"),
+            Hotkey::Panel => self.toggle_panel(),
             Hotkey::ZoomIn => self.zoom_step(1),
             Hotkey::ZoomOut => self.zoom_step(-1),
             Hotkey::ZoomReset => self.zoom_step(0),
@@ -1613,6 +1802,7 @@ impl App {
                 system::restart(platform::browser_pid(&self.ui));
                 self.quit = true;
             }
+            "toggle_panel" => self.toggle_panel(),
             "make_default" => {
                 if system::register() {
                     system::open_default_apps_settings();
@@ -2148,6 +2338,7 @@ impl App {
             },
             "ubolId": self.ubol_id,
             "isDefault": self.is_default,
+            "panelOpen": self.panel_width() > 0.0,
             "onBattery": self.on_battery,
             "importSources": self.import_sources,
             "dark": self.dark(),

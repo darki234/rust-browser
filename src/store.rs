@@ -64,6 +64,10 @@ pub struct Settings {
     pub proxy_mode: String,
     pub proxy_host: String,
     pub proxy_port: u16,
+    /// Боковая панель справа открыта.
+    pub sidebar_open: bool,
+    /// "notes" | "calc" | "telegram" | "whatsapp"
+    pub sidebar_app: String,
     /// Обои новой вкладки: имя готового варианта или "image" — своё фото.
     pub wallpaper: String,
     /// Затемнение своего фото, 0–85 %, чтобы текст на нём читался.
@@ -97,6 +101,8 @@ impl Default for Settings {
             proxy_mode: "off".to_string(),
             proxy_host: String::new(),
             proxy_port: 0,
+            sidebar_open: false,
+            sidebar_app: "notes".to_string(),
             wallpaper: "aurora".to_string(),
             wallpaper_dim: 35,
             wallpaper_version: 0,
