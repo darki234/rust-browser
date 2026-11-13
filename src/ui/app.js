@@ -205,7 +205,7 @@ const hsl = (h, s, l) => `hsl(${((h % 360) + 360) % 360} ${Math.round(s * 100)}%
 
 let appearanceKey = null;
 function applyAppearance(s) {
-  const key = [s.accent, s.tintFrame, s.motion, s.barStyle, s.newtabLayout, S.dark].join('|');
+  const key = [s.accent, s.tintFrame, s.motion, s.barStyle, s.newtabLayout, S.dark, s.theme, s.glass].join('|');
   if (key === appearanceKey) return;
   appearanceKey = key;
   const root = document.documentElement.style;
@@ -227,6 +227,10 @@ function applyAppearance(s) {
   for (const m of ['smooth', 'fast', 'bouncy', 'off']) body.toggle('motion-' + m, s.motion === m);
   for (const b of ['classic', 'compact', 'floating', 'vertical']) body.toggle('bar-' + b, s.barStyle === b);
   for (const n of ['clock', 'minimal', 'tiles', 'greeting']) body.toggle('nt-' + n, s.newtabLayout === n);
+  body.toggle('amoled', s.theme === 'amoled');
+  // стекло: непрозрачность панелей 100 % − выбранная прозрачность
+  body.toggle('glass', s.glass > 0);
+  root.setProperty('--glass-a', (100 - (s.glass || 0)) + '%');
 }
 
 const PALETTE = [
@@ -1354,7 +1358,6 @@ async function openHub(section) {
   resetHubAction();
   el.hubh1.textContent = SECTIONS[section].title;
   el.hubaction.textContent = SECTIONS[section].action;
-  el.hub.classList.toggle('no-search', section === 'settings');
   el.hubind.style.setProperty('--pos', Object.keys(SECTIONS).indexOf(section));
   for (const button of document.querySelectorAll('#hubnav button')) {
     button.classList.toggle('on', button.dataset.sec === section);
@@ -1556,6 +1559,8 @@ function segmented(options, get, onPick) {
     });
   };
   settingsUpdaters.push(update);
+  // пока параметры скрыты (окно ждёт снимка страницы), у кнопок нет размеров — двигаем «таблетку», когда они появятся
+  new ResizeObserver(update).observe(root);
   return root;
 }
 
@@ -1694,42 +1699,79 @@ function defaultBrowserSetting() {
     button);
 }
 
-function settingsPage() {
-  settingsUpdaters = [];
-  const cards = [
-    h('div', { class: 'card' }, h('h2', {}, 'Оформление'),
-      setting('Тема', 'Как в Windows или всегда светлая/тёмная',
-        segmented([['system', 'Как в системе'], ['light', 'Светлая'], ['dark', 'Тёмная']],
+// Параметры разбиты по разделам: полоса разделов сверху, ниже — карточки выбранного.
+// Поиск в шапке ищет по всем разделам сразу.
+let settingsCat = 'look';
+
+function glassSetting() {
+  const range = h('input', { type: 'range', min: 0, max: 70, step: 5, class: 'range' });
+  const value = h('span', { class: 'rangeval' });
+  range.addEventListener('input', () => { value.textContent = range.value + ' %'; set('glass', Number(range.value)); });
+  settingsUpdaters.push(() => {
+    if (document.activeElement !== range) range.value = S.settings.glass ?? 0;
+    value.textContent = range.value + ' %';
+  });
+  return setting('Прозрачность панелей', 'Полоса вкладок, адресная строка, меню и параметры становятся матовым стеклом: сквозь них видно обои',
+    range, value);
+}
+
+const SETTINGS_CATS = [
+  ['look', 'Оформление', () => [
+    h('div', { class: 'card' }, h('h2', {}, 'Тема и цвет'),
+      setting('Тема', 'Как в Windows, светлая, тёмная или AMOLED — чистый чёрный, бережёт заряд на OLED-экранах',
+        segmented([['system', 'Как в системе'], ['light', 'Светлая'], ['dark', 'Тёмная'], ['amoled', 'AMOLED']],
           () => S.settings.theme, (value) => set('theme', value))),
       colorSetting(),
       setting('Подкрасить рамку окна', 'Полоса вкладок и панель слегка окрашиваются в цвет браузера',
         toggle(() => S.settings.tintFrame, (value) => set('tint_frame', value))),
-      setting('Вид панели', 'Классика, всё в одну строку, парящая панель или вкладки слева',
-        segmented([['classic', 'Классика'], ['compact', 'Компакт'], ['floating', 'Плавающая'], ['vertical', 'Вертикальные вкладки']],
-          () => S.settings.barStyle, (value) => set('bar_style', value))),
-      setting('Новая вкладка', 'Что показывать на новой вкладке',
-        segmented([['clock', 'Часы и поиск'], ['greeting', 'Приветствие'], ['tiles', 'Плитки'], ['minimal', 'Минимализм']],
-          () => S.settings.newtabLayout, (value) => set('newtab_layout', value))),
+      glassSetting()),
+    h('div', { class: 'card' }, h('h2', {}, 'Движение'),
       setting('Анимации', 'Как быстро и с каким характером всё появляется',
         segmented([['smooth', 'Плавные'], ['fast', 'Быстрые'], ['bouncy', 'Пружинистые'], ['off', 'Без анимаций']],
           () => S.settings.motion, (value) => set('motion', value))),
+      typeof splashSetting === 'function' && splashSetting()),
+  ]],
+  ['walls', 'Обои', () => [
+    h('div', { class: 'card' }, h('h2', {}, 'Обои новой вкладки'), wallpaperSetting()),
+    typeof wallGalleryCard === 'function' && wallGalleryCard(),
+  ]],
+  ['layout', 'Панели и вкладки', () => [
+    h('div', { class: 'card' }, h('h2', {}, 'Панели'),
+      setting('Вид панели', 'Классика, всё в одну строку, парящая панель или вкладки слева',
+        segmented([['classic', 'Классика'], ['compact', 'Компакт'], ['floating', 'Плавающая'], ['vertical', 'Вертикальные вкладки']],
+          () => S.settings.barStyle, (value) => set('bar_style', value))),
       setting('Панель избранного', 'Сайты из избранного под адресной строкой · Ctrl+Shift+B',
         toggle(() => S.settings.favbar, (value) => set('favbar', value))),
-      wallpaperSetting()),
-
-    importCard(),
-    proxyCard(),
-
+      setting('Боковая панель', 'Заметки, калькулятор и мессенджеры справа · Ctrl+Shift+E',
+        toggle(() => S.panelOpen, () => send('toggle_panel')))),
+    h('div', { class: 'card' }, h('h2', {}, 'Новая вкладка'),
+      setting('Что показывать', 'Часы с поиском, приветствие, плитки сайтов или почти ничего',
+        segmented([['clock', 'Часы и поиск'], ['greeting', 'Приветствие'], ['tiles', 'Плитки'], ['minimal', 'Минимализм']],
+          () => S.settings.newtabLayout, (value) => set('newtab_layout', value)))),
+  ]],
+  ['search', 'Поиск', () => [
     h('div', { class: 'card' }, h('h2', {}, 'Поиск'),
       setting('Поисковая система', 'Для адресной строки и строки поиска на новой вкладке',
         segmented(S.engines.map((e) => [e.id, e.name]), () => S.search, (value) => set('search', value)))),
-
-    h('div', { class: 'card' }, h('h2', {}, 'Запуск'),
-      defaultBrowserSetting(),
-      setting('При запуске', BOOT.inprivate ? 'В окне InPrivate вкладки не сохраняются' : 'Что открывать при старте браузера',
-        segmented([[true, 'Вкладки прошлого сеанса'], [false, 'Новую вкладку']],
-          () => S.settings.restoreSession, (value) => set('restore_session', value)))),
-
+  ]],
+  ['privacy', 'Пароли и безопасность', () => [
+    typeof passwordsCard === 'function' ? passwordsCard()
+      : h('div', { class: 'card' }, h('h2', {}, 'Пароли'),
+        setting('Предлагать сохранять пароли', 'Пароли хранятся в профиле браузера в зашифрованном виде',
+          toggle(() => S.settings.passwords, (value) => set('passwords', value)))),
+    h('div', { class: 'card' }, h('h2', {}, 'Конфиденциальность'),
+      setting('Блокировка рекламы и трекеров',
+        () => S.ubolId
+          ? 'uBlock Origin Lite: фильтры uBlock, EasyList, EasyPrivacy и другие'
+          : `Около 3 600 рекламных доменов · заблокировано запросов: ${S.blockedTotal.toLocaleString('ru-RU')}`,
+        ubolButton(),
+        toggle(() => S.adblock, (value) => set('adblock', value))),
+      setting('Журнал посещений', 'Все страницы из раздела «Журнал»',
+        confirmButton('Очистить', 'Точно очистить?', () => { send('history_clear'); toast('Журнал очищен'); })),
+      setting('Данные сайтов', 'Файлы cookie и кэш — вы выйдете из аккаунтов',
+        confirmButton('Удалить', 'Точно удалить?', () => send('clear_data')))),
+  ]],
+  ['perf', 'Производительность', () => [
     h('div', { class: 'card' }, h('h2', {}, 'Производительность'),
       setting('Усыплять неактивные вкладки', 'Через это время фоновая вкладка засыпает, а через втрое больше выгружается из памяти',
         segmented([[5, '5 мин'], [15, '15 мин'], [30, '30 мин'], [60, '1 ч'], [0, 'Никогда']],
@@ -1739,28 +1781,25 @@ function settingsPage() {
       setting('Экономия при работе от батареи', () => S.onBattery
           ? 'Сейчас от батареи: фоновые вкладки засыпают через 5 минут'
           : 'От батареи фоновые вкладки будут засыпать через 5 минут',
-        toggle(() => S.settings.batterySaver, (value) => set('battery_saver', value))),
-      setting('Блокировка рекламы и трекеров',
-        () => S.ubolId
-          ? 'uBlock Origin Lite: фильтры uBlock, EasyList, EasyPrivacy и другие'
-          : `Около 3 600 рекламных доменов · заблокировано запросов: ${S.blockedTotal.toLocaleString('ru-RU')}`,
-        ubolButton(),
-        toggle(() => S.adblock, (value) => set('adblock', value)))),
-
+        toggle(() => S.settings.batterySaver, (value) => set('battery_saver', value)))),
+  ]],
+  ['downloads', 'Загрузки', () => [
     h('div', { class: 'card' }, h('h2', {}, 'Загрузки'),
       setting('Папка для загрузок', () => S.settings.downloadDir || `${S.settings.defaultDownloadDir} (по умолчанию)`,
         h('button', { class: 'text-btn outline', onclick: () => send('open_download_dir') }, 'Открыть'),
         h('button', { class: 'text-btn outline', onclick: () => send('reset_download_dir') }, 'По умолчанию'),
         h('button', { class: 'text-btn primary', onclick: () => send('pick_download_dir') }, 'Изменить'))),
-
-    h('div', { class: 'card' }, h('h2', {}, 'Конфиденциальность'),
-      setting('Предлагать сохранять пароли', 'Пароли хранятся в профиле браузера в зашифрованном виде',
-        toggle(() => S.settings.passwords, (value) => set('passwords', value))),
-      setting('Журнал посещений', 'Все страницы из раздела «Журнал»',
-        confirmButton('Очистить', 'Точно очистить?', () => { send('history_clear'); toast('Журнал очищен'); })),
-      setting('Данные сайтов', 'Файлы cookie, кэш и сохранённые пароли — вы выйдете из аккаунтов',
-        confirmButton('Удалить', 'Точно удалить?', () => send('clear_data')))),
-
+  ]],
+  ['network', 'Сеть', () => [proxyCard()]],
+  ['startup', 'Запуск', () => [
+    h('div', { class: 'card' }, h('h2', {}, 'Запуск'),
+      defaultBrowserSetting(),
+      setting('При запуске', BOOT.inprivate ? 'В окне InPrivate вкладки не сохраняются' : 'Что открывать при старте браузера',
+        segmented([[true, 'Вкладки прошлого сеанса'], [false, 'Новую вкладку']],
+          () => S.settings.restoreSession, (value) => set('restore_session', value)))),
+    importCard(),
+  ]],
+  ['keys', 'Клавиши', () => [
     h('div', { class: 'card' }, h('h2', {}, 'Сочетания клавиш'),
       h('div', { class: 'keys' }, ...[
         ['Новая вкладка / закрыть', 'Ctrl+T / Ctrl+W'], ['Вернуть закрытую вкладку', 'Ctrl+Shift+T'],
@@ -1771,10 +1810,40 @@ function settingsPage() {
         ['Диспетчер вкладок', 'Shift+Esc'],
         ['Боковая панель', 'Ctrl+Shift+E'], ['Меню', 'Alt+F'],
       ].flatMap(([what, keys]) => [h('span', {}, what), h('kbd', {}, keys)]))),
-  ];
+  ]],
+];
+
+function openSettingsCat(id) {
+  settingsCat = id;
+  el.hubq.value = '';
+  hubKey = null;
+  renderHubList(true);
+}
+
+function settingsPage() {
+  settingsUpdaters = [];
+  const query = el.hubq.value.trim().toLowerCase();
+  const nav = h('div', { class: 'setcats' }, ...SETTINGS_CATS.map(([id, name]) =>
+    h('button', { class: 'setcat' + (!query && id === settingsCat ? ' on' : ''), onclick: () => openSettingsCat(id) }, name)));
+  let cards;
+  if (query) {
+    // поиск: из всех разделов оставляем строки с запросом и карточки, где что-то осталось
+    cards = SETTINGS_CATS.flatMap(([, , build]) => build()).filter(Boolean).filter((card) => {
+      if (card.querySelector('h2')?.textContent.toLowerCase().includes(query)) return true;
+      let any = false;
+      for (const row of card.querySelectorAll('.set')) {
+        if (row.textContent.toLowerCase().includes(query)) any = true;
+        else row.remove();
+      }
+      return any;
+    });
+    if (!cards.length) cards = [emptyState('settings')];
+  } else {
+    cards = SETTINGS_CATS.find(([id]) => id === settingsCat)[2]().filter(Boolean);
+  }
   // значения выставляем после вставки в документ, когда известны размеры кнопок
   requestAnimationFrame(() => settingsUpdaters.forEach((update) => update()));
-  return cards.filter(Boolean).map((card, i) => { card.style.setProperty('--i', i); return card; });
+  return [nav, ...cards.map((card, i) => { card.style.setProperty('--i', i + 1); return card; })];
 }
 
 // ----- диспетчер вкладок -----
@@ -1825,11 +1894,12 @@ function renderHubList(animate) {
     return;
   }
   if (hubSection === 'settings') {
-    if (hubKey === 'settings') {
+    const key = 'settings|' + settingsCat + '|' + el.hubq.value;
+    if (hubKey === key) {
       settingsUpdaters.forEach((update) => update());
       return;
     }
-    hubKey = 'settings';
+    hubKey = key;
     el.hublist.classList.toggle('stagger', animate);
     el.hublist.replaceChildren(...settingsPage());
     el.hublist.scrollTop = 0;

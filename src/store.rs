@@ -52,6 +52,8 @@ pub struct Settings {
     pub accent: String,
     /// Подкрашивать рамку окна цветом акцента.
     pub tint_frame: bool,
+    /// Прозрачность панелей в процентах (0 — непрозрачные).
+    pub glass: u32,
     /// "smooth" | "fast" | "bouncy" | "off"
     pub motion: String,
     /// "classic" | "compact" | "floating" | "vertical"
@@ -94,6 +96,7 @@ impl Default for Settings {
             battery_saver: true,
             accent: String::new(),
             tint_frame: false,
+            glass: 0,
             motion: "smooth".to_string(),
             bar_style: "classic".to_string(),
             newtab_layout: "clock".to_string(),

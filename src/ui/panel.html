@@ -17,6 +17,12 @@
     --border: rgba(255, 255, 255, .08); --hover: rgba(255, 255, 255, .075); --press: rgba(255, 255, 255, .13);
     --accent: #8288ff; --on-accent: #10111a;
   }
+  :root[data-theme="amoled"] {
+    color-scheme: dark;
+    --frame: #000; --surface: #0d0d10; --surface-2: #050506; --text: #eceef5; --muted: #9a9fb1;
+    --border: rgba(255, 255, 255, .10); --hover: rgba(255, 255, 255, .08); --press: rgba(255, 255, 255, .14);
+    --accent: #8288ff; --on-accent: #10111a;
+  }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
   body {
@@ -154,7 +160,7 @@ $('.rz').addEventListener('mousedown', (e) => { if (e.button === 0) send('resize
 function setState(next) {
   const appChanged = next.app !== state.app;
   state = { ...state, ...next };
-  document.documentElement.dataset.theme = state.dark ? 'dark' : 'light';
+  document.documentElement.dataset.theme = state.amoled ? 'amoled' : state.dark ? 'dark' : 'light';
   document.body.classList.toggle('maximized', !!state.maximized);
   if (state.accent) document.documentElement.style.setProperty('--accent', state.accent);
   else document.documentElement.style.removeProperty('--accent');

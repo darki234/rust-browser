@@ -57,8 +57,17 @@ const ENGINES: [(&str, &str, &str); 4] = [
 /// Цвет под страницами, пока они не отрисовались: тёмный в тёмной теме.
 /// Без него при переключении вкладок мелькает белое окно.
 fn backdrop_color(dark: bool) -> (u8, u8, u8, u8) {
-    if dark { (18, 19, 24, 255) } else { (255, 255, 255, 255) }
+    if !dark {
+        (255, 255, 255, 255)
+    } else if AMOLED.load(Ordering::Relaxed) {
+        (0, 0, 0, 255)
+    } else {
+        (18, 19, 24, 255)
+    }
 }
+
+/// Тема AMOLED: под страницами чистый чёрный, а не тёмно-серый.
+static AMOLED: AtomicBool = AtomicBool::new(false);
 
 /// Ширина боковой панели и высота её шапки.
 const PANEL_WIDTH: f64 = 380.0;
@@ -452,8 +461,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Тёмная ли тема, ещё до создания окна: по настройке, а «как в системе» — по Windows.
 fn window_dark_hint() -> bool {
     let settings: store::Settings = Store::load(data_dir()).settings;
+    AMOLED.store(settings.theme == "amoled", Ordering::Relaxed);
     match settings.theme.as_str() {
-        "dark" => true,
+        "dark" | "amoled" => true,
         "light" => false,
         _ => system::system_prefers_dark(),
     }
@@ -792,6 +802,7 @@ impl App {
             "app": self.store.settings.sidebar_app,
             "notes": notes,
             "dark": self.dark(),
+            "amoled": self.store.settings.theme == "amoled",
             "accent": self.store.settings.accent,
             "maximized": self.maximized,
         });
@@ -864,7 +875,7 @@ impl App {
 
     fn dark(&self) -> bool {
         match self.store.settings.theme.as_str() {
-            "dark" => true,
+            "dark" | "amoled" => true,
             "light" => false,
             _ => self.window.theme() == WindowTheme::Dark,
         }
@@ -872,7 +883,7 @@ impl App {
 
     fn page_theme(&self) -> Theme {
         match self.store.settings.theme.as_str() {
-            "dark" => Theme::Dark,
+            "dark" | "amoled" => Theme::Dark,
             "light" => Theme::Light,
             _ => Theme::Auto,
         }
@@ -1587,8 +1598,9 @@ impl App {
         let settings = &mut self.store.settings;
         match key {
             "theme" => {
-                if let Some(theme @ ("system" | "light" | "dark")) = value.as_str() {
+                if let Some(theme @ ("system" | "light" | "dark" | "amoled")) = value.as_str() {
                     settings.theme = theme.to_string();
+                    AMOLED.store(theme == "amoled", Ordering::Relaxed);
                     self.store.save_settings();
                     self.apply_theme();
                 }
@@ -1660,6 +1672,11 @@ impl App {
                 Some(name) if WALLPAPERS.contains(&name) => settings.wallpaper = name.to_string(),
                 _ => return,
             },
+            "glass" => {
+                if let Some(glass) = value.as_u64() {
+                    settings.glass = glass.min(70) as u32;
+                }
+            }
             "wallpaper_dim" => {
                 if let Some(dim) = value.as_u64() {
                     settings.wallpaper_dim = dim.min(85) as u32;
@@ -2320,6 +2337,7 @@ impl App {
                 "batterySaver": settings.battery_saver,
                 "accent": settings.accent,
                 "tintFrame": settings.tint_frame,
+                "glass": settings.glass,
                 "motion": settings.motion,
                 "barStyle": settings.bar_style,
                 "newtabLayout": settings.newtab_layout,
