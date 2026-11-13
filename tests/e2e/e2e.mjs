@@ -2,6 +2,10 @@
 // Запускается из run-e2e.ps1, который поднимает тестовую копию браузера.
 // node e2e.mjs <порт> <file-URL тестовой страницы> <путь к exe>
 import { spawn } from 'node:child_process';
+import { createServer } from 'node:http';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const [, , PORT, FIXTURE, EXE] = process.argv;
 const results = [];
@@ -77,6 +81,10 @@ await check('открывается страница во вкладке', async
   await waitFor(() => ui.evaluate('activeTab().url.startsWith("file:") && !activeTab().loading'));
 });
 
+await check('заставка запуска отыграла и освободила окно', async () => {
+  await waitFor(() => ui.evaluate("!document.getElementById('splash').className && innerHeight < 300"));
+});
+
 await check('новая вкладка открывается и закрывается', async () => {
   const before = await tabsCount();
   await ui.evaluate("send('new_tab')");
@@ -94,7 +102,7 @@ await check('меню «⋯» открывается поверх страниц
 
 await check('параметры открываются', async () => {
   await ui.evaluate("openHub('settings')");
-  await waitFor(() => ui.evaluate("el.hub.offsetHeight > 200 && document.querySelectorAll('.card').length >= 5"));
+  await waitFor(() => ui.evaluate("el.hub.offsetHeight > 200 && document.querySelectorAll('.card').length >= 1 && document.querySelectorAll('.setcat.on').length === 1"));
   await ui.evaluate('closeHub()');
   await waitFor(() => ui.evaluate('innerHeight < 200'), 3000);
 });
@@ -164,6 +172,80 @@ await check('боковая панель открывается и закрыв�
   await waitFor(async () => (await ui.evaluate('S.panelOpen')) && (await targets()).some((t) => t.title === 'Панель'));
   await ui.evaluate("send('toggle_panel')");
   await waitFor(async () => !(await ui.evaluate('S.panelOpen')));
+});
+
+await check('параметры по разделам и поиск по ним', async () => {
+  await ui.evaluate("openHub('settings')");
+  await waitFor(() => ui.evaluate("document.querySelectorAll('.setcat').length >= 10"));
+  await ui.evaluate("openSettingsCat('privacy')");
+  await waitFor(() => ui.evaluate("[...document.querySelectorAll('.card h2')].some((h) => h.textContent === 'Пароли')"));
+  await ui.evaluate("el.hubq.value = 'прозрачн'; el.hubq.dispatchEvent(new Event('input'))");
+  await waitFor(() => ui.evaluate("document.querySelectorAll('.card .set').length === 1 && el.hublist.textContent.includes('Прозрачность панелей')"));
+  await ui.evaluate("el.hubq.value = ''; closeHub()");
+  await waitFor(() => ui.evaluate('innerHeight < 300'), 3000);
+});
+
+await check('тема AMOLED и прозрачные панели', async () => {
+  await ui.evaluate("send('set', { key: 'theme', value: 'amoled' }); send('set', { key: 'glass', value: 40 })");
+  await waitFor(() => ui.evaluate("document.body.classList.contains('amoled') && document.body.classList.contains('glass') && getComputedStyle(document.body).getPropertyValue('--bg').trim() === '#000000'"));
+  await ui.evaluate("send('set', { key: 'theme', value: 'dark' }); send('set', { key: 'glass', value: 0 })");
+  await waitFor(() => ui.evaluate("!document.body.classList.contains('amoled') && !document.body.classList.contains('glass')"));
+});
+
+await check('менеджер паролей сохраняет и подставляет пароль', async () => {
+  const page = '<!doctype html><meta charset="utf-8"><title>Вход</title><form action="/done"><input id="u" type="email"><input id="p" type="password"><button id="go">Войти</button></form>';
+  const server = createServer((req, res) => { res.setHeader('content-type', 'text/html; charset=utf-8'); res.end(req.url.startsWith('/done') ? '<title>Готово</title>ok' : page); });
+  await new Promise((r) => server.listen(8766, '127.0.0.1', r));
+  try {
+    await ui.evaluate("send('navigate', { text: 'http://127.0.0.1:8766/login' })");
+    let login = await connect((t) => t.url.includes(':8766/login'));
+    await waitFor(() => login.evaluate("!!document.getElementById('go')"));
+    await login.evaluate("document.getElementById('u').value = 'e2e@test.local'; document.getElementById('p').value = 'e2e-Пароль-1'; document.getElementById('go').click()");
+    login.close();
+    await waitFor(() => ui.evaluate("!!pwOffer && menuKind === 'pwsave'"));
+    await ui.evaluate("document.querySelector('.pw-acts .primary').click()");
+    await waitFor(() => ui.evaluate("(S.logins || []).some((l) => l.username === 'e2e@test.local')"));
+    await ui.evaluate("send('navigate', { text: 'http://127.0.0.1:8766/login' })");
+    await waitFor(() => ui.evaluate("(S.pwHere || []).length === 1 && pwkey.classList.contains('show')"));
+    await ui.evaluate("send('pw_fill', { index: S.pwHere[0][0] })");
+    login = await connect((t) => t.url.includes(':8766/login'));
+    const filled = await waitFor(() => login.evaluate("document.getElementById('p').value === 'e2e-Пароль-1' && document.getElementById('u').value"));
+    login.close();
+    if (filled !== 'e2e@test.local') throw new Error(`подставилось не то: ${filled}`);
+    await ui.evaluate("send('pw_delete', { index: S.pwHere[0][0] }); send('navigate', { text: " + JSON.stringify(FIXTURE) + " })");
+    await waitFor(() => ui.evaluate("!(S.logins || []).length"));
+  } finally {
+    server.close();
+  }
+});
+
+await check('видеообои из галереи играют', async () => {
+  const walls = await ui.evaluate('(S.settings.liveWalls || []).length');
+  if (!walls) throw new Error('галерея пуста: запустите assets/walls/fetch.ps1');
+  const before = await tabsCount();
+  await ui.evaluate("send('set', { key: 'wallpaper', value: 'live:snow' }); send('new_tab')");
+  await waitFor(() => ui.evaluate("document.body.dataset.wall === 'video' && $('#wallvideo').readyState >= 2 && !$('#wallvideo').paused"), 10000);
+  await ui.evaluate("send('set', { key: 'wallpaper', value: 'aurora' }); send('close_tab', { id: S.active })");
+  await waitFor(async () => (await tabsCount()) === before);
+});
+
+await check('аккаунт: создание, неверный пароль, вход', async () => {
+  const cloud = mkdtempSync(join(tmpdir(), 'rb-cloud-'));
+  try {
+    const args = (password) => JSON.stringify({ name: 'e2e-user', password, folder: cloud });
+    await ui.evaluate(`send('account_create', ${args('e2e-sync-пароль')})`);
+    await waitFor(() => ui.evaluate("(S.account || {}).name === 'e2e-user' && (S.account || {}).synced > 0"), 60000, 300);
+    if (!existsSync(cloud)) throw new Error('нет папки');
+    await ui.evaluate("send('account_logout')");
+    await waitFor(() => ui.evaluate('!(S.account || {}).name'));
+    await ui.evaluate(`accountErrorText = ''; send('account_login', ${args('не тот пароль')})`);
+    await waitFor(() => ui.evaluate("accountErrorText === 'Неверный пароль'"), 60000, 300);
+    await ui.evaluate(`send('account_login', ${args('e2e-sync-пароль')})`);
+    await waitFor(() => ui.evaluate("(S.account || {}).name === 'e2e-user'"), 60000, 300);
+    await ui.evaluate("send('account_logout')");
+  } finally {
+    rmSync(cloud, { recursive: true, force: true });
+  }
 });
 
 await check('uBlock Origin Lite установлен и блокирует рекламу', async () => {
