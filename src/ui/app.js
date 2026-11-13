@@ -114,6 +114,9 @@ function hashHue(text) {
 }
 
 /** Значок сайта: известный адрес значка, иначе favicon.ico, иначе цветная буква. */
+// растёт, когда браузер нашёл новый значок: плитки перерисуются с ним
+let iconsVersion = 0;
+
 function favicon(url, large = false, known = '') {
   const parsed = parseUrl(url);
   const box = h('span', { class: large ? 'fav lg' : 'fav' });
@@ -133,7 +136,15 @@ function favicon(url, large = false, known = '') {
     box.classList.remove('letter');
     box.replaceChildren(img);
   };
-  img.src = known || parsed.origin + '/favicon.ico';
+  // Крупный значок браузер находит сам (apple-touch-icon и т. п.) и хранит у себя;
+  // не нашёл — пробуем обычный favicon.ico.
+  const fallback = known || parsed.origin + '/favicon.ico';
+  if (large && !known) {
+    img.onerror = () => { img.onerror = null; img.src = fallback; };
+    img.src = 'http://rb.localhost/siteicon/' + encodeURIComponent(host.replace(/^www\./, '')) + '?v=' + iconsVersion;
+  } else {
+    img.src = fallback;
+  }
   return box;
 }
 
@@ -2063,6 +2074,7 @@ window.ui = {
   dataCleared: () => toast('Данные сайтов удалены'),
   toast,
   passwordOffer,
+  iconsUpdated: () => { iconsVersion++; tilesKey = null; renderStart(); },
   accountError,
   extPopupBox,
   extensionInstalled: (name) => toast(`Расширение «${name}» установлено — оно в меню «пазла» на панели`),

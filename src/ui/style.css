@@ -1839,3 +1839,5 @@ body.glass .setcats { background: transparent; }
 .acc-note { padding-bottom: 14px; line-height: 1.5; }
 .acc-intro { padding: 2px 18px 10px; line-height: 1.5; }
 .acc-error { margin: 4px 18px; padding: 8px 12px; border-radius: 10px; background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
+
+.fav.lg img { border-radius: inherit; }

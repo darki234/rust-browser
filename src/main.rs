@@ -9,6 +9,7 @@ mod pages;
 mod passwords;
 mod webstore;
 mod sync;
+mod icons;
 mod store;
 mod system;
 
@@ -137,6 +138,8 @@ pub enum UserEvent {
     ExtChanged,
     ExtPopupMeasure,
     ExtPopupSize(f64, f64),
+    /// Появился новый значок сайта — перерисовать плитки.
+    IconSaved,
     /// Ключ аккаунта посчитан и проверен (или ошибка).
     AccountReady(Result<sync::Account, String>),
     /// Процессы WebView2; true — показать их в диспетчере вкладок.
@@ -398,6 +401,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let profile = if inprivate { "WebView2-InPrivate" } else { "WebView2" };
     let mut web_context = WebContext::new(Some(data_dir().join(profile)));
     let network = proxy_config(&store.settings);
+    // прокси меняется только с перезапуском — значкам сайтов хватает значения при старте
+    icons::set_proxy(match store.settings.proxy_mode.as_str() {
+        "http" | "socks5" if valid_proxy_host(&store.settings.proxy_host) && store.settings.proxy_port > 0 => Some(format!(
+            "{}://{}:{}",
+            if store.settings.proxy_mode == "http" { "http" } else { "socks5h" },
+            store.settings.proxy_host,
+            store.settings.proxy_port
+        )),
+        _ => None,
+    });
     // Заставка — только при первом запуске браузера, не для каждого нового окна.
     let splash = if primary { store.settings.splash.clone() } else { "off".to_string() };
     let ui = build_ui(&window, proxy.clone(), &mut web_context, keys.clone(), inprivate, dark, &splash, network.clone())?;
@@ -618,9 +631,29 @@ fn build_ui(
     let ui = WebViewBuilder::new_with_web_context(web_context)
         .with_bounds(rect(0.0, 0.0, width, height))
         // Своё фото для обоев: интерфейс берёт его по адресу http://rb.localhost/wallpaper.
-        .with_custom_protocol("rb".into(), |_, request| {
+        // Значки сайтов качаются в фоне: интерфейс получит ответ, когда он будет готов.
+        .with_asynchronous_custom_protocol("rb".into(), |_, request, responder| {
+            let path = request.uri().path().to_string();
+            if let Some(host) = path.strip_prefix("/siteicon/").map(str::to_string) {
+                std::thread::spawn(move || {
+                    let response = match icons::get(&icons::cache_dir(&data_dir()), &host) {
+                        Some((bytes, mime)) => wry::http::Response::builder()
+                            .header("Content-Type", mime)
+                            .header("Cache-Control", "no-cache")
+                            .body(std::borrow::Cow::Owned(bytes)),
+                        None => wry::http::Response::builder()
+                            .status(404)
+                            .header("Cache-Control", "no-store")
+                            .body(std::borrow::Cow::Owned(Vec::new())),
+                    };
+                    if let Ok(response) = response {
+                        responder.respond(response);
+                    }
+                });
+                return;
+            }
             let range = request.headers().get("range").and_then(|v| v.to_str().ok());
-            serve_local(request.uri().path(), range)
+            responder.respond(serve_local(&path, range));
         })
         .with_initialization_script(format!("window.__BOOT__ = {boot};"))
         .with_html(html)
@@ -1275,6 +1308,7 @@ impl App {
                         self.store.add_visit(&url, &title);
                         self.history_dirty = true;
                     }
+                    self.collect_site_icon(id);
                 }
             }
             UserEvent::HistoryChanged(id) => self.sync_location(id),
@@ -1319,6 +1353,9 @@ impl App {
             UserEvent::Page(id, url, raw) => self.handle_page(id, &url, &raw),
             UserEvent::ExtReady(result, tab) => self.extension_ready(result, tab),
             UserEvent::AccountReady(result) => self.account_ready(result),
+            UserEvent::IconSaved => {
+                let _ = self.ui.evaluate_script("ui.iconsUpdated()");
+            }
             UserEvent::ExtAdded(info, result, tab) => self.extension_added(info, result, tab),
             UserEvent::ExtList(list) => {
                 self.ext_list = list;
@@ -2597,6 +2634,38 @@ impl App {
 }
 
 impl App {
+    // ---------- значки сайтов ----------
+
+    /// Открытая страница сама говорит, где её значки: берём их, если для сайта ещё нет картинки.
+    fn collect_site_icon(&self, id: u32) {
+        if self.inprivate {
+            return;
+        }
+        let Some(tab) = self.tab(id).filter(|t| t.url.starts_with("http") && !t.failed) else { return };
+        let Some(host) = adblock::host_of(&tab.url).map(str::to_string) else { return };
+        let dir = icons::cache_dir(&data_dir());
+        if !icons::valid_host(&host) || icons::has(&dir, &host) {
+            return;
+        }
+        let Some(webview) = tab.webview.as_ref() else { return };
+        let page_url = tab.url.clone();
+        let proxy = self.proxy.clone();
+        let _ = webview.evaluate_script_with_callback(icons::PAGE_ICONS, move |json| {
+            // ответ — JSON-строка с JSON внутри
+            let inner: String = serde_json::from_str(&json).unwrap_or_default();
+            let list: Vec<(String, String, String, String)> = serde_json::from_str(&inner).unwrap_or_default();
+            if list.is_empty() {
+                return;
+            }
+            let (dir, host, page_url, proxy) = (dir.clone(), host.clone(), page_url.clone(), proxy.clone());
+            std::thread::spawn(move || {
+                if icons::save_from_page(&dir, &host, &page_url, &list) {
+                    let _ = proxy.send_event(UserEvent::IconSaved);
+                }
+            });
+        });
+    }
+
     // ---------- пароли ----------
 
     fn save_vault(&mut self) {
