@@ -142,6 +142,30 @@ await check('обои меняются', async () => {
   await waitFor(async () => (await tabsCount()) === before);
 });
 
+await check('цвет браузера и вертикальные вкладки', async () => {
+  await ui.evaluate("send('set', { key: 'accent', value: '#e5484d' }); send('set', { key: 'bar_style', value: 'vertical' })");
+  await waitFor(() => ui.evaluate("document.body.classList.contains('bar-vertical') && lastChromeKey.startsWith('0|')"));
+  const accent = await ui.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--accent')");
+  if (!accent.includes('hsl')) throw new Error(`цвет не применился: ${accent}`);
+  await ui.evaluate("send('set', { key: 'accent', value: '' }); send('set', { key: 'bar_style', value: 'classic' })");
+  await waitFor(() => ui.evaluate("!document.body.classList.contains('bar-vertical') && lastChromeKey.endsWith('|0')"));
+});
+
+await check('живые обои рисуются', async () => {
+  const before = await tabsCount();
+  await ui.evaluate("send('set', { key: 'wallpaper', value: 'particles' }); send('new_tab')");
+  await waitFor(() => ui.evaluate("live.kind === 'particles' && live.items.length > 0"));
+  await ui.evaluate("send('set', { key: 'wallpaper', value: 'aurora' }); send('close_tab', { id: S.active })");
+  await waitFor(async () => (await tabsCount()) === before);
+});
+
+await check('боковая панель открывается и закрывается', async () => {
+  await ui.evaluate("send('toggle_panel')");
+  await waitFor(async () => (await ui.evaluate('S.panelOpen')) && (await targets()).some((t) => t.title === 'Панель'));
+  await ui.evaluate("send('toggle_panel')");
+  await waitFor(async () => !(await ui.evaluate('S.panelOpen')));
+});
+
 await check('uBlock Origin Lite установлен и блокирует рекламу', async () => {
   await waitFor(() => ui.evaluate('!!S.ubolId'), 30000, 500);
   const page = await connect((t) => t.title === 'Тестовая страница');

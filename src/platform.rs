@@ -930,6 +930,7 @@ mod tests {
         assert_eq!(Hotkey::from_keys(key('F'), false, false, true), Some(Hotkey::Menu));
         assert_eq!(Hotkey::from_keys(key('L'), true, true, false), Some(Hotkey::PasteGo));
         assert_eq!(Hotkey::from_keys(0x1B, false, true, false), Some(Hotkey::TaskManager));
+        assert_eq!(Hotkey::from_keys(key('E'), true, true, false), Some(Hotkey::Panel));
         assert_eq!(Hotkey::from_keys(0x09, true, false, false), Some(Hotkey::NextTab));
         assert_eq!(Hotkey::from_keys(0x09, true, true, false), Some(Hotkey::PrevTab));
         assert_eq!(Hotkey::from_keys(0x25, false, false, true), Some(Hotkey::Back));
