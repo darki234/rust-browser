@@ -983,7 +983,12 @@ function renderWallpaper() {
   const s = S.settings;
   let kind = s.wallpaper || 'aurora';
   if ((kind === 'image' && !s.hasImage) || (kind === 'video' && !s.hasVideo)) kind = 'aurora';
-  const key = kind + '|' + s.wallpaperUrl + '|' + s.videoUrl + '|' + s.wallpaperDim;
+  // готовые живые обои играют так же, как своё видео
+  const liveId = kind.startsWith('live:') ? kind.slice(5) : null;
+  if (liveId && !(s.liveWalls || []).some((w) => w.id === liveId)) kind = 'aurora';
+  const videoUrl = liveId ? `http://rb.localhost/live/${encodeURIComponent(liveId)}` : s.videoUrl;
+  if (liveId && kind !== 'aurora') kind = 'video';
+  const key = kind + '|' + s.wallpaperUrl + '|' + videoUrl + '|' + s.wallpaperDim;
   if (key === wallKey) return updateLive();
   wallKey = key;
   document.body.dataset.wall = kind;
@@ -998,7 +1003,8 @@ function renderWallpaper() {
   if (kind === 'video') {
     wall.style.backgroundImage = '';
     video.oncanplay = () => wall.classList.add('show');
-    video.src = s.videoUrl;
+    wall.classList.remove('show');
+    video.src = videoUrl;
   } else if (kind === 'image') {
     // показываем фото, только когда оно загрузилось, — без мигания пустого фона
     const img = new Image();
@@ -1624,25 +1630,58 @@ function wallpaperSetting() {
     h('i'), h('span', {}, 'Своё фото'));
   const dim = h('input', { type: 'range', min: 0, max: 85, step: 5, class: 'range' });
   dim.addEventListener('input', () => set('wallpaper_dim', Number(dim.value)));
-  const dimRow = setting('Затемнение фото', 'Чтобы часы и поиск хорошо читались',
-    dim, h('button', { class: 'text-btn outline', onclick: () => send('remove_wallpaper') }, 'Убрать фото'));
+  const dimRow = setting('Затемнение фото и видео', 'Чтобы часы и поиск хорошо читались',
+    dim, h('button', { class: 'text-btn outline photo-remove', onclick: () => send('remove_wallpaper') }, 'Убрать фото'));
   settingsUpdaters.push(() => {
     const s = S.settings;
     const current = s.wallpaper === 'image' && s.hasImage ? 'image' : s.wallpaper;
     tiles.forEach((tile, i) => tile.classList.toggle('on', WALLS[i][0] === current));
     video.classList.toggle('on', s.wallpaper === 'video' && s.hasVideo);
+    dimRow.style.display = s.hasImage || s.wallpaper === 'video' || s.wallpaper.startsWith('live:') ? '' : 'none';
     videoRow.style.display = s.hasVideo ? '' : 'none';
     photo.classList.toggle('on', current === 'image');
     photo.querySelector('i').style.backgroundImage = s.hasImage ? `url("${s.wallpaperUrl}")` : '';
     photo.querySelector('span').textContent = s.hasImage ? 'Своё фото' : 'Загрузить фото';
     dim.value = s.wallpaperDim ?? 35;
-    dimRow.style.display = s.hasImage ? '' : 'none';
+    dimRow.querySelector('.photo-remove').style.display = s.hasImage ? '' : 'none';
   });
   return h('div', {},
     h('div', { class: 'set wallset' },
       h('div', { class: 'label' }, 'Обои новой вкладки', h('small', {}, 'Готовый узор, живые обои, своё фото, GIF или видео')),
       h('div', { class: 'walls' }, ...tiles, photo, video)),
     dimRow, videoRow, always);
+}
+
+/** Галерея готовых живых обоев: видео с Wikimedia Commons со свободной лицензией. */
+function wallGalleryCard() {
+  const walls = S.settings.liveWalls || [];
+  if (!walls.length) return null;
+  const tiles = walls.map((w) => {
+    const url = `http://rb.localhost/live/${encodeURIComponent(w.id)}`;
+    // кадр из середины ролика вместо картинки; на наведении ролик оживает
+    const preview = h('video', { muted: true, loop: true, playsinline: true, preload: 'metadata', src: url + '#t=2' });
+    preview.muted = true;
+    const tile = h('button', { class: 'walltile livetile', title: w.name, onclick: () => set('wallpaper', 'live:' + w.id) },
+      preview, h('em', {}, 'видео'), h('span', {}, w.name));
+    tile.addEventListener('mouseenter', () => preview.play().catch(() => {}));
+    tile.addEventListener('mouseleave', () => preview.pause());
+    settingsUpdaters.push(() => tile.classList.toggle('on', S.settings.wallpaper === 'live:' + w.id));
+    return tile;
+  });
+  const credit = h('small', {});
+  const creditRow = h('div', { class: 'wallcredit' }, credit);
+  settingsUpdaters.push(() => {
+    const w = walls.find((x) => S.settings.wallpaper === 'live:' + x.id);
+    creditRow.style.display = w ? '' : 'none';
+    if (!w) return;
+    credit.replaceChildren(`«${w.name}» — ${w.author || 'автор не указан'}, ${w.license}, Wikimedia Commons · `,
+      h('a', { href: '#', onclick: (e) => { e.preventDefault(); send('open', { url: w.source, newTab: true }); closeHub(); } }, 'источник'));
+  });
+  return h('div', { class: 'card' }, h('h2', {}, 'Живые обои из интернета'),
+    h('div', { class: 'set wallset' },
+      h('div', { class: 'label' }, 'Видеообои', h('small', {}, 'Космос, природа и погода: съёмки NASA и фотографов со свободной лицензией. Звук выключен, на паузе, когда вкладку не видно')),
+      h('div', { class: 'walls' }, ...tiles)),
+    creditRow);
 }
 
 /** Кнопка настроек uBlock Origin Lite: его собственная страница во вкладке. */
@@ -1736,7 +1775,7 @@ const SETTINGS_CATS = [
       typeof splashSetting === 'function' && splashSetting()),
   ]],
   ['walls', 'Обои', () => [
-    h('div', { class: 'card' }, h('h2', {}, 'Обои новой вкладки'), wallpaperSetting()),
+    h('div', { class: 'card' }, h('h2', {}, 'Узоры и свои обои'), wallpaperSetting()),
     typeof wallGalleryCard === 'function' && wallGalleryCard(),
   ]],
   ['layout', 'Панели и вкладки', () => [

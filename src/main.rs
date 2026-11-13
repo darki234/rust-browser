@@ -1711,6 +1711,9 @@ impl App {
                 // своё фото можно выбрать, только если оно уже загружено
                 Some("image") if wallpaper_file().is_none() => return,
                 Some("video") if video_file().is_none() => return,
+                Some(live) if live.strip_prefix("live:").is_some_and(|id| live_wall_file(id).is_some()) => {
+                    settings.wallpaper = live.to_string()
+                }
                 Some(name) if WALLPAPERS.contains(&name) => settings.wallpaper = name.to_string(),
                 _ => return,
             },
@@ -2424,6 +2427,7 @@ impl App {
                 "wallpaperUrl": format!("http://rb.localhost/wallpaper?v={}", settings.wallpaper_version),
                 "hasImage": wallpaper_file().is_some(),
                 "hasVideo": video_file().is_some(),
+                "liveWalls": live_walls().1,
                 "videoUrl": format!("http://rb.localhost/wallpaper-video?v={}", settings.wallpaper_version),
             },
             "ubolId": self.ubol_id,
@@ -2698,6 +2702,44 @@ const VIDEO_TYPES: [(&str, &str); 2] = [("mp4", "video/mp4"), ("webm", "video/we
 /// Больше за один запрос не отдаём: видео читается кусками, а не целиком в память.
 const VIDEO_CHUNK: u64 = 4 * 1024 * 1024;
 
+/// Готовые живые обои: видео со свободной лицензией из папки assets/walls
+/// (рядом с exe или выше по дереву — так находит и собранный, и скопированный exe).
+#[derive(serde::Deserialize, Serialize, Clone)]
+struct LiveWall {
+    id: String,
+    name: String,
+    file: String,
+    license: String,
+    author: String,
+    source: String,
+}
+
+fn live_walls() -> &'static (PathBuf, Vec<LiveWall>) {
+    static WALLS: std::sync::OnceLock<(PathBuf, Vec<LiveWall>)> = std::sync::OnceLock::new();
+    WALLS.get_or_init(|| {
+        let exe = std::env::current_exe().unwrap_or_default();
+        let dir = exe
+            .ancestors()
+            .skip(1)
+            .take(5)
+            .flat_map(|d| [d.join("wallpapers"), d.join("assets").join("walls")])
+            .find(|d| d.join("credits.json").exists());
+        let Some(dir) = dir else { return (PathBuf::new(), Vec::new()) };
+        let text = std::fs::read_to_string(dir.join("credits.json")).unwrap_or_default();
+        let list: Vec<LiveWall> = serde_json::from_str(text.trim_start_matches('\u{feff}')).unwrap_or_default();
+        let list = list
+            .into_iter()
+            .filter(|w| !w.file.contains(['/', '\\']) && dir.join(&w.file).is_file())
+            .collect();
+        (dir, list)
+    })
+}
+
+fn live_wall_file(id: &str) -> Option<PathBuf> {
+    let (dir, list) = live_walls();
+    list.iter().find(|w| w.id == id).map(|w| dir.join(&w.file))
+}
+
 /// Своё видео для обоев в папке данных, если оно есть.
 fn video_file() -> Option<(PathBuf, &'static str)> {
     VIDEO_TYPES.iter().find_map(|(ext, mime)| {
@@ -2742,12 +2784,12 @@ fn wallpaper_file() -> Option<(PathBuf, &'static str)> {
 }
 
 /// Видео отдаётся кусками по заголовку Range — так его и запрашивает тег <video>.
-fn serve_video(range: Option<&str>) -> wry::http::Response<std::borrow::Cow<'static, [u8]>> {
+fn serve_video(found: Option<(PathBuf, &str)>, range: Option<&str>) -> wry::http::Response<std::borrow::Cow<'static, [u8]>> {
     use std::io::{Read, Seek, SeekFrom};
     let not_found = || {
         wry::http::Response::builder().status(404).body(Vec::new().into()).unwrap_or_default()
     };
-    let Some((path, mime)) = video_file() else { return not_found() };
+    let Some((path, mime)) = found else { return not_found() };
     let Ok(mut file) = std::fs::File::open(path) else { return not_found() };
     let len = file.metadata().map(|m| m.len()).unwrap_or(0);
     let (start, end) = parse_range(range, len).unwrap_or((0, len.saturating_sub(1).min(VIDEO_CHUNK - 1)));
@@ -2768,7 +2810,10 @@ fn serve_video(range: Option<&str>) -> wry::http::Response<std::borrow::Cow<'sta
 /// Отвечает на запросы интерфейса к http://rb.localhost/…
 fn serve_local(path: &str, range: Option<&str>) -> wry::http::Response<std::borrow::Cow<'static, [u8]>> {
     if path == "/wallpaper-video" {
-        return serve_video(range);
+        return serve_video(video_file(), range);
+    }
+    if let Some(id) = path.strip_prefix("/live/") {
+        return serve_video(live_wall_file(id).map(|p| (p, "video/webm")), range);
     }
     let found = (path == "/wallpaper")
         .then(wallpaper_file)

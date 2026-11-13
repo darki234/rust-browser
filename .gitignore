@@ -1,2 +1,4 @@
 /target
 /Rust Browser.exe
+# видеообои качает assets/walls/fetch.ps1
+assets/walls/*.webm

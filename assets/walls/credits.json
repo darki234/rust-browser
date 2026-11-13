@@ -1,0 +1,92 @@
+[
+ {
+  "id": "aurora-alaska",
+  "name": "Северное сияние",
+  "file": "aurora-alaska.webm",
+  "license": "Public domain",
+  "author": "NASA's Scientific Visualization Studio - Amentum Services, Inc./Mike Toillion",
+  "source": "https://commons.wikimedia.org/wiki/File%3AAlaskan_Aurora_Time_Lapse_%28SVS15077%29.webm",
+  "url": "https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c5/Alaskan_Aurora_Time_Lapse_%28SVS15077%29.webm/Alaskan_Aurora_Time_Lapse_%28SVS15077%29.webm.1080p.vp9.webm"
+ },
+ {
+  "id": "milky-way",
+  "name": "Млечный путь",
+  "file": "milky-way.webm",
+  "license": "Public domain",
+  "author": "Joshua Tree National Park",
+  "source": "https://commons.wikimedia.org/wiki/File%3AThe_Milky_Way_over_the_Oasis_of_Mara_%2829954101654%29.webm",
+  "url": "https://upload.wikimedia.org/wikipedia/commons/transcoded/7/7c/The_Milky_Way_over_the_Oasis_of_Mara_%2829954101654%29.webm/The_Milky_Way_over_the_Oasis_of_Mara_%2829954101654%29.webm.1080p.vp9.webm"
+ },
+ {
+  "id": "iss-night",
+  "name": "Земля с МКС",
+  "file": "iss-night.webm",
+  "license": "Public domain",
+  "author": "NASA Johnson Space Center",
+  "source": "https://commons.wikimedia.org/wiki/File%3AISS073-E-665022-667154-20250819-Night_-_2025-08-19_ISS073_2133_Night.webm",
+  "url": "https://upload.wikimedia.org/wikipedia/commons/9/9a/ISS073-E-665022-667154-20250819-Night_-_2025-08-19_ISS073_2133_Night.webm"
+ },
+ {
+  "id": "sun",
+  "name": "Солнце",
+  "file": "sun.webm",
+  "license": "Public domain",
+  "author": "NASA's Scientific Visualization Studio - Scott Wiessinger",
+  "source": "https://commons.wikimedia.org/wiki/File%3ASun_Emits_X6_3_Flare_on_February_22%2C_2024_%28SVS14535_-_SDO_02222024_X6_304_4k%29.webm",
+  "url": "https://upload.wikimedia.org/wikipedia/commons/transcoded/6/6c/Sun_Emits_X6_3_Flare_on_February_22%2C_2024_%28SVS14535_-_SDO_02222024_X6_304_4k%29.webm/Sun_Emits_X6_3_Flare_on_February_22%2C_2024_%28SVS14535_-_SDO_02222024_X6_304_4k%29.webm.1080p.vp9.webm"
+ },
+ {
+  "id": "sunset",
+  "name": "Закат",
+  "file": "sunset.webm",
+  "license": "CC BY 4.0",
+  "author": "Thomas Bresson",
+  "source": "https://commons.wikimedia.org/wiki/File%3A2020-04-01_timelapse-sunset-Belfort.webm",
+  "url": "https://upload.wikimedia.org/wikipedia/commons/transcoded/e/e9/2020-04-01_timelapse-sunset-Belfort.webm/2020-04-01_timelapse-sunset-Belfort.webm.1080p.vp9.webm"
+ },
+ {
+  "id": "snow",
+  "name": "Снегопад",
+  "file": "snow.webm",
+  "license": "CC0",
+  "author": "Роман Рябенко",
+  "source": "https://commons.wikimedia.org/wiki/File%3A%D0%A1%D0%BD%D1%96%D0%B3_%D0%BD%D0%B0_%D1%82%D0%BB%D1%96_%D0%BB%D0%B5%D0%B3%D0%BA%D0%BE%D1%97_%D1%85%D0%BC%D0%B0%D1%80%D0%B8_%D0%B2_%D0%BD%D0%B5%D0%B1%D1%96.webm",
+  "url": "https://upload.wikimedia.org/wikipedia/commons/transcoded/3/37/%D0%A1%D0%BD%D1%96%D0%B3_%D0%BD%D0%B0_%D1%82%D0%BB%D1%96_%D0%BB%D0%B5%D0%B3%D0%BA%D0%BE%D1%97_%D1%85%D0%BC%D0%B0%D1%80%D0%B8_%D0%B2_%D0%BD%D0%B5%D0%B1%D1%96.webm/%D0%A1%D0%BD%D1%96%D0%B3_%D0%BD%D0%B0_%D1%82%D0%BB%D1%96_%D0%BB%D0%B5%D0%B3%D0%BA%D0%BE%D1%97_%D1%85%D0%BC%D0%B0%D1%80%D0%B8_%D0%B2_%D0%BD%D0%B5%D0%B1%D1%96.webm.1080p.vp9.webm"
+ },
+ {
+  "id": "rain",
+  "name": "Дождь",
+  "file": "rain.webm",
+  "license": "CC0",
+  "author": "Missvain",
+  "source": "https://commons.wikimedia.org/wiki/File%3ARain_in_Sonoma_-_December_2025_-_Sarah_Stierch.webm",
+  "url": "https://upload.wikimedia.org/wikipedia/commons/transcoded/d/dd/Rain_in_Sonoma_-_December_2025_-_Sarah_Stierch.webm/Rain_in_Sonoma_-_December_2025_-_Sarah_Stierch.webm.1080p.vp9.webm"
+ },
+ {
+  "id": "waterfall",
+  "name": "Водопад",
+  "file": "waterfall.webm",
+  "license": "CC0",
+  "author": "Psypherium",
+  "source": "https://commons.wikimedia.org/wiki/File%3ADelaneys_Falls.webm",
+  "url": "https://upload.wikimedia.org/wikipedia/commons/transcoded/8/8b/Delaneys_Falls.webm/Delaneys_Falls.webm.1080p.vp9.webm"
+ },
+ {
+  "id": "beach",
+  "name": "Пляж сверху",
+  "file": "beach.webm",
+  "license": "CC BY 3.0",
+  "author": "Nature video, HD - 4K",
+  "source": "https://commons.wikimedia.org/wiki/File%3AAerial_view_of_sand_beach._Top_view_sea_waves._Drone_footage.webm",
+  "url": "https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c6/Aerial_view_of_sand_beach._Top_view_sea_waves._Drone_footage.webm/Aerial_view_of_sand_beach._Top_view_sea_waves._Drone_footage.webm.1080p.vp9.webm"
+ },
+ {
+  "id": "forest",
+  "name": "Лес сверху",
+  "file": "forest.webm",
+  "license": "CC BY 3.0",
+  "author": "Flykit production",
+  "source": "https://commons.wikimedia.org/wiki/File%3AAerial_views_of_forest_in_Russia.webm",
+  "url": "https://upload.wikimedia.org/wikipedia/commons/transcoded/9/90/Aerial_views_of_forest_in_Russia.webm/Aerial_views_of_forest_in_Russia.webm.1080p.vp9.webm"
+ }
+]
