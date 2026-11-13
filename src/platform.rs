@@ -88,6 +88,8 @@ pub enum Hotkey {
     Settings,
     /// Ctrl+Shift+L — вставить адрес или запрос из буфера обмена и сразу перейти.
     PasteGo,
+    /// Shift+Esc — диспетчер вкладок, как в Edge.
+    TaskManager,
     Find,
     ZoomIn,
     ZoomOut,
@@ -124,6 +126,7 @@ impl Hotkey {
         let letter = |c: char| key == c as u32;
         Some(match (ctrl, shift, alt) {
             (false, false, false) if key == ESC => Self::Escape,
+            (false, true, false) if key == ESC => Self::TaskManager,
             (false, false, false) if key == F5 => Self::Reload,
             (false, false, false) if key == F6 => Self::FocusUrl,
             (false, false, false) if key == F11 => Self::Fullscreen,
@@ -911,6 +914,7 @@ mod tests {
         assert_eq!(Hotkey::from_keys(key('F'), true, false, false), Some(Hotkey::Find));
         assert_eq!(Hotkey::from_keys(key('F'), false, false, true), Some(Hotkey::Menu));
         assert_eq!(Hotkey::from_keys(key('L'), true, true, false), Some(Hotkey::PasteGo));
+        assert_eq!(Hotkey::from_keys(0x1B, false, true, false), Some(Hotkey::TaskManager));
         assert_eq!(Hotkey::from_keys(0x09, true, false, false), Some(Hotkey::NextTab));
         assert_eq!(Hotkey::from_keys(0x09, true, true, false), Some(Hotkey::PrevTab));
         assert_eq!(Hotkey::from_keys(0x25, false, false, true), Some(Hotkey::Back));

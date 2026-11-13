@@ -44,6 +44,10 @@ pub struct Settings {
     pub download_dir: String,
     /// Предлагать сохранять пароли.
     pub passwords: bool,
+    /// Режим эффективности Windows для процессов фоновых вкладок.
+    pub efficiency_mode: bool,
+    /// От батареи вкладки засыпают через 5 минут.
+    pub battery_saver: bool,
     /// Обои новой вкладки: имя готового варианта или "image" — своё фото.
     pub wallpaper: String,
     /// Затемнение своего фото, 0–85 %, чтобы текст на нём читался.
@@ -66,6 +70,8 @@ impl Default for Settings {
             sleep_minutes: 15,
             download_dir: String::new(),
             passwords: true,
+            efficiency_mode: true,
+            battery_saver: true,
             wallpaper: "aurora".to_string(),
             wallpaper_dim: 35,
             wallpaper_version: 0,

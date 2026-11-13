@@ -60,6 +60,10 @@ const ICONS = {
   pause: '<path d="M8 5v14"/><path d="M16 5v14"/>',
   play: '<path d="M7 4.5v15l12-7.5z"/>',
   cookie: '<path d="M12 3a9 9 0 1 0 9 9 3 3 0 0 1-3-3 3 3 0 0 1-3-3 3 3 0 0 1-3-3z"/><path d="M8.5 11.5h.01M12 16h.01M15.5 13h.01" stroke-width="2.6"/>',
+  gauge: '<path d="M4.5 18a9 9 0 1 1 15 0"/><path d="m12 13 4-5"/><circle cx="12" cy="13" r="1.4" fill="currentColor"/>',
+  moon: '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>',
+  leaf: '<path d="M5 19c0-8 5-13 14-14 0 9-5 14-13 14z"/><path d="M5 19 13 11"/>',
+  bolt: '<path d="M13 3 5 14h6l-1 7 8-11h-6z"/>',
   window: '<rect x="3" y="5" width="18" height="15" rx="2"/><path d="M3 9h18"/>',
   image: '<rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-9 9"/>',
   smile: '<circle cx="12" cy="12" r="9.5"/><path d="M8 14.5a5 5 0 0 0 8 0"/><path d="M9 9.5h.01M15 9.5h.01" stroke-width="2.6"/>',
@@ -827,8 +831,12 @@ function tick() {
   el.clock.textContent = now.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
   el.date.textContent = now.toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' });
 }
-tick();
-setInterval(tick, 1000);
+// Раз в минуту, ровно в её начале: интерфейс почти не просыпается зря.
+function scheduleTick() {
+  tick();
+  setTimeout(scheduleTick, 60000 - (Date.now() % 60000) + 50);
+}
+scheduleTick();
 
 el.startq.addEventListener('keydown', (event) => {
   const text = el.startq.value.trim();
@@ -973,6 +981,7 @@ function mainMenuNodes() {
     item({ icon: 'star', label: 'Избранное', kb: 'Ctrl+Shift+O', onClick: () => openHub('bookmarks') }),
     item({ icon: 'clock', label: 'Журнал', kb: 'Ctrl+H', onClick: () => openHub('history') }),
     item({ icon: 'download', label: 'Загрузки', kb: 'Ctrl+J', onClick: () => openHub('downloads') }),
+    item({ icon: 'gauge', label: 'Диспетчер вкладок', kb: 'Shift+Esc', onClick: () => openHub('tasks') }),
     sep(),
     item({ icon: 'search', label: 'Найти на странице', kb: 'Ctrl+F', disabled: !page, onClick: () => setTimeout(openFind, 140) }),
     item({ icon: 'print', label: 'Печать', kb: 'Ctrl+P', disabled: !page, onClick: () => send('print') }),
@@ -1067,6 +1076,8 @@ function openTabMenu(id, x, y) {
     item({ icon: 'copy', label: 'Дублировать', disabled: tab.start, onClick: () => send('duplicate', { id }) }),
     item({ icon: 'pin', label: tab.pinned ? 'Открепить вкладку' : 'Закрепить вкладку', onClick: () => send('pin', { id }) }),
     item({ icon: 'window', label: 'Переместить в новое окно', disabled: tab.start, onClick: () => send('detach', { id }) }),
+    item({ icon: 'moon', label: 'Выгрузить из памяти', disabled: tab.start || tab.id === S.active,
+      onClick: () => send('unload_tab', { id }) }),
     item({ icon: tab.muted ? 'speaker' : 'muted', label: tab.muted ? 'Включить звук' : 'Выключить звук вкладки',
       disabled: tab.start, onClick: () => send('mute', { id }) }),
     sep(),
@@ -1087,10 +1098,13 @@ const SECTIONS = {
   bookmarks: { title: 'Избранное', icon: 'star', empty: 'В избранном пока пусто', action: '' },
   history: { title: 'Журнал', icon: 'clock', empty: 'Журнал пуст', action: 'Очистить журнал' },
   downloads: { title: 'Загрузки', icon: 'download', empty: 'Загрузок пока нет', action: 'Очистить список' },
+  tasks: { title: 'Диспетчер вкладок', icon: 'gauge', empty: '', action: 'Выгрузить фоновые' },
   settings: { title: 'Параметры', icon: 'gear', empty: '', action: '' },
 };
 
 let hubSection = null;
+let tasksData = null;
+let tasksTimer = 0;
 let historyItems = [];
 let hubKey = null;
 
@@ -1119,10 +1133,17 @@ async function openHub(section) {
   }
 
   hubKey = null;
+  clearInterval(tasksTimer);
   if (section === 'history') {
     historyItems = [];
     el.hublist.replaceChildren();
     send('history', { q: '' });
+  } else if (section === 'tasks') {
+    // память меняется — обновляем список, пока диспетчер открыт
+    tasksData = null;
+    el.hublist.replaceChildren();
+    send('tasks');
+    tasksTimer = setInterval(() => { if (hubSection === 'tasks') send('tasks'); }, 2000);
   } else {
     renderHubList(true);
   }
@@ -1137,6 +1158,7 @@ async function openHub(section) {
 
 function closeHub(instant = false) {
   if (!hubSection) return;
+  clearInterval(tasksTimer);
   hubSection = null;
   el.hubbtn.classList.remove('on');
   if (instant) {
@@ -1444,6 +1466,12 @@ function settingsPage() {
       setting('Усыплять неактивные вкладки', 'Через это время фоновая вкладка засыпает, а через втрое больше выгружается из памяти',
         segmented([[5, '5 мин'], [15, '15 мин'], [30, '30 мин'], [60, '1 ч'], [0, 'Никогда']],
           () => S.settings.sleepMinutes, (value) => set('sleep_minutes', value))),
+      setting('Режим эффективности для фоновых вкладок', 'Windows даёт их процессам меньше ресурсов, как в Edge. Вкладку на экране и со звуком не трогаем',
+        toggle(() => S.settings.efficiencyMode, (value) => set('efficiency_mode', value))),
+      setting('Экономия при работе от батареи', () => S.onBattery
+          ? 'Сейчас от батареи: фоновые вкладки засыпают через 5 минут'
+          : 'От батареи фоновые вкладки будут засыпать через 5 минут',
+        toggle(() => S.settings.batterySaver, (value) => set('battery_saver', value))),
       setting('Блокировка рекламы и трекеров',
         () => S.ubolId
           ? 'uBlock Origin Lite: фильтры uBlock, EasyList, EasyPrivacy и другие'
@@ -1471,7 +1499,8 @@ function settingsPage() {
         ['Новое окно / окно InPrivate', 'Ctrl+N / Ctrl+Shift+N'], ['Следующая / предыдущая вкладка', 'Ctrl+Tab / Ctrl+Shift+Tab'],
         ['Адресная строка', 'Ctrl+L, Alt+D'], ['Найти на странице', 'Ctrl+F'],
         ['Масштаб', 'Ctrl + / Ctrl − / Ctrl+0'], ['Во весь экран', 'F11'],
-        ['Избранное / журнал / загрузки', 'Ctrl+Shift+O / Ctrl+H / Ctrl+J'], ['Меню', 'Alt+F'],
+        ['Избранное / журнал / загрузки', 'Ctrl+Shift+O / Ctrl+H / Ctrl+J'],
+        ['Диспетчер вкладок', 'Shift+Esc'], ['Меню', 'Alt+F'],
       ].flatMap(([what, keys]) => [h('span', {}, what), h('kbd', {}, keys)]))),
   ];
   // значения выставляем после вставки в документ, когда известны размеры кнопок
@@ -1479,8 +1508,53 @@ function settingsPage() {
   return cards.filter(Boolean).map((card, i) => { card.style.setProperty('--i', i); return card; });
 }
 
+// ----- диспетчер вкладок -----
+
+const MB = (bytes) => `${Math.round(bytes / 1048576)} МБ`;
+const TASK_STATES = {
+  active: 'На экране', loaded: 'Работает', sleeping: 'Спит', unloaded: 'Выгружена', start: 'Новая вкладка',
+};
+
+function showTasks(data) {
+  tasksData = data;
+  if (hubSection === 'tasks') renderHubList(!el.hublist.children.length);
+}
+
+function taskRows() {
+  if (!tasksData) return [h('div', { class: 'empty' }, icon('gauge', 56), 'Считаю память…')];
+  const query = el.hubq.value.trim().toLowerCase();
+  const d = tasksData;
+  const summary = h('div', { class: 'tasksum' },
+    h('div', {}, h('b', {}, MB(d.total)), h('small', {}, 'занимает браузер')),
+    h('div', {}, h('b', {}, MB(d.other)), h('small', {}, 'интерфейс и служебные процессы')),
+    h('div', {}, h('b', {}, d.rows.filter((r) => r.state === 'active' || r.state === 'loaded' || r.state === 'sleeping').length + ' из ' + d.rows.length),
+      h('small', {}, 'вкладок в памяти')),
+    d.onBattery && h('div', { class: 'battery' }, icon('bolt', 15), `От батареи: вкладки засыпают через ${d.sleepLimit} мин`));
+  const rows = d.rows
+    .filter((r) => !query || (r.title + r.url).toLowerCase().includes(query))
+    .map((r, index) => h('div', { class: 'row task', style: `--i:${index}`, onclick: () => { send('activate', { id: r.id }); closeHub(); } },
+      r.state === 'start' ? h('span', { class: 'fav' }, icon('search', 14)) : favicon(r.url, false, r.favicon),
+      h('span', { class: 't' }, r.title || (r.state === 'start' ? 'Новая вкладка' : prettyUrl(r.url))),
+      h('span', { class: `state s-${r.state}` }, TASK_STATES[r.state]),
+      r.eco && h('span', { class: 'state s-eco', title: 'Режим эффективности Windows: процесс получает меньше ресурсов' }, icon('leaf', 12), 'эко'),
+      h('span', { class: 'mem' }, r.memory ? MB(r.memory) + (r.shared ? '*' : '') : '—'),
+      h('span', { class: 'acts' }, (r.state === 'loaded' || r.state === 'sleeping')
+        ? actionButton('moon', 'Выгрузить из памяти', () => send('unload_tab', { id: r.id }))
+        : h('i', { class: 'spacer' }))));
+  const shared = d.rows.some((r) => r.shared);
+  return [summary, ...rows, shared && h('div', { class: 'tasknote' }, '* общий процесс с другой вкладкой того же сайта')];
+}
+
 function renderHubList(animate) {
   if (!hubSection) return;
+  if (hubSection === 'tasks') {
+    const key = 'tasks|' + el.hubq.value + '|' + JSON.stringify(tasksData);
+    if (key === hubKey) return;
+    hubKey = key;
+    el.hublist.classList.toggle('stagger', animate);
+    el.hublist.replaceChildren(...taskRows().filter(Boolean));
+    return;
+  }
   if (hubSection === 'settings') {
     if (hubKey === 'settings') {
       settingsUpdaters.forEach((update) => update());
@@ -1525,6 +1599,7 @@ function resetHubAction() {
 }
 el.hubaction.addEventListener('click', () => {
   if (hubSection === 'downloads') return send('downloads_clear');
+  if (hubSection === 'tasks') return send('unload_background');
   if (hubSection !== 'history') return;
   if (!armed) {
     armed = true;
@@ -1596,6 +1671,7 @@ window.ui = {
   dataCleared: () => toast('Данные сайтов удалены'),
   pasteText,
   showSiteInfo,
+  showTasks,
   cookiesCleared: (count) => { closeMenu(); toast(`Удалено файлов cookie: ${count}`); },
   imported: (count) => toast(count ? `Перенесено в избранное: ${count}` : 'Новых сайтов для избранного не нашлось'),
 };

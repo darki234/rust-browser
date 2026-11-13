@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod adblock;
+mod efficiency;
 mod extension;
 mod platform;
 mod pages;
@@ -9,6 +10,7 @@ mod store;
 mod system;
 
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -96,6 +98,8 @@ pub enum UserEvent {
     Remote(Vec<String>),
     /// Прокрутка вкладки в момент ухода в фон.
     Scrolled(u32, f64),
+    /// Процессы WebView2; true — показать их в диспетчере вкладок.
+    Processes(Vec<efficiency::ProcessInfo>, bool),
     /// Страница не загрузилась: (вкладка, вид ошибки для своей страницы ошибки).
     LoadFailed(u32, &'static str),
 }
@@ -205,6 +209,10 @@ struct App {
     /// Основное окно: восстанавливает и сохраняет сеанс, принимает ссылки от Windows.
     primary: bool,
     is_default: bool,
+    /// Режим эффективности, уже выставленный процессам: pid → включён.
+    eco: HashMap<u32, bool>,
+    processes: Vec<efficiency::ProcessInfo>,
+    on_battery: bool,
     /// Браузеры, из которых можно перенести избранное.
     import_sources: Vec<(&'static str, &'static str)>,
     /// Ссылка на загрузку файла тоже «не загружается как страница» — в этот момент
@@ -310,6 +318,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         inprivate,
         primary,
         is_default: system::is_default(),
+        eco: HashMap::new(),
+        processes: Vec::new(),
+        on_battery: efficiency::on_battery(),
         import_sources: pages::import_sources(),
         last_download: None,
         ubol_id: None,
@@ -796,6 +807,7 @@ impl App {
         }
         self.active = id;
         self.session_dirty = true;
+        self.refresh_processes(false);
     }
 
     fn activate(&mut self, id: u32) {
@@ -971,6 +983,13 @@ impl App {
                 }
             }
             UserEvent::Captured(bytes) => self.finish_overlay(bytes),
+            UserEvent::Processes(list, report) => {
+                self.processes = list;
+                self.apply_efficiency();
+                if report {
+                    self.send_tasks();
+                }
+            }
             UserEvent::Scrolled(id, y) => {
                 if let Some(tab) = self.tab_mut(id) {
                     tab.scroll = (y > 0.0).then_some(y);
@@ -1079,6 +1098,7 @@ impl App {
             Hotkey::Settings => self.open_hub("settings"),
             Hotkey::Find => self.open_find(),
             Hotkey::PasteGo => self.paste_and_go(),
+            Hotkey::TaskManager => self.open_hub("tasks"),
             Hotkey::ZoomIn => self.zoom_step(1),
             Hotkey::ZoomOut => self.zoom_step(-1),
             Hotkey::ZoomReset => self.zoom_step(0),
@@ -1380,6 +1400,14 @@ impl App {
                     platform::set_passwords(webview, enabled);
                 }
             }
+            "efficiency_mode" => {
+                settings.efficiency_mode = value.as_bool().unwrap_or(settings.efficiency_mode);
+                self.store.save_settings();
+                self.apply_efficiency();
+                self.dirty = true;
+                return;
+            }
+            "battery_saver" => settings.battery_saver = value.as_bool().unwrap_or(settings.battery_saver),
             "sleep_minutes" => {
                 if let Some(minutes) = value.as_u64() {
                     settings.sleep_minutes = minutes.min(24 * 60) as u32;
@@ -1668,6 +1696,18 @@ impl App {
                 self.dirty = true;
             }
             "site_info" => self.send_site_info(),
+            "tasks" => self.refresh_processes(true),
+            "unload_tab" => {
+                self.unload_tab(id);
+                self.refresh_processes(true);
+            }
+            "unload_background" => {
+                let ids: Vec<u32> = self.tabs.iter().map(|t| t.id).collect();
+                for id in ids {
+                    self.unload_tab(id);
+                }
+                self.refresh_processes(true);
+            }
             "site_clear_cookies" => {
                 let Some(webview) = self.active_webview() else { return };
                 let url = self.active_tab().map(|t| t.url.clone()).unwrap_or_default();
@@ -1721,6 +1761,120 @@ impl App {
         }
     }
 
+    // ---------- процессы, режим эффективности, диспетчер вкладок ----------
+
+    /// Просит у WebView2 список процессов; ответ придёт событием Processes.
+    fn refresh_processes(&self, report: bool) {
+        let proxy = self.proxy.clone();
+        efficiency::processes(&self.ui, move |list| {
+            let _ = proxy.send_event(UserEvent::Processes(list, report));
+        });
+    }
+
+    /// Процессы отрисовки каждой вкладки (общие процессы у вкладок одного сайта).
+    fn tab_processes(&self) -> Vec<(u32, Vec<u32>)> {
+        self.tabs
+            .iter()
+            .filter_map(|tab| {
+                let frame = efficiency::main_frame_id(tab.webview.as_ref()?)?;
+                let pids = self
+                    .processes
+                    .iter()
+                    .filter(|p| p.renderer && p.frames.contains(&frame))
+                    .map(|p| p.pid)
+                    .collect();
+                Some((tab.id, pids))
+            })
+            .collect()
+    }
+
+    /// Фоновым вкладкам — режим эффективности, видимой и играющей звук — обычный.
+    fn apply_efficiency(&mut self) {
+        let tab_pids: Vec<(bool, Vec<u32>)> = self
+            .tab_processes()
+            .into_iter()
+            .map(|(id, pids)| {
+                let keep = id == self.active || self.tab(id).is_some_and(|t| t.audio);
+                (keep, pids)
+            })
+            .collect();
+        let renderers: Vec<u32> = self.processes.iter().filter(|p| p.renderer).map(|p| p.pid).collect();
+        let plan = efficiency::efficiency_plan(&renderers, &tab_pids, self.store.settings.efficiency_mode);
+        for (pid, on) in &plan {
+            if self.eco.get(pid) != Some(on) && efficiency::set_efficiency(*pid, *on) {
+                self.eco.insert(*pid, *on);
+            }
+        }
+        self.eco.retain(|pid, _| plan.contains_key(pid));
+    }
+
+    fn send_tasks(&self) {
+        let tab_pids: HashMap<u32, Vec<u32>> = self.tab_processes().into_iter().collect();
+        let mut memory: HashMap<u32, u64> = HashMap::new();
+        for process in &self.processes {
+            memory.insert(process.pid, efficiency::private_memory(process.pid).unwrap_or(0));
+        }
+        let own = efficiency::private_memory(std::process::id()).unwrap_or(0);
+        let total: u64 = memory.values().sum::<u64>() + own;
+        let mut in_tabs: Vec<u32> = Vec::new();
+        let rows: Vec<Value> = self
+            .tabs
+            .iter()
+            .map(|tab| {
+                let pids = tab_pids.get(&tab.id).cloned().unwrap_or_default();
+                let shared = pids.iter().any(|pid| {
+                    tab_pids.iter().any(|(other, list)| *other != tab.id && list.contains(pid))
+                });
+                in_tabs.extend(&pids);
+                let bytes: u64 = pids.iter().map(|pid| memory.get(pid).copied().unwrap_or(0)).sum();
+                let state = if tab.id == self.active {
+                    "active"
+                } else if tab.webview.is_none() {
+                    if tab.url.is_empty() { "start" } else { "unloaded" }
+                } else if tab.sleeping {
+                    "sleeping"
+                } else {
+                    "loaded"
+                };
+                json!({
+                    "id": tab.id,
+                    "title": tab.title,
+                    "url": tab.url,
+                    "favicon": tab.favicon,
+                    "state": state,
+                    "memory": bytes,
+                    "shared": shared,
+                    "eco": pids.iter().any(|pid| self.eco.get(pid) == Some(&true)),
+                })
+            })
+            .collect();
+        in_tabs.sort_unstable();
+        in_tabs.dedup();
+        let tabs_total: u64 = in_tabs.iter().map(|pid| memory.get(pid).copied().unwrap_or(0)).sum();
+        let info = json!({
+            "rows": rows,
+            "total": total,
+            "other": total.saturating_sub(tabs_total),
+            "onBattery": self.on_battery,
+            "sleepLimit": self.sleep_limit(),
+        });
+        let _ = self.ui.evaluate_script(&format!("ui.showTasks({info})"));
+    }
+
+    /// Выгрузить вкладку вручную (из меню вкладки или диспетчера).
+    fn unload_tab(&mut self, id: u32) {
+        let downloading = self.downloads.iter().any(|d| d.state == "progress" || d.state == "paused");
+        if id == self.active || downloading {
+            return;
+        }
+        if let Some(tab) = self.tab_mut(id) {
+            if tab.webview.is_some() {
+                unload(tab);
+                self.dirty = true;
+            }
+        }
+    }
+
     /// Сведения для окошка по щелчку на замок: соединение, трекеры, cookie, масштаб.
     fn send_site_info(&self) {
         let Some(tab) = self.active_tab() else { return };
@@ -1767,15 +1921,31 @@ impl App {
         }
         if self.last_sleep_check.elapsed() >= SLEEP_CHECK {
             self.last_sleep_check = Instant::now();
+            let on_battery = efficiency::on_battery();
+            if on_battery != self.on_battery {
+                self.on_battery = on_battery;
+                self.dirty = true;
+            }
             self.sleep_background_tabs();
+            self.refresh_processes(false);
         }
     }
 
     /// Фоновые вкладки сначала засыпают (WebView2 замораживает страницу), а через
     /// втрое больший срок выгружаются целиком: процесс страницы закрывается и
     /// память возвращается системе. Выгруженная вкладка загрузится заново при открытии.
-    fn sleep_background_tabs(&mut self) {
+    /// Через сколько минут усыплять: от батареи с экономией — не дольше 5 минут.
+    fn sleep_limit(&self) -> u32 {
         let minutes = self.store.settings.sleep_minutes;
+        if self.on_battery && self.store.settings.battery_saver {
+            if minutes == 0 { 5 } else { minutes.min(5) }
+        } else {
+            minutes
+        }
+    }
+
+    fn sleep_background_tabs(&mut self) {
+        let minutes = self.sleep_limit();
         // Выгрузка отменила бы загрузку, поэтому пока что-то качается — только сон.
         let downloading = self.downloads.iter().any(|d| d.state == "progress" || d.state == "paused");
         for tab in &mut self.tabs {
@@ -1788,12 +1958,7 @@ impl App {
                     }
                     tab.sleeping = true;
                 }
-                Rest::Discard if !downloading => {
-                    tab.webview = None; // уничтожает webview и процесс страницы
-                    tab.restore_scroll = tab.scroll;
-                    tab.sleeping = true;
-                    tab.loading = false;
-                }
+                Rest::Discard if !downloading => unload(tab),
                 _ => continue,
             }
             self.dirty = true;
@@ -1850,6 +2015,8 @@ impl App {
                 "favbar": settings.favbar,
                 "sleepMinutes": settings.sleep_minutes,
                 "passwords": settings.passwords,
+                "efficiencyMode": settings.efficiency_mode,
+                "batterySaver": settings.battery_saver,
                 "downloadDir": settings.download_dir,
                 "defaultDownloadDir": default_download_dir(),
                 "wallpaper": settings.wallpaper,
@@ -1859,6 +2026,7 @@ impl App {
             },
             "ubolId": self.ubol_id,
             "isDefault": self.is_default,
+            "onBattery": self.on_battery,
             "importSources": self.import_sources,
             "dark": self.dark(),
             "maximized": self.maximized,
@@ -1878,6 +2046,15 @@ impl App {
         }
         let _ = self.ui.evaluate_script(&format!("ui.setState({state})"));
     }
+}
+
+/// Выгружает вкладку: webview и процесс страницы уничтожаются, адрес остаётся;
+/// при открытии страница загрузится заново и вернётся к прежней прокрутке.
+fn unload(tab: &mut Tab) {
+    tab.webview = None;
+    tab.restore_scroll = tab.scroll;
+    tab.sleeping = true;
+    tab.loading = false;
 }
 
 #[derive(Debug, PartialEq)]

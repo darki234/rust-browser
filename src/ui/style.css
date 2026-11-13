@@ -1070,6 +1070,22 @@ body.inprivate #privatenote { display: flex; }
 .row.dl.canceled .fileicon, .row.dl.canceled .meta { color: var(--muted); }
 .row.dl.running .acts { opacity: 1; }
 
+/* диспетчер вкладок */
+.tasksum { display: flex; flex-wrap: wrap; gap: 10px; margin: 4px 10px 12px; }
+.tasksum > div { flex: 1 1 140px; padding: 12px 16px; border-radius: 14px; background: var(--surface-2); border: 1px solid var(--border); }
+.tasksum b { display: block; font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.tasksum small { color: var(--muted); font-size: 12px; }
+.tasksum .battery { flex-basis: 100%; display: flex; align-items: center; gap: 8px; color: var(--gold); font-size: 12.5px; padding: 8px 14px; }
+.row.task .t { flex: 1 1 0; }
+.row.task .state { flex: none; padding: 2px 9px; border-radius: 10px; font-size: 11.5px; background: var(--hover); color: var(--muted); display: inline-flex; align-items: center; gap: 4px; }
+.row.task .s-active { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+.row.task .s-loaded { color: var(--text); }
+.row.task .s-eco { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
+.row.task .mem { flex: none; width: 78px; text-align: right; font-variant-numeric: tabular-nums; color: var(--text); }
+.row.task .acts { opacity: 1; width: 36px; }
+.row.task .spacer { display: block; width: 34px; }
+.tasknote { padding: 10px 14px; color: var(--muted); font-size: 12px; }
+
 /* окошко сведений о сайте */
 #siteicon { width: 26px; height: 26px; margin-left: -6px; border-radius: 13px; cursor: pointer; transition: background .15s; }
 #siteicon:hover { background: var(--press); }
