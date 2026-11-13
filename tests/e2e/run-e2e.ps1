@@ -2,7 +2,7 @@
 #   powershell -ExecutionPolicy Bypass -File tests\e2e\run-e2e.ps1 [-Release]
 # Собирает браузер, запускает отдельную тестовую копию (своя папка данных, окно за
 # пределами экрана, чтобы не мешать), прогоняет e2e.mjs и всё за собой убирает.
-param([switch]$Release)
+param([switch]$Release, [int]$Port = 9333)
 
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -20,7 +20,7 @@ $data = Join-Path $env:TEMP ("rust-browser-e2e-" + [guid]::NewGuid().ToString('N
 New-Item -ItemType Directory $data | Out-Null
 '{"restore_session":false}' | Set-Content "$data\settings.json" -Encoding Ascii
 $env:RUST_BROWSER_DATA = $data
-$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9333 --disable-features=CalculateNativeWinOcclusion'
+$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=$Port --disable-features=CalculateNativeWinOcclusion"
 
 Add-Type @'
 using System; using System.Text; using System.Runtime.InteropServices;
@@ -44,7 +44,7 @@ try {
     [void][E2EWin]::SetWindowPos($hwnd, [IntPtr]1, -6000, 100, 1400, 900, 0x0010)
 
     $fixture = ([Uri](Resolve-Path "$here\fixture\index.html").Path).AbsoluteUri
-    node "$here\e2e.mjs" 9333 $fixture $exe
+    node "$here\e2e.mjs" $Port $fixture $exe
     $code = $LASTEXITCODE
 }
 finally {
