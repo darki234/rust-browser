@@ -706,6 +706,13 @@ pub fn unique_path(path: &Path) -> PathBuf {
 
 // ---------- навигация, сон, снимок ----------
 
+/// Процесс движка WebView2, общий для всех webview профиля.
+pub fn browser_pid(webview: &WebView) -> Option<u32> {
+    let mut pid = 0u32;
+    unsafe { webview.webview().BrowserProcessId(&mut pid).ok()? };
+    (pid != 0).then_some(pid)
+}
+
 /// (можно назад, можно вперёд)
 pub fn nav_state(webview: &WebView) -> (bool, bool) {
     let core = webview.webview();

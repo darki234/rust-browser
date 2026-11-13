@@ -1645,6 +1645,24 @@ function ubolButton() {
   return button;
 }
 
+function proxyCard() {
+  let mode = S.settings.proxyMode || 'off';
+  const modeSeg = segmented([['off', 'Без прокси'], ['http', 'HTTP'], ['socks5', 'SOCKS5']],
+    () => mode, (value) => { mode = value; settingsUpdaters.forEach((u) => u()); });
+  const host = h('input', { type: 'text', class: 'field', placeholder: '127.0.0.1', spellcheck: 'false', value: S.settings.proxyHost || '' });
+  const port = h('input', { type: 'number', class: 'field port', placeholder: '1080', min: 1, max: 65535, value: S.settings.proxyPort || '' });
+  const apply = h('button', {
+    class: 'text-btn primary',
+    onclick: () => send('set_proxy', { mode, host: host.value, port: Number(port.value) || 0 }),
+  }, 'Применить и перезапустить');
+  const addressRow = setting('Адрес прокси', 'Логин и пароль прокси не поддерживаются', host, port);
+  settingsUpdaters.push(() => { addressRow.style.display = mode === 'off' ? 'none' : ''; });
+  return h('div', { class: 'card' }, h('h2', {}, 'Сеть'),
+    setting('Прокси', 'Весь трафик браузера пойдёт через этот сервер. Нужен перезапуск — вкладки вернутся сами; другие окна браузера закройте', modeSeg),
+    addressRow,
+    h('div', { class: 'set' }, h('div', { class: 'label' }), h('div', { class: 'controls' }, apply)));
+}
+
 function importCard() {
   const sources = S.importSources || [];
   if (!sources.length) return null;
@@ -1696,6 +1714,7 @@ function settingsPage() {
       wallpaperSetting()),
 
     importCard(),
+    proxyCard(),
 
     h('div', { class: 'card' }, h('h2', {}, 'Поиск'),
       setting('Поисковая система', 'Для адресной строки и строки поиска на новой вкладке',
@@ -1917,6 +1936,7 @@ window.ui = {
   pasteText,
   showSiteInfo,
   showTasks,
+  proxyInvalid: () => toast('Проверьте адрес и порт прокси'),
   cookiesCleared: (count) => { closeMenu(); toast(`Удалено файлов cookie: ${count}`); },
   imported: (count) => toast(count ? `Перенесено в избранное: ${count}` : 'Новых сайтов для избранного не нашлось'),
 };

@@ -817,6 +817,18 @@ body[data-wall="image"] #wallbtn { color: #fff; background: rgba(0, 0, 0, .3); b
 .w-photo i[style*="url"] + span { color: #fff; text-shadow: 0 1px 4px rgba(0, 0, 0, .5); }
 
 .range { width: 160px; accent-color: var(--accent); }
+.field {
+  height: 32px;
+  width: 190px;
+  padding: 0 12px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  outline: none;
+  transition: border-color .15s, box-shadow .2s;
+}
+.field.port { width: 90px; }
+.field:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent); }
 
 .start-inner {
   position: relative;

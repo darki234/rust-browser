@@ -260,6 +260,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let inprivate = args.iter().any(|arg| arg == "--inprivate");
     let new_window = args.iter().any(|arg| arg == "--new-window");
+    // перезапуск: сначала дождаться, пока прежний процесс закроется
+    if let Some(list) = args.iter().find_map(|a| a.strip_prefix("--wait-pid=")) {
+        for pid in list.split(',').filter_map(|p| p.parse::<u32>().ok()) {
+            system::wait_for_exit(pid, Duration::from_secs(15));
+        }
+    }
     let urls: Vec<String> = args
         .iter()
         .filter(|arg| !arg.starts_with("--"))
@@ -307,7 +313,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // переносить и запускать откуда угодно. У InPrivate профиль отдельный.
     let profile = if inprivate { "WebView2-InPrivate" } else { "WebView2" };
     let mut web_context = WebContext::new(Some(data_dir().join(profile)));
-    let ui = build_ui(&window, proxy.clone(), &mut web_context, keys.clone(), inprivate, dark)?;
+    let network = proxy_config(&store.settings);
+    let ui = build_ui(&window, proxy.clone(), &mut web_context, keys.clone(), inprivate, dark, network.clone())?;
 
     let mut app = App {
         adblock: Arc::new(AtomicBool::new(store.settings.adblock)),
@@ -467,6 +474,7 @@ fn build_ui(
     keys: Arc<KeyState>,
     inprivate: bool,
     dark: bool,
+    network: Option<wry::ProxyConfig>,
 ) -> wry::Result<WebView> {
     let html = include_str!("ui/index.html")
         .replace("/*__CSS__*/", include_str!("ui/style.css"))
@@ -497,6 +505,8 @@ fn build_ui(
         .with_hotkeys_zoom(false)
         // Расширения включаются на уровне всего профиля: у всех webview одинаково.
         .with_browser_extensions_enabled(true)
+        // прокси задаётся на весь движок сразу — у всех webview одинаково
+        .with_network(network)
         // Интерфейс не должен уходить на сайты, например от перетаскивания ссылки.
         .with_navigation_handler(|url| !url.starts_with("http"))
         .with_ipc_handler(move |request: Request<String>| {
@@ -519,6 +529,7 @@ fn build_tab(app: &mut App, id: u32, bounds: Rect) -> wry::Result<WebView> {
         .with_background_color(background)
         .with_incognito(app.inprivate)
         .with_browser_extensions_enabled(true)
+        .with_network(proxy_config(&app.store.settings))
         .with_devtools(true)
         .with_theme(theme)
         .with_navigation_handler(move |url| {
@@ -1579,6 +1590,29 @@ impl App {
                 self.dirty = true;
                 let _ = self.ui.evaluate_script(&format!("ui.imported({added})"));
             }
+            "set_proxy" => {
+                let mode = text("mode");
+                let host = text("host").trim().to_string();
+                let port = number("port");
+                let valid = match mode.as_str() {
+                    "off" => true,
+                    "http" | "socks5" => valid_proxy_host(&host) && (1..=65535).contains(&port),
+                    _ => false,
+                };
+                if !valid {
+                    let _ = self.ui.evaluate_script("ui.proxyInvalid()");
+                    return;
+                }
+                let settings = &mut self.store.settings;
+                settings.proxy_mode = mode;
+                settings.proxy_host = host;
+                settings.proxy_port = port as u16;
+                self.store.save_settings();
+                // прокси меняется только при запуске движка — перезапускаемся, вкладки вернутся
+                self.save_session();
+                system::restart(platform::browser_pid(&self.ui));
+                self.quit = true;
+            }
             "make_default" => {
                 if system::register() {
                     system::open_default_apps_settings();
@@ -2100,6 +2134,9 @@ impl App {
                 "barStyle": settings.bar_style,
                 "newtabLayout": settings.newtab_layout,
                 "wallpaperAlways": settings.wallpaper_always,
+                "proxyMode": settings.proxy_mode,
+                "proxyHost": settings.proxy_host,
+                "proxyPort": settings.proxy_port,
                 "downloadDir": settings.download_dir,
                 "defaultDownloadDir": default_download_dir(),
                 "wallpaper": settings.wallpaper,
@@ -2170,6 +2207,43 @@ fn rest_action(
     } else {
         Rest::Keep
     }
+}
+
+/// Прокси в цепочке настройки webview: без прокси — ничего не меняем.
+trait WithNetwork {
+    fn with_network(self, config: Option<wry::ProxyConfig>) -> Self;
+}
+
+impl WithNetwork for WebViewBuilder<'_> {
+    fn with_network(self, config: Option<wry::ProxyConfig>) -> Self {
+        match config {
+            Some(config) => self.with_proxy_config(config),
+            None => self,
+        }
+    }
+}
+
+/// Прокси из настроек для движка (None — без прокси).
+fn proxy_config(settings: &store::Settings) -> Option<wry::ProxyConfig> {
+    if !valid_proxy_host(&settings.proxy_host) || settings.proxy_port == 0 {
+        return None;
+    }
+    let endpoint = wry::ProxyEndpoint {
+        host: settings.proxy_host.clone(),
+        port: settings.proxy_port.to_string(),
+    };
+    match settings.proxy_mode.as_str() {
+        "http" => Some(wry::ProxyConfig::Http(endpoint)),
+        "socks5" => Some(wry::ProxyConfig::Socks5(endpoint)),
+        _ => None,
+    }
+}
+
+/// Адрес прокси: имя или IP без пробелов, схем и путей — он попадает в строку запуска движка.
+fn valid_proxy_host(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= 253
+        && host.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '[' | ']'))
 }
 
 /// "#rrggbb" — шесть шестнадцатеричных цифр после решётки.
@@ -2398,6 +2472,23 @@ mod tests {
         assert_eq!(parse_range(Some("items=0-1"), 100), None);
         assert_eq!(parse_range(None, 100), None);
         assert_eq!(parse_range(Some("bytes=5-1"), 100), None);
+    }
+
+    #[test]
+    fn proxy_settings_are_validated() {
+        assert!(valid_proxy_host("127.0.0.1"));
+        assert!(valid_proxy_host("proxy.example.com"));
+        assert!(!valid_proxy_host(""));
+        assert!(!valid_proxy_host("evil --flag"));
+        assert!(!valid_proxy_host("http://a"));
+        let mut settings = store::Settings::default();
+        assert!(proxy_config(&settings).is_none());
+        settings.proxy_mode = "socks5".into();
+        settings.proxy_host = "127.0.0.1".into();
+        settings.proxy_port = 1080;
+        assert!(matches!(proxy_config(&settings), Some(wry::ProxyConfig::Socks5(_))));
+        settings.proxy_port = 0;
+        assert!(proxy_config(&settings).is_none());
     }
 
     #[test]

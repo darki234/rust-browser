@@ -125,6 +125,33 @@ pub fn serve(pipe: &str, on_message: impl Fn(Vec<String>) + Send + 'static) -> b
     true
 }
 
+/// Ждёт, пока процесс завершится (не дольше `timeout`). Нужно при перезапуске:
+/// новый процесс должен стартовать, когда старый уже освободил профиль.
+pub fn wait_for_exit(pid: u32, timeout: Duration) {
+    use windows::Win32::{
+        Foundation::CloseHandle,
+        System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE},
+    };
+    unsafe {
+        if let Ok(process) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
+            let _ = WaitForSingleObject(process, timeout.as_millis() as u32);
+            let _ = CloseHandle(process);
+        }
+    }
+}
+
+/// Перезапуск браузера: новый процесс дождётся завершения этого и его движка
+/// WebView2 (он закрывается на секунду-две позже). Иначе новый процесс подхватил
+/// бы ещё живой движок со старыми настройками — например, с прежним прокси.
+pub fn restart(engine_pid: Option<u32>) {
+    let mut pids = vec![std::process::id()];
+    pids.extend(engine_pid);
+    let list: Vec<String> = pids.iter().map(u32::to_string).collect();
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = Command::new(exe).arg(format!("--wait-pid={}", list.join(","))).spawn();
+    }
+}
+
 /// Новое обычное окно — отдельный процесс с тем же профилем.
 pub fn open_new_window(urls: &[String]) {
     if let Ok(exe) = std::env::current_exe() {

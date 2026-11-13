@@ -60,6 +60,10 @@ pub struct Settings {
     pub newtab_layout: String,
     /// Живые обои двигаются всё время, а не только пока человек что-то делает.
     pub wallpaper_always: bool,
+    /// "off" | "http" | "socks5"
+    pub proxy_mode: String,
+    pub proxy_host: String,
+    pub proxy_port: u16,
     /// Обои новой вкладки: имя готового варианта или "image" — своё фото.
     pub wallpaper: String,
     /// Затемнение своего фото, 0–85 %, чтобы текст на нём читался.
@@ -90,6 +94,9 @@ impl Default for Settings {
             bar_style: "classic".to_string(),
             newtab_layout: "clock".to_string(),
             wallpaper_always: false,
+            proxy_mode: "off".to_string(),
+            proxy_host: String::new(),
+            proxy_port: 0,
             wallpaper: "aurora".to_string(),
             wallpaper_dim: 35,
             wallpaper_version: 0,
