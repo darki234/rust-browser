@@ -12,6 +12,7 @@ mod webstore;
 mod sync;
 mod icons;
 mod autofill;
+mod installer;
 mod store;
 mod system;
 
@@ -149,6 +150,8 @@ pub enum UserEvent {
     CardVerified(usize, passwords::Verdict),
     /// Щелчок внутри вкладки — при разделённом экране она становится активной.
     PageFocused(u32),
+    /// Найдена и поставлена новая версия браузера (или ошибка).
+    Updated(Result<bool, String>),
     /// Упал весь движок WebView2 — перезапуск браузера.
     EngineCrashed,
     /// Язык открытой страницы (lang у html).
@@ -329,6 +332,9 @@ struct App {
     split_drag: bool,
     /// Последнее положение мыши в окне (физические пиксели) — для разделителя.
     cursor: (f64, f64),
+    /// Обновление: поставлено, ждёт перезапуска; когда проверяли.
+    update_ready: bool,
+    last_update_check: Instant,
     /// Адреса и карты для автозаполнения (на диске — под DPAPI).
     autofill: autofill::Profile,
     /// Результат проверки паролей (по номерам в хранилище) и идёт ли проверка.
@@ -394,6 +400,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let inprivate = args.iter().any(|arg| arg == "--inprivate");
     let new_window = args.iter().any(|arg| arg == "--new-window");
+    // «Параметры → Приложения → Удалить»
+    if args.iter().any(|arg| arg == "--uninstall") {
+        installer::uninstall();
+        return Ok(());
+    }
+    installer::cleanup_old();
     // перезапуск: сначала дождаться, пока прежний процесс закроется
     if let Some(list) = args.iter().find_map(|a| a.strip_prefix("--wait-pid=")) {
         for pid in list.split(',').filter_map(|p| p.parse::<u32>().ok()) {
@@ -490,6 +502,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ext_browsers: Vec::new(),
         ext_quiet: Default::default(),
         prewarm: None,
+        update_ready: false,
+        last_update_check: Instant::now() - Duration::from_secs(3600) + Duration::from_secs(20),
         groups: Vec::new(),
         split: None,
         split_drag: false,
@@ -1538,6 +1552,19 @@ impl App {
                     self.update_title();
                 }
             }
+            UserEvent::Updated(result) => {
+                match result {
+                    Ok(true) => {
+                        self.update_ready = true;
+                        let _ = self.ui.evaluate_script("ui.updateReady()");
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        let _ = self.ui.evaluate_script(&format!("ui.toast({:?})", format!("Обновление не удалось: {error}")));
+                    }
+                }
+                self.dirty = true;
+            }
             UserEvent::EngineCrashed => {
                 // движок упал целиком: все вкладки мертвы — перезапускаемся, сеанс восстановится
                 self.save_session();
@@ -2046,6 +2073,7 @@ impl App {
                 }
             }
             "island_tabs" => settings.island_tabs = value.as_bool().unwrap_or(settings.island_tabs),
+            "auto_update" => settings.auto_update = value.as_bool().unwrap_or(settings.auto_update),
             "dark_all" => {
                 settings.dark_all = value.as_bool().unwrap_or(settings.dark_all);
                 self.store.save_settings();
@@ -2470,6 +2498,43 @@ impl App {
                 let gid = number("group") as u32;
                 let ids: Vec<u32> = self.tabs.iter().filter(|t| t.group == gid).map(|t| t.id).collect();
                 self.close_many(ids);
+            }
+            "install" => {
+                let walls = live_walls().0.clone();
+                match installer::install(Some(&walls)) {
+                    Ok(path) => {
+                        if self.store.settings.update_source.is_empty() {
+                            self.store.settings.update_source = installer::current_exe().to_string_lossy().to_string();
+                            self.store.save_settings();
+                        }
+                        let _ = self.ui.evaluate_script("ui.toast('Установлено: Rust Browser есть в «Пуске» и на рабочем столе. Запускаю установленную копию')");
+                        // переезжаем в установленную копию
+                        self.save_session();
+                        self.store.save_all();
+                        let _ = std::process::Command::new(&path).arg(format!("--wait-pid={}", std::process::id())).spawn();
+                        self.quit = true;
+                    }
+                    Err(error) => {
+                        let _ = self.ui.evaluate_script(&format!("ui.toast({:?})", format!("Установка не удалась: {error}")));
+                    }
+                }
+            }
+            "check_update" => self.check_update(true),
+            "__toast_latest" => {
+                let _ = self.ui.evaluate_script("ui.toast('У вас последняя версия')");
+            }
+            "restart_update" => {
+                self.save_session();
+                self.store.save_all();
+                system::restart(None);
+                self.quit = true;
+            }
+            "pick_update_source" => {
+                if let Some(path) = platform::pick_file(self.window.hwnd(), "Сборка Rust Browser", "*.exe") {
+                    self.store.settings.update_source = path;
+                    self.store.save_settings();
+                    self.dirty = true;
+                }
             }
             "my_button" => {
                 // уже открыт этот сайт — переключаемся на его вкладку, иначе открываем новую
@@ -2952,6 +3017,10 @@ impl App {
         if self.last_sleep_check.elapsed() >= SLEEP_CHECK {
             self.last_sleep_check = Instant::now();
             self.sync_tick();
+            // обновления — раз в час, первая проверка через 20 секунд после запуска
+            if self.store.settings.auto_update && self.primary && self.last_update_check.elapsed() > Duration::from_secs(3600) {
+                self.check_update(false);
+            }
             let on_battery = efficiency::on_battery();
             if on_battery != self.on_battery {
                 self.on_battery = on_battery;
@@ -3058,6 +3127,8 @@ impl App {
                 "islandRadius": settings.island_radius,
                 "islandTabs": settings.island_tabs,
                 "darkAll": settings.dark_all,
+                "autoUpdate": settings.auto_update,
+                "updateSource": settings.update_source,
                 "darkSites": settings.dark_sites,
                 "buttons": settings.buttons,
                 "splash": settings.splash,
@@ -3097,6 +3168,14 @@ impl App {
             "groups": self.groups,
             "split": self.split.map(|(l, r, ratio)| json!({ "left": l, "right": r, "ratio": ratio })),
             "account": self.account_state(),
+            "install": json!({
+                "installed": installer::is_installed(),
+                "isInstalledCopy": installer::is_installed_copy(),
+                "dir": installer::install_dir().display().to_string(),
+                "exe": installer::current_exe().display().to_string(),
+                "updateReady": self.update_ready,
+                "version": env!("CARGO_PKG_VERSION"),
+            }),
             "extBrowsers": self.ext_browsers,
             "dark": self.dark(),
             "maximized": self.maximized,
@@ -3119,6 +3198,32 @@ impl App {
 }
 
 impl App {
+    // ---------- обновления ----------
+
+    /// Источник обновлений: выбранный exe или тот, из которого установили браузер.
+    fn check_update(&mut self, manual: bool) {
+        self.last_update_check = Instant::now();
+        let source = PathBuf::from(&self.store.settings.update_source);
+        if self.store.settings.update_source.is_empty() || !source.is_file() {
+            if manual {
+                let _ = self.ui.evaluate_script("ui.toast('Источник обновлений не выбран — укажите файл новой сборки')");
+            }
+            return;
+        }
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let result = if installer::update_available(&source) {
+                installer::apply_update(&source).map(|()| true)
+            } else {
+                Ok(false)
+            };
+            if manual && matches!(result, Ok(false)) {
+                let _ = proxy.send_event(UserEvent::Ui(r#"{"cmd":"__toast_latest"}"#.into()));
+            }
+            let _ = proxy.send_event(UserEvent::Updated(result));
+        });
+    }
+
     // ---------- группы вкладок и разделённый экран ----------
 
     /// Какие вкладки видны, если активна эта: она сама или обе половины разделённого экрана.
@@ -3883,10 +3988,11 @@ const SCROLL_SCRIPT: &str = r#"(() => {
 })();"#;
 
 /// Поля параметров, которые относятся к этому компьютеру и не синхронизируются.
-const LOCAL_SETTINGS: [&str; 10] = [
+const LOCAL_SETTINGS: [&str; 12] = [
     "download_dir", "proxy_mode", "proxy_host", "proxy_port", "sidebar_open",
     "wallpaper_version", "ubol_version", "blocked_total", "battery_saver",
     "history_cleared", // едет вместе с журналом
+    "auto_update", "update_source",
 ];
 const SYNC_EVERY: Duration = Duration::from_secs(5 * 60);
 

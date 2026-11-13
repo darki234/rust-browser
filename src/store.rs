@@ -67,6 +67,9 @@ pub struct Settings {
     /// Тёмная тема для сайтов: список сайтов и «для всех».
     pub dark_sites: Vec<String>,
     pub dark_all: bool,
+    /// Обновляться самому и откуда брать новые сборки.
+    pub auto_update: bool,
+    pub update_source: String,
     /// Свои кнопки на панели: сайт одним нажатием.
     pub buttons: Vec<CustomButton>,
     /// Когда журнал очищали (секунды Unix) — чтобы очистка дошла до других компьютеров.
@@ -121,6 +124,8 @@ impl Default for Settings {
             island_tabs: false,
             dark_sites: Vec::new(),
             dark_all: false,
+            auto_update: true,
+            update_source: String::new(),
             buttons: Vec::new(),
             history_cleared: 0,
             splash: "compass".to_string(),
@@ -699,8 +704,9 @@ mod tests {
         store.settings.theme = "dark".into();
         store.save_all();
         let session = Session {
-            tabs: vec![SessionTab { url: "https://a.com/".into(), title: "A".into(), pinned: true }],
+            tabs: vec![SessionTab { url: "https://a.com/".into(), title: "A".into(), pinned: true, group: 1 }],
             active: 0,
+            groups: vec![TabGroup { id: 1, name: "Работа".into(), color: "blue".into(), collapsed: true }],
         };
         store.save_session(&session);
 

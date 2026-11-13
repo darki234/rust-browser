@@ -22,8 +22,9 @@ use windows::{
                 PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
             },
             Registry::{
-                RegCloseKey, RegCreateKeyExW, RegGetValueW, RegSetValueExW, HKEY,
-                HKEY_CURRENT_USER, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_DWORD, RRF_RT_REG_SZ,
+                RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegGetValueW, RegSetValueExW, HKEY,
+                HKEY_CURRENT_USER, KEY_WRITE, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_DWORD,
+                RRF_RT_REG_SZ,
             },
         },
         UI::{
@@ -185,6 +186,45 @@ fn set_value(path: &str, name: Option<&str>, value: &str) -> bool {
         let written = RegSetValueExW(key, name_ptr, None, REG_SZ, Some(bytes));
         let _ = RegCloseKey(key);
         written == ERROR_SUCCESS
+    }
+}
+
+pub fn set_string(path: &str, name: Option<&str>, value: &str) -> bool {
+    set_value(path, name, value)
+}
+
+pub fn set_dword(path: &str, name: &str, value: u32) -> bool {
+    unsafe {
+        let mut key = HKEY::default();
+        if RegCreateKeyExW(HKEY_CURRENT_USER, &HSTRING::from(path), None, PCWSTR::null(), REG_OPTION_NON_VOLATILE, KEY_WRITE, None, &mut key, None)
+            != ERROR_SUCCESS
+        {
+            return false;
+        }
+        let written = RegSetValueExW(key, &HSTRING::from(name), None, REG_DWORD, Some(&value.to_le_bytes()));
+        let _ = RegCloseKey(key);
+        written == ERROR_SUCCESS
+    }
+}
+
+pub fn delete_key(path: &str) {
+    unsafe {
+        let _ = RegDeleteTreeW(HKEY_CURRENT_USER, &HSTRING::from(path));
+    }
+}
+
+/// Снимает регистрацию браузера в Windows (при удалении).
+pub fn unregister() {
+    for path in [format!(r"Software\Classes\{URL_PROGID}"), format!(r"Software\Classes\{HTML_PROGID}"), APP_KEY.to_string()] {
+        delete_key(&path);
+    }
+    delete_key_value(r"Software\RegisteredApplications", DISPLAY_NAME);
+}
+
+fn delete_key_value(path: &str, name: &str) {
+    use windows::Win32::System::Registry::RegDeleteKeyValueW;
+    unsafe {
+        let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, &HSTRING::from(path), &HSTRING::from(name));
     }
 }
 

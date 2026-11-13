@@ -306,6 +306,7 @@ function setState(next) {
   renderMyButtons();
   renderAutofillButton();
   renderSplitButton();
+  el.menubtn.classList.toggle('dot', !!S.install?.updateReady);
   if (hubSection && hubSection !== 'history') renderHubList(false);
   if (menuKind === 'main') refreshMainMenu();
 }
@@ -1359,8 +1360,9 @@ function mainMenuNodes() {
       onClick: () => send('set', { key: 'favbar', value: !S.settings.favbar }) }),
     item({ icon: 'code', label: 'Инструменты разработчика', kb: 'F12', disabled: !page, onClick: () => send('devtools') }),
     sep(),
+    S.install?.updateReady && item({ icon: 'reload', label: 'Перезапустить и обновиться', onClick: () => send('restart_update') }),
     item({ icon: 'gear', label: 'Параметры', onClick: () => openHub('settings') }),
-  ];
+  ].filter(Boolean);
 }
 
 function openMainMenu() {
@@ -1987,6 +1989,7 @@ const SETTINGS_CATS = [
         segmented([[true, 'Вкладки прошлого сеанса'], [false, 'Новую вкладку']],
           () => S.settings.restoreSession, (value) => set('restore_session', value)))),
     importCard(),
+    installCard(),
   ]],
   ['keys', 'Клавиши', () => [
     h('div', { class: 'card' }, h('h2', {}, 'Сочетания клавиш'),
@@ -2200,6 +2203,7 @@ window.ui = {
   dataCleared: () => toast('Данные сайтов удалены'),
   toast,
   passwordOffer,
+  updateReady,
   groupCreated,
   pageScroll,
   iconsUpdated: () => { iconsVersion++; tilesKey = null; renderStart(); },
@@ -2859,6 +2863,40 @@ function renderSplitButton() {
   const inSplit = !!S.split && (S.split.left === S.active || S.split.right === S.active);
   $('#splitbtn').classList.toggle('on', inSplit);
   $('#splitbtn').title = inSplit ? 'Убрать разделение экрана' : 'Разделить экран: эта вкладка и предыдущая рядом';
+}
+
+
+// ---------- установка и обновления ----------
+
+function installCard() {
+  const status = h('small', {});
+  const installBtn = h('button', { class: 'text-btn primary', onclick: () => send('install') }, 'Установить в систему');
+  const ready = h('div', { class: 'upd-ready' }, icon('check', 16), h('span', {}, 'Новая версия уже установлена — перезапустите браузер, вкладки вернутся'),
+    h('button', { class: 'text-btn primary', onclick: () => send('restart_update') }, 'Перезапустить'));
+  const source = h('small', {});
+  settingsUpdaters.push(() => {
+    const i = S.install || {};
+    status.textContent = i.isInstalledCopy
+      ? `Установлен в ${i.dir} · версия ${i.version}`
+      : i.installed ? `Есть установленная копия в ${i.dir}, а эта запущена из ${i.exe}` : `Запущен из ${i.exe} · версия ${i.version}`;
+    installBtn.style.display = i.isInstalledCopy ? 'none' : '';
+    installBtn.textContent = i.installed ? 'Обновить установленную копию' : 'Установить в систему';
+    ready.style.display = i.updateReady ? '' : 'none';
+    source.textContent = S.settings.updateSource ? `Новые сборки берутся из ${S.settings.updateSource}` : 'Источник не выбран: укажите exe новой сборки (например, из папки проекта)';
+  });
+  return h('div', { class: 'card' }, h('h2', {}, 'Установка и обновления'),
+    h('div', { class: 'set' }, h('div', { class: 'label' }, 'Rust Browser', status), h('div', { class: 'controls' }, installBtn)),
+    ready,
+    setting('Обновляться автоматически', 'Раз в час браузер проверяет источник и сам ставит новую версию — без закрытия, она начнёт работать со следующего запуска',
+      toggle(() => S.settings.autoUpdate, (value) => set('auto_update', value))),
+    h('div', { class: 'set' }, h('div', { class: 'label' }, 'Источник обновлений', source),
+      h('div', { class: 'controls' },
+        h('button', { class: 'text-btn outline', onclick: () => send('pick_update_source') }, 'Выбрать файл'),
+        h('button', { class: 'text-btn outline', onclick: () => send('check_update') }, 'Проверить сейчас'))));
+}
+
+function updateReady() {
+  toast('Новая версия установлена — перезапустите браузер, когда будет удобно');
 }
 
 // ---------- заставка запуска ----------

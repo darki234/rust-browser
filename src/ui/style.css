@@ -2033,3 +2033,9 @@ body:is(.bar-compact, .bar-floating, .bar-island, .bar-vertical) .gchip { margin
 /* разделённый экран: обе вкладки пары подсвечены */
 .tab.in-split .bg { opacity: 1; box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 55%, transparent); }
 #splitbtn.on { color: var(--accent); }
+
+.upd-ready { display: flex; align-items: center; gap: 10px; margin: 0 18px 12px; padding: 10px 12px; border-radius: 12px; background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--text); }
+.upd-ready span { flex: 1; }
+.upd-ready svg { color: var(--ok); }
+#menubtn.dot::after { content: ""; position: absolute; top: 7px; right: 7px; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 2px var(--toolbar); }
+#menubtn { position: relative; }
