@@ -969,7 +969,7 @@ impl App {
 
         // Сначала показываем новую вкладку и только потом прячем остальные: иначе
         // на миг не видно ни одной, и сквозь щель мелькает фон окна.
-        let visible = self.visible_with(self.active);
+        let mut visible = self.visible_with(self.active);
         match self.split_rects() {
             Some((left_rect, right_rect, left, right)) if visible.len() == 2 => {
                 for (id, bounds) in [(left, left_rect), (right, right_rect)] {
@@ -980,6 +980,8 @@ impl App {
                 }
             }
             _ => {
+                // на полном экране видна только активная половина: вторая не должна висеть поверх
+                visible = vec![self.active];
                 if let Some(webview) = self.active_webview() {
                     let _ = webview.set_bounds(self.page_rect());
                     let _ = webview.set_visible(true);
@@ -1182,10 +1184,14 @@ impl App {
             let id = self.next_id;
             self.next_id += 1;
             let mut tab = Tab::new(id, &saved.url, &saved.title, saved.pinned);
-            tab.group = saved.group;
+            // группа, которой нет в сеансе, позже совпала бы по номеру с новой группой
+            if session.groups.iter().any(|g| g.id == saved.group) {
+                tab.group = saved.group;
+            }
             self.tabs.push(tab);
         }
         self.groups = session.groups.clone();
+        self.prune_groups();
         // Загружается только активная вкладка, остальные — когда их откроют.
         let index = session.active.min(self.tabs.len() - 1);
         self.activate(self.tabs[index].id);
@@ -1200,7 +1206,8 @@ impl App {
         let session = Session {
             active: saved.iter().position(|t| t.id == self.active).unwrap_or(0),
             tabs: saved.iter().map(|t| t.snapshot()).collect(),
-            groups: self.groups.clone(),
+            // группа из одних пустых новых вкладок в сеанс не попадает
+            groups: self.groups.iter().filter(|g| saved.iter().any(|t| t.group == g.id)).cloned().collect(),
         };
         self.store.save_session(&session);
     }
@@ -1253,9 +1260,14 @@ impl App {
         drop(tab); // уничтожает webview вкладки
         self.dirty = true;
         self.session_dirty = true;
-        if self.split.is_some_and(|(l, r, _)| l == id || r == id) {
+        // вторая половина разделённого экрана: после закрытия этой остаётся на виду
+        let mut partner = None;
+        if let Some((l, r, _)) = self.split.filter(|(l, r, _)| *l == id || *r == id) {
+            partner = Some(if l == id { r } else { l });
             self.split = None;
-            self.layout();
+            if self.active != id {
+                self.layout(); // иначе раскладку обновит переход на другую вкладку ниже
+            }
         }
         self.prune_groups();
 
@@ -1264,12 +1276,28 @@ impl App {
             return;
         }
         if self.active == id {
-            let neighbour = index.min(self.tabs.len() - 1);
-            self.activate(self.tabs[neighbour].id);
+            match partner.filter(|p| self.tab(*p).is_some()) {
+                Some(partner) => self.activate(partner),
+                None => {
+                    let neighbour = index.min(self.tabs.len() - 1);
+                    self.activate(self.tabs[neighbour].id);
+                }
+            }
         }
     }
 
     fn close_many(&mut self, ids: Vec<u32>) {
+        // активную закрывают вместе с другими — сразу переходим на ту, что останется:
+        // иначе по очереди открывались бы (и грузились) обречённые соседки
+        if ids.contains(&self.active) {
+            let index = self.index_of(self.active).unwrap_or(0);
+            let staying = |i: &usize| self.tabs.get(*i).is_some_and(|t| !ids.contains(&t.id));
+            let partner = self.visible_with(self.active).into_iter().filter_map(|t| self.index_of(t)).find(staying);
+            let next = partner.or_else(|| (index + 1..self.tabs.len()).chain((0..index).rev()).find(staying));
+            if let Some(next) = next {
+                self.activate(self.tabs[next].id);
+            }
+        }
         for id in ids {
             self.close_tab(id);
         }
@@ -1359,10 +1387,19 @@ impl App {
     /// Перемещает вкладку, не смешивая закреплённые и обычные.
     fn move_tab(&mut self, id: u32, to: usize) {
         let Some(from) = self.index_of(id) else { return };
-        let tab = self.tabs.remove(from);
+        let mut tab = self.tabs.remove(from);
         let pinned = self.pinned_count();
         let to = if tab.pinned { to.min(pinned) } else { to.clamp(pinned, self.tabs.len()) };
+        if !tab.pinned {
+            // группа держится вместе: вкладка, унесённая из группы, выходит из неё,
+            // а брошенная внутрь чужой группы — вступает в неё
+            let neighbour = |i: Option<usize>| i.and_then(|i| self.tabs.get(i)).filter(|t| !t.pinned).map(|t| t.group);
+            let others = self.tabs.iter().any(|t| t.group == tab.group);
+            let group = group_after_move(neighbour(to.checked_sub(1)), neighbour(Some(to)), tab.group, others);
+            tab.group = group;
+        }
         self.tabs.insert(to, tab);
+        self.prune_groups();
         self.dirty = true;
         self.session_dirty = true;
     }
@@ -1386,13 +1423,24 @@ impl App {
             if let Some((new_id, _, webview)) = self.prewarm.take_if(|(_, address, _)| address == url) {
                 // у заранее созданной вкладки свой номер (её события не путались с новой
                 // вкладкой) — она просто встаёт на место новой вкладки
-                let mut tab = Tab::new(new_id, url, "", false);
+                // закрепление, группа и место в разделённом экране остаются за вкладкой
+                let old = &self.tabs[index];
+                let mut tab = Tab::new(new_id, url, "", old.pinned);
+                tab.group = old.group;
+                tab.opener = old.opener;
                 tab.url = webview.url().unwrap_or_else(|_| url.to_string());
                 tab.title = platform::document_title(&webview);
                 tab.webview = Some(webview);
                 self.tabs[index] = tab;
                 if self.active == id {
                     self.active = new_id;
+                }
+                if let Some((l, r, _)) = &mut self.split {
+                    for half in [l, r] {
+                        if *half == id {
+                            *half = new_id;
+                        }
+                    }
                 }
                 self.sync_location(new_id);
                 self.detect_language(new_id);
@@ -2501,11 +2549,10 @@ impl App {
                 self.start_split(self.active, other);
             }
             "unsplit" => {
+                let partner = self.visible_with(self.active).into_iter().find(|t| *t != self.active);
                 self.split = None;
-                if let Some(tab) = self.visible_with(self.active).into_iter().find(|t| *t != self.active) {
-                    if let Some(tab) = self.tab_mut(tab) {
-                        tab.hidden_since = Some(Instant::now());
-                    }
+                if let Some(partner) = partner {
+                    self.hide_tab(partner);
                 }
                 self.layout();
                 self.dirty = true;
@@ -2519,6 +2566,9 @@ impl App {
             }
             "group_new" => {
                 let id = number("id") as u32;
+                if self.tab(id).is_none() {
+                    return; // вкладку уже закрыли — пустая группа не нужна
+                }
                 let gid = self.groups.iter().map(|g| g.id).max().unwrap_or(0) + 1;
                 const COLORS: [&str; 8] = ["blue", "purple", "pink", "red", "orange", "yellow", "green", "cyan"];
                 let color = COLORS[(gid as usize - 1) % COLORS.len()].to_string();
@@ -2550,7 +2600,7 @@ impl App {
                 // свернули группу с активной вкладкой — переходим на вкладку вне группы
                 let collapsed = self.groups.iter().any(|g| g.id == gid && g.collapsed);
                 if collapsed && self.active_tab().is_some_and(|t| t.group == gid) {
-                    if let Some(next) = self.tabs.iter().find(|t| t.group != gid).map(|t| t.id) {
+                    if let Some(next) = self.tab_outside_collapsed(gid) {
                         self.activate(next);
                     }
                 }
@@ -3337,12 +3387,27 @@ impl App {
         if self.tab(right).is_none() || left == right {
             return;
         }
-        // правая вкладка могла быть выгружена — загружаем, но остаёмся на левой
-        if self.tab(right).is_some_and(|t| t.webview.is_none() && !t.url.is_empty()) {
-            self.activate(right);
+        // стартовая страница занимает всё окно и закрыла бы вторую половину
+        if [left, right].iter().any(|id| self.tab(*id).is_some_and(Tab::is_start)) {
+            let _ = self.ui.evaluate_script("ui.toast('Разделить экран можно только для вкладок с сайтами')");
+            return;
+        }
+        // правая вкладка могла быть выгружена — загрузим её, когда разделение уже на месте:
+        // если сделать её активной, фокус и адресная строка уедут в правую половину
+        let lazy = self.tab(right).filter(|t| t.webview.is_none() && !t.url.is_empty()).map(|t| t.url.clone());
+        // прежняя пара разделённого экрана: кто в новую не попал, уходит в фон
+        if let Some((l, r, _)) = self.split {
+            for old in [l, r] {
+                if old != left && old != right {
+                    self.hide_tab(old);
+                }
+            }
         }
         self.split = Some((left, right, 0.5));
         self.activate(left);
+        if let Some(url) = lazy {
+            self.navigate(right, &url); // фокус остаётся у активной левой половины
+        }
         if let Some(tab) = self.tab_mut(right) {
             tab.hidden_since = None;
             tab.sleeping = false;
@@ -3352,6 +3417,16 @@ impl App {
         }
         self.layout();
         self.dirty = true;
+    }
+
+    /// Вкладка ушла с экрана (но не через переключение): фоновый режим и отсчёт до сна.
+    fn hide_tab(&mut self, id: u32) {
+        if let Some(tab) = self.tab_mut(id) {
+            tab.hidden_since = Some(Instant::now());
+            if let Some(webview) = &tab.webview {
+                platform::set_background(webview, true);
+            }
+        }
     }
 
     /// Разделитель между половинами: курсор-стрелки над ним, перетаскивание меняет доли.
@@ -3411,6 +3486,14 @@ impl App {
         self.prune_groups();
         self.dirty = true;
         self.session_dirty = true;
+    }
+
+    /// Куда перейти, когда сворачивают группу с активной вкладкой.
+    fn tab_outside_collapsed(&self, gid: u32) -> Option<u32> {
+        let from = self.index_of(self.active)?;
+        let collapsed: Vec<u32> = self.groups.iter().filter(|g| g.collapsed).map(|g| g.id).collect();
+        let groups: Vec<u32> = self.tabs.iter().map(|t| t.group).collect();
+        nearest_outside(&groups, &collapsed, from, gid).map(|i| self.tabs[i].id)
     }
 
     /// Группы без вкладок исчезают сами.
@@ -4520,6 +4603,27 @@ fn unload(tab: &mut Tab) {
     tab.loading = false;
 }
 
+/// Ближайшая к `from` вкладка (сначала справа, потом слева) не из группы `leaving`
+/// и не из свёрнутых групп; если таких нет — любая не из `leaving`. `groups` — группа каждой вкладки.
+fn nearest_outside(groups: &[u32], collapsed: &[u32], from: usize, leaving: u32) -> Option<usize> {
+    let order = (from + 1..groups.len()).chain((0..from.min(groups.len())).rev());
+    let fits = |i: &usize| groups[*i] != leaving;
+    order.clone().filter(fits).find(|i| !collapsed.contains(&groups[*i])).or_else(|| order.filter(fits).next())
+}
+
+/// Группа вкладки после перетаскивания между соседями с группами `before` и `after`
+/// (None — края полосы). `others` — остались ли в её группе другие вкладки.
+fn group_after_move(before: Option<u32>, after: Option<u32>, own: u32, others: bool) -> u32 {
+    match (before, after) {
+        // между двумя вкладками одной группы — внутри неё
+        (Some(a), Some(b)) if a == b && a != 0 => a,
+        _ if own == 0 || !others => own,
+        // рядом с вкладкой своей группы — остаётся в ней
+        _ if before == Some(own) || after == Some(own) => own,
+        _ => 0,
+    }
+}
+
 #[derive(Debug, PartialEq)]
 enum Rest {
     Keep,
@@ -4996,5 +5100,34 @@ mod tests {
     fn zoom_levels_are_sorted() {
         assert!(ZOOM_LEVELS.windows(2).all(|pair| pair[0] < pair[1]));
         assert!(ZOOM_LEVELS.contains(&1.0));
+    }
+
+    #[test]
+    fn moved_tab_follows_group_bounds() {
+        // внутрь чужой группы — вступает в неё
+        assert_eq!(group_after_move(Some(2), Some(2), 0, false), 2);
+        assert_eq!(group_after_move(Some(2), Some(2), 1, true), 2);
+        // по-прежнему рядом со своей группой — остаётся
+        assert_eq!(group_after_move(Some(1), Some(0), 1, true), 1);
+        assert_eq!(group_after_move(None, Some(1), 1, true), 1);
+        // унесли от своей группы — выходит из неё
+        assert_eq!(group_after_move(Some(0), Some(0), 1, true), 0);
+        assert_eq!(group_after_move(Some(0), None, 1, true), 0);
+        // группа из одной вкладки переезжает вместе с ней
+        assert_eq!(group_after_move(Some(0), Some(0), 1, false), 1);
+        // на границе двух разных групп обычная вкладка остаётся без группы
+        assert_eq!(group_after_move(Some(1), Some(2), 0, false), 0);
+    }
+
+    #[test]
+    fn collapsing_group_moves_to_visible_tab() {
+        // вкладки: [гр.1, гр.1, гр.2 (свёрнута), без группы]; активна вторая
+        let groups = [1, 1, 2, 0];
+        assert_eq!(nearest_outside(&groups, &[1, 2], 1, 1), Some(3));
+        // справа видимых нет — берём слева
+        assert_eq!(nearest_outside(&[0, 1, 2], &[1, 2], 1, 1), Some(0));
+        // кроме свёрнутых групп ничего нет — хоть куда-то, но не в сворачиваемую
+        assert_eq!(nearest_outside(&[1, 2], &[1, 2], 0, 1), Some(1));
+        assert_eq!(nearest_outside(&[1, 1], &[1], 0, 1), None);
     }
 }
