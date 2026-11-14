@@ -82,6 +82,8 @@ pub struct Settings {
     pub process_limit: u32,
     /// Компактный режим: панели спрятаны в тонкую полоску сверху.
     pub compact: bool,
+    /// Свой вид сайтов: хост → шрифт, оттенок, скрытые элементы, CSS.
+    pub boosts: std::collections::BTreeMap<String, crate::boosts::Boost>,
     /// Свои сочетания клавиш.
     pub shortcuts: Vec<Shortcut>,
     pub update_source: String,
@@ -142,6 +144,7 @@ impl Default for Settings {
             auto_update: true,
             process_limit: 0,
             compact: false,
+            boosts: Default::default(),
             shortcuts: Vec::new(),
             update_source: String::new(),
             buttons: Vec::new(),

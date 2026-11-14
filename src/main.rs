@@ -13,6 +13,7 @@ mod sync;
 mod icons;
 mod autofill;
 mod installer;
+mod boosts;
 mod store;
 mod system;
 
@@ -218,6 +219,8 @@ struct Tab {
     dark_script: Arc<Mutex<Option<String>>>,
     /// Группа вкладки (0 — без группы).
     group: u32,
+    /// id скрипта «бустов» (свой вид сайтов) в этой вкладке.
+    boost_script: Arc<Mutex<Option<String>>>,
 }
 
 impl Tab {
@@ -248,6 +251,7 @@ impl Tab {
             af_card: false,
             af_address: false,
             group: 0,
+            boost_script: Default::default(),
         }
     }
 
@@ -854,6 +858,7 @@ fn build_tab(app: &mut App, id: u32, bounds: Rect) -> wry::Result<WebView> {
     platform::hook_downloads(&webview, app.download_dir.clone(), proxy);
     if let Some(tab) = app.tab(id) {
         platform::set_document_script(&webview, &tab.dark_script, Some(&dark_sites_script(&app.store.settings)));
+        platform::set_document_script(&webview, &tab.boost_script, Some(&boosts::script(&app.store.settings.boosts)));
     }
     // встроенное сохранение паролей WebView2 выключено: пароли хранит свой менеджер
     platform::set_passwords(&webview, false);
@@ -2419,6 +2424,39 @@ impl App {
                 self.store.save_settings();
                 self.apply_dark_sites();
             }
+            "boost_set" => {
+                let Some(host) = self.active_host() else { return };
+                let boost = self.store.settings.boosts.entry(host).or_default();
+                if let Some(font) = message["font"].as_str() {
+                    if font.is_empty() || boosts::FONTS.contains(&font) {
+                        boost.font = font.to_string();
+                    }
+                }
+                if let Some(tint) = message["tint"].as_str() {
+                    if tint.is_empty() || boosts::TINTS.contains(&tint) {
+                        boost.tint = tint.to_string();
+                    }
+                }
+                if let Some(css) = message["css"].as_str() {
+                    boost.css = boosts::clean_css(css);
+                }
+                if let Some(index) = message["unhide"].as_u64() {
+                    if (index as usize) < boost.hidden.len() {
+                        boost.hidden.remove(index as usize);
+                    }
+                }
+                if message["reset"].as_bool() == Some(true) {
+                    *boost = boosts::Boost::default();
+                }
+                self.apply_boosts();
+            }
+            "boost_pick" => {
+                // выбор элемента на странице: подсветка и щелчок
+                if let Some(webview) = self.active_webview() {
+                    let _ = webview.evaluate_script(boosts::PICK_SCRIPT);
+                    let _ = webview.focus();
+                }
+            }
             "dark_site_remove" => {
                 let host = text("host");
                 self.store.settings.dark_sites.retain(|h| *h != host);
@@ -3157,6 +3195,7 @@ impl App {
                 "islandRadius": settings.island_radius,
                 "islandTabs": settings.island_tabs,
                 "darkAll": settings.dark_all,
+                "boosts": settings.boosts,
                 "autoUpdate": settings.auto_update,
                 "processLimit": settings.process_limit,
                 "compact": settings.compact,
@@ -3380,6 +3419,28 @@ impl App {
 
     // ---------- тёмные сайты, перевод ----------
 
+    /// Хост сайта во вкладке на экране (без www).
+    fn active_host(&self) -> Option<String> {
+        self.active_tab()
+            .filter(|t| t.url.starts_with("http"))
+            .and_then(|t| adblock::host_of(&t.url))
+            .map(|h| h.trim_start_matches("www.").to_string())
+    }
+
+    /// Бусты изменились: скрипт заново во всех вкладках и сразу на открытых страницах.
+    fn apply_boosts(&mut self) {
+        self.store.settings.boosts.retain(|_, b| !b.is_empty());
+        self.store.save_settings();
+        let script = boosts::script(&self.store.settings.boosts);
+        for tab in &self.tabs {
+            if let Some(webview) = &tab.webview {
+                platform::set_document_script(webview, &tab.boost_script, Some(&script));
+                let _ = webview.evaluate_script(&script);
+            }
+        }
+        self.dirty = true;
+    }
+
     /// Перерегистрирует скрипт тёмной темы во всех вкладках и сразу применяет его.
     fn apply_dark_sites(&mut self) {
         let script = dark_sites_script(&self.store.settings);
@@ -3497,6 +3558,20 @@ impl App {
                     let y = message["y"].as_f64().unwrap_or(0.0);
                     let _ = self.ui.evaluate_script(&format!("ui.pageScroll({down}, {y})"));
                 }
+            }
+            "boost_hide" => {
+                // элемент выбран на странице: сайт — по настоящему адресу вкладки
+                let selector = message["selector"].as_str().unwrap_or("").trim().to_string();
+                let Some(host) = adblock::host_of(url).map(|h| h.trim_start_matches("www.").to_string()) else { return };
+                if id != self.active || !boosts::valid_selector(&selector) {
+                    return;
+                }
+                let boost = self.store.settings.boosts.entry(host).or_default();
+                if !boost.hidden.contains(&selector) && boost.hidden.len() < 100 {
+                    boost.hidden.push(selector);
+                }
+                self.apply_boosts();
+                let _ = self.ui.evaluate_script("ui.toast('Элемент скрыт на этом сайте. Вернуть — «⋯» → «Настроить этот сайт»')");
             }
             "af_form" => {
                 // поля карты и адреса — только на HTTPS (и localhost), как и пароли

@@ -2054,3 +2054,18 @@ body.compact-mode.compact-open #chrome { box-shadow: 0 12px 34px rgba(0, 0, 0, .
 .keyrow kbd.custom { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); }
 .keyrow kbd.rec { color: var(--on-accent); background: var(--accent); animation: pulse-kbd 1.2s ease-in-out infinite; }
 @keyframes pulse-kbd { 50% { opacity: .65; } }
+
+/* ---------- свой вид сайта ---------- */
+.boost-sec { padding: 6px 12px 10px; display: flex; flex-direction: column; gap: 8px; }
+.boost-sec small { color: var(--muted); font-weight: 600; }
+.boost-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.boost-chip { height: 28px; padding: 0 10px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface-2); color: var(--text); font-size: 13px; }
+.boost-chip.on { background: var(--accent); color: var(--on-accent); border-color: transparent; }
+.swatch.none { background: linear-gradient(135deg, transparent 45%, var(--danger) 47%, var(--danger) 53%, transparent 55%), var(--surface-2); }
+.boost-css { width: 100%; height: 90px; padding: 8px 10px; resize: vertical; font: 12.5px/1.4 Consolas, monospace; }
+.boost-row { display: flex; gap: 6px; justify-content: flex-end; }
+.boost-hidden { display: flex; align-items: center; gap: 6px; }
+.boost-hidden code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--muted); }
+.boost-hidden button { width: 22px; height: 22px; border: 0; border-radius: 11px; background: transparent; color: var(--muted); }
+.boost-hidden button:hover { background: var(--press); color: var(--text); }
+.menu:has(.boost-sec) { width: 360px; }
