@@ -130,6 +130,7 @@ svg { display: block; flex: none; }
 .text-btn.outline { border: 1px solid var(--border); color: var(--text); }
 .text-btn.danger { background: var(--danger); color: #fff; }
 .text-btn:empty { display: none; }
+.text-btn:disabled { opacity: .4; pointer-events: none; }
 
 /* ---------- панель ---------- */
 
@@ -856,7 +857,7 @@ body[data-wall="image"] #wallbtn { color: #fff; background: rgba(0, 0, 0, .3); b
   letter-spacing: -.03em;
   font-variant-numeric: tabular-nums;
 }
-#date { margin-top: 8px; font-size: 15px; color: var(--muted); text-transform: capitalize; }
+#date { margin-top: 8px; font-size: 15px; color: var(--muted); }
 
 .searchbox {
   position: relative;
@@ -979,7 +980,7 @@ body.inprivate #privatenote { display: flex; }
 .tile:hover { transform: translateY(-5px) scale(1.04); box-shadow: var(--shadow); background: var(--surface); }
 .tile:active { transform: scale(.95); }
 .tile .name { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
-.tiles-hint { color: var(--muted); font-size: 13px; }
+.tiles-hint { color: var(--muted); font-size: 13px; text-align: center; }
 
 #stat {
   position: absolute;
@@ -1110,6 +1111,7 @@ body.inprivate #privatenote { display: flex; }
 #hublist { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 18px 28px; }
 #hublist::-webkit-scrollbar { width: 10px; }
 #hublist::-webkit-scrollbar-thumb { background: var(--press); border-radius: 5px; border: 2px solid var(--surface); }
+#hublist::-webkit-scrollbar-corner { background: transparent; }
 
 .day { padding: 18px 12px 6px; font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
 .row {
@@ -1301,6 +1303,8 @@ body.inprivate #privatenote { display: flex; }
   box-shadow: var(--shadow);
 }
 .menu.open { display: block; animation: menu-in .22s var(--spring); }
+.menu::-webkit-scrollbar { width: 8px; }
+.menu::-webkit-scrollbar-thumb { background: var(--press); border-radius: 4px; border: 2px solid var(--surface); }
 .menu.closing { animation: menu-out .12s ease-in forwards; }
 @keyframes menu-in { from { opacity: 0; transform: translateY(-6px) scale(.94); } }
 @keyframes menu-out { to { opacity: 0; transform: translateY(-4px) scale(.97); } }
@@ -1356,6 +1360,10 @@ body.inprivate #privatenote { display: flex; }
   .hub-foot { display: none; }
   .hubsearch, .hubsearch:focus-within { width: 150px; }
   .set { flex-wrap: wrap; }
+  /* в узком окне подпись занимает строку, а кнопки переносятся под неё, не вылезая за карточку */
+  .set .label { flex: 1 1 220px; }
+  .set .controls { max-width: 100%; flex-wrap: wrap; }
+  .seg { max-width: 100%; overflow-x: auto; scrollbar-width: none; }
 }
 
 /* ---------- виды панели ---------- */
@@ -1385,6 +1393,10 @@ body.bar-compact #winctl { align-self: stretch; }
 body.bar-compact #favbar { grid-area: fav; background: transparent; }
 body.bar-compact #findbar { grid-area: find; background: transparent; }
 body.bar-compact.tint #toolbar { background: transparent; }
+/* в узком окне одной строке не хватает места: кнопки окна уезжали за край — вкладки над панелью */
+@media (max-width: 600px) {
+  body.bar-compact #chrome { grid-template-columns: minmax(0, 1fr); grid-template-areas: "title" "tool" "fav" "find"; }
+}
 
 /* «Плавающая»: панель навигации парит над страницей со скруглёнными краями */
 body.bar-floating #chrome {
@@ -1470,6 +1482,11 @@ body.bar-vertical #newtab:hover { transform: none; color: var(--text); }
 body.bar-vertical #progress { top: 0; bottom: auto; }
 body.bar-vertical #tabs::-webkit-scrollbar { width: 8px; }
 body.bar-vertical #tabs::-webkit-scrollbar-thumb { background: var(--press); border-radius: 4px; }
+/* в узком окне колонка вкладок занимала больше половины: странице почти не оставалось места */
+@media (max-width: 600px) {
+  body.bar-vertical { --side-w: 210px; }
+  body.bar-vertical #chrome { width: 210px; }
+}
 body.bar-vertical #start { margin-left: var(--side-w); }
 body.bar-vertical #layer { top: 0; left: var(--side-w); }
 body.bar-vertical #sheet {
@@ -1641,9 +1658,8 @@ body.glass #hubnav, body.glass .card { background: var(--glass-surface-2); }
   gap: 6px;
   margin: 0 10px 14px;
   padding: 8px 0 10px;
-  background: linear-gradient(var(--surface) 75%, transparent);
+  background: linear-gradient(var(--surface) calc(100% - 10px), transparent);
 }
-body.glass .setcats { background: transparent; }
 .setcat {
   height: 32px;
   padding: 0 14px;
@@ -1657,6 +1673,11 @@ body.glass .setcats { background: transparent; }
 }
 .setcat:hover { background: var(--hover); color: var(--text); }
 .setcat:active { transform: scale(.96); }
+@media (max-width: 760px) {
+  /* разделы — одной строкой с прокруткой, иначе в узком окне они закрыли бы полэкрана */
+  .setcats { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .setcat { flex: none; }
+}
 .setcat.on { background: var(--accent); border-color: transparent; color: var(--on-accent); }
 .rangeval { min-width: 42px; color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
 
@@ -1985,6 +2006,9 @@ body.glass.island-float #titlebar { background: radial-gradient(120% 220% at 0% 
 .af-grid .field { width: 190px; }
 .af-grid .field.port { width: 90px; }
 .af-form { align-items: flex-start; padding-top: 12px; padding-bottom: 12px; }
+/* поля не должны сжимать подпись до «Новая / карта» в две строки */
+.af-form .label { flex: none; padding-top: 8px; }
+.af-form .af-grid { flex: 1 1 auto; min-width: 0; }
 .pw-badge-bad, .pw-badge-warn, .pw-badge-ok { flex: none; padding: 2px 8px; border-radius: 10px; font-size: 11.5px; font-weight: 600; }
 .pw-badge-bad { background: color-mix(in srgb, var(--danger) 18%, transparent); color: var(--danger); }
 .pw-badge-warn { background: color-mix(in srgb, var(--gold) 20%, transparent); color: color-mix(in srgb, var(--gold) 80%, var(--text)); }
@@ -2033,6 +2057,10 @@ body:is(.bar-compact, .bar-floating, .bar-island, .bar-vertical) .gchip { margin
 /* разделённый экран: обе вкладки пары подсвечены */
 .tab.in-split .bg { opacity: 1; box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 55%, transparent); }
 #splitbtn.on { color: var(--accent); }
+/* в узком окне адресной строке не хватало места: прячем кнопки, которые есть в меню «⋯» */
+@media (max-width: 600px) {
+  #hubbtn, #splitbtn:not(.on) { display: none; }
+}
 
 .upd-ready { display: flex; align-items: center; gap: 10px; margin: 0 18px 12px; padding: 10px 12px; border-radius: 12px; background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--text); }
 .upd-ready span { flex: 1; }
