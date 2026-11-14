@@ -3307,6 +3307,11 @@ impl App {
         if self.tab(right).is_none() || left == right {
             return;
         }
+        // стартовая страница занимает всё окно и закрыла бы вторую половину
+        if [left, right].iter().any(|id| self.tab(*id).is_some_and(Tab::is_start)) {
+            let _ = self.ui.evaluate_script("ui.toast('Разделить экран можно только для вкладок с сайтами')");
+            return;
+        }
         // правая вкладка могла быть выгружена — загрузим её, когда разделение уже на месте:
         // если сделать её активной, фокус и адресная строка уедут в правую половину
         let lazy = self.tab(right).filter(|t| t.webview.is_none() && !t.url.is_empty()).map(|t| t.url.clone());
