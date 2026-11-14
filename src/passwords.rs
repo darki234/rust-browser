@@ -75,7 +75,11 @@ pub fn origin_of(url: &str) -> Option<String> {
     if host_port.is_empty() || host_port.contains(char::is_whitespace) {
         return None;
     }
-    let host = host_port.split(':').next().unwrap_or("");
+    // [::1]:3000 — у IPv6 двоеточия внутри скобок
+    let host = match host_port.strip_prefix('[') {
+        Some(rest) => &host_port[..rest.find(']').map_or(host_port.len(), |i| i + 2)],
+        None => host_port.split(':').next().unwrap_or(""),
+    };
     let local = matches!(host, "localhost" | "127.0.0.1" | "[::1]") || host.ends_with(".localhost");
     match scheme.as_str() {
         "https" => Some(format!("https://{}", host_port.trim_end_matches(":443"))),
@@ -294,10 +298,14 @@ pub const PAGE_SCRIPT: &str = r#"(() => {
 
 /// Подставляет логин и пароль в форму. Функция целиком внутри скрипта, а не в
 /// странице: сайт не может её подменить, чтобы перехватить пароль чужого сайта.
-pub fn fill_script(username: &str, password: &str) -> String {
-    let data = json!({ "u": username, "p": password });
+/// `origin` проверяется ещё раз уже внутри страницы: если между щелчком и запуском
+/// скрипта вкладка успела уйти на другой сайт, пароль туда не попадёт
+/// (location подменить страница не может).
+pub fn fill_script(origin: &str, username: &str, password: &str) -> String {
+    let data = json!({ "o": origin, "u": username, "p": password });
     format!(
         r#"((d) => {{
+  if (window.top !== window || location.origin !== d.o) return false;
   const visible = (i) => !!(i.offsetWidth || i.offsetHeight || i.getClientRects().length);
   const put = (input, value) => {{
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
@@ -335,6 +343,23 @@ mod tests {
         assert_eq!(origin_of("http://localhost:3000/x").as_deref(), Some("http://localhost:3000"));
         assert_eq!(origin_of("file:///C:/a.html"), None);
         assert_eq!(origin_of("about:blank"), None);
+        assert_eq!(origin_of("http://[::1]:3000/").as_deref(), Some("http://[::1]:3000"));
+        assert_eq!(origin_of("http://[::2]:3000/"), None);
+        assert_eq!(origin_of("http://localhost.evil.com/"), None);
+    }
+
+    #[test]
+    fn fill_script_checks_origin_inside_page_and_escapes_data() {
+        let script = fill_script("https://bank.ru", "bob\"</script>", "p'\"\\\u{2028}x");
+        // проверка адреса — внутри самой страницы, до подстановки
+        let check = script.find("location.origin !== d.o").unwrap();
+        assert!(check < script.find("put(pw").unwrap());
+        // данные — одним JSON-литералом: кавычки не разрывают скрипт
+        let data = script.rsplit_once("})(").unwrap().1.trim_end_matches(')');
+        let parsed: serde_json::Value = serde_json::from_str(data).unwrap();
+        assert_eq!(parsed["o"], "https://bank.ru");
+        assert_eq!(parsed["u"], "bob\"</script>");
+        assert_eq!(parsed["p"], "p'\"\\\u{2028}x");
     }
 
     #[test]

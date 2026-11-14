@@ -145,9 +145,13 @@ pub const DETECT_SCRIPT: &str = r#"(() => {
 })();"#;
 
 /// Заполняет форму: сначала по autocomplete, потом по имени и подписи поля.
-pub fn fill_script(fields: &Value) -> String {
+/// Только на сайте `origin` — тот, что был на экране, когда попросили подставить
+/// (карта подставляется после Windows Hello, вкладка за это время могла уйти).
+pub fn fill_script(origin: &str, fields: &Value) -> String {
+    let origin = Value::from(origin);
     format!(
         r#"((d) => {{
+  if (window.top !== window || location.origin !== {origin}) return 0;
   const visible = (i) => !!(i.offsetWidth || i.offsetHeight || i.getClientRects().length);
   const put = (input, value) => {{
     if (!value) return;
@@ -295,5 +299,14 @@ mod tests {
         assert_eq!(Profile::load(&stored), profile);
         let summary = profile.summary().to_string();
         assert!(summary.contains("•••• 1111") && !summary.contains("411111"));
+    }
+
+    #[test]
+    fn fill_script_is_bound_to_origin() {
+        let card = Card { holder: "IVAN".into(), number: "4111111111111111".into(), month: "12".into(), year: "29".into() };
+        let script = fill_script("https://shop.ru\"; alert(1); \"", &card_fields(&card));
+        // адрес попадает в скрипт JSON-строкой и проверяется до подстановки
+        assert!(script.contains(r#"location.origin !== "https://shop.ru\"; alert(1); \"") return 0;"#));
+        assert!(script.find("location.origin").unwrap() < script.find("put(input").unwrap());
     }
 }
