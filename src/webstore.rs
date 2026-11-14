@@ -86,18 +86,80 @@ pub fn open_crx(bytes: &[u8], expected_id: &str) -> Result<(Vec<u8>, Vec<u8>), S
     let archive = bytes[12 + header_len..].to_vec();
     // CrxFileHeader: поле 2 — sha256_with_rsa, поле 3 — sha256_with_ecdsa (AsymmetricKeyProof),
     // в каждом поле 1 — открытый ключ.
+    // Подписано не всё содержимое пакета, а «CRX3 SignedData\x00» + длина + signed_header_data + архив.
+    let signed_header = proto_fields(header).into_iter().find(|(f, _)| *f == 10000).map(|(_, v)| v).unwrap_or_default();
+    let mut hasher = Sha256::new();
+    hasher.update(b"CRX3 SignedData\x00");
+    hasher.update((signed_header.len() as u32).to_le_bytes());
+    hasher.update(signed_header);
+    hasher.update(&archive);
+    let digest: [u8; 32] = hasher.finalize().into();
     let mut key = None;
+    let mut matched = false;
     for (field, value) in proto_fields(header) {
-        if field == 2 || field == 3 {
-            for (inner, public_key) in proto_fields(value) {
-                if inner == 1 && id_from_key(public_key) == expected_id {
-                    key = Some(public_key.to_vec());
-                }
-            }
+        // ключ ECDSA в магазине Chrome у разработчиков не встречается — проверяем RSA
+        if field != 2 && field != 3 {
+            continue;
+        }
+        let proof = proto_fields(value);
+        let public_key = proof.iter().find(|(f, _)| *f == 1).map(|(_, v)| *v).unwrap_or_default();
+        if id_from_key(public_key) != expected_id {
+            continue;
+        }
+        matched = true;
+        let signature = proof.iter().find(|(f, _)| *f == 2).map(|(_, v)| *v).unwrap_or_default();
+        if field == 2 && rsa_sha256_valid(public_key, &digest, signature) {
+            key = Some(public_key.to_vec());
         }
     }
-    let key = key.ok_or("подпись пакета не совпадает с расширением")?;
-    Ok((archive, key))
+    match key {
+        Some(key) => Ok((archive, key)),
+        None if matched => Err("подпись пакета неверна — файл изменён".into()),
+        None => Err("подпись пакета не совпадает с расширением".into()),
+    }
+}
+
+/// Проверяет подпись RSA PKCS#1 v1.5 над SHA-256 средствами Windows (CNG).
+/// `spki` — открытый ключ в DER (SubjectPublicKeyInfo), как его кладёт CRX3.
+fn rsa_sha256_valid(spki: &[u8], digest: &[u8; 32], signature: &[u8]) -> bool {
+    use windows::core::w;
+    use windows::Win32::Foundation::{LocalFree, HLOCAL};
+    use windows::Win32::Security::Cryptography::*;
+    if spki.is_empty() || signature.is_empty() {
+        return false;
+    }
+    unsafe {
+        let mut info: *mut CERT_PUBLIC_KEY_INFO = std::ptr::null_mut();
+        let mut size = 0u32;
+        let decoded = CryptDecodeObjectEx(
+            X509_ASN_ENCODING,
+            X509_PUBLIC_KEY_INFO,
+            spki,
+            CRYPT_DECODE_ALLOC_FLAG,
+            None,
+            Some(&mut info as *mut _ as *mut core::ffi::c_void),
+            &mut size,
+        );
+        if decoded.is_err() || info.is_null() {
+            return false;
+        }
+        let mut handle = BCRYPT_KEY_HANDLE::default();
+        let imported = CryptImportPublicKeyInfoEx2(X509_ASN_ENCODING, info, CRYPT_IMPORT_PUBLIC_KEY_FLAGS(0), None, &mut handle);
+        let _ = LocalFree(Some(HLOCAL(info as *mut core::ffi::c_void)));
+        if imported.is_err() {
+            return false;
+        }
+        let padding = BCRYPT_PKCS1_PADDING_INFO { pszAlgId: w!("SHA256") };
+        let status = BCryptVerifySignature(
+            handle,
+            Some(&padding as *const _ as *const core::ffi::c_void),
+            digest,
+            signature,
+            BCRYPT_PAD_PKCS1,
+        );
+        let _ = BCryptDestroyKey(handle);
+        status.is_ok()
+    }
 }
 
 /// Поля protobuf с длиной (wire type 2); остальные типы пропускаются.
@@ -518,6 +580,20 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// Настоящий пакет из магазина: RB_TEST_CRX=путь к .crx uBlock Origin Lite.
+    /// Подпись сходится, а изменённый байт архива её ломает.
+    #[test]
+    fn real_crx_signature() {
+        let Ok(path) = std::env::var("RB_TEST_CRX") else { return };
+        let mut bytes = std::fs::read(path).unwrap();
+        let id = "ddkjiahejlhfcafbddmgiahcphecmpfh";
+        assert!(open_crx(&bytes, id).is_ok());
+        let last = bytes.len() - 100;
+        bytes[last] ^= 1;
+        let error = open_crx(&bytes, id).unwrap_err();
+        assert!(error.contains("изменён"), "{error}");
+    }
+
     #[test]
     fn crx_with_wrong_key_is_rejected() {
         let key = b"some-public-key";
@@ -532,10 +608,9 @@ mod tests {
         crx.extend_from_slice(&(header.len() as u32).to_le_bytes());
         crx.extend_from_slice(&header);
         crx.extend_from_slice(b"PK-zip");
-        let (archive, found) = open_crx(&crx, &id).unwrap();
-        assert_eq!(archive, b"PK-zip");
-        assert_eq!(found, key);
-        assert!(open_crx(&crx, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").is_err());
+        // ключ свой, но подписи нет — пакет не принимается
+        assert!(open_crx(&crx, &id).unwrap_err().contains("изменён"));
+        assert!(open_crx(&crx, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap_err().contains("не совпадает"));
         assert!(open_crx(b"PK-not-crx", &id).is_err());
     }
 }

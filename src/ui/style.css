@@ -1379,7 +1379,8 @@ body:is(.bar-compact, .bar-floating, .bar-vertical, .bar-island) #chrome::after 
 /* «Компакт»: навигация и вкладки в одной строке */
 body.bar-compact #chrome {
   display: grid;
-  grid-template-columns: minmax(380px, 46%) minmax(0, 1fr);
+  /* --tool-need (из app.js): кнопки + место под строку адреса — вкладки уступают ей */
+  grid-template-columns: minmax(380px, max(46%, min(var(--tool-need, 0px), 68%))) minmax(0, 1fr);
   grid-template-areas: "tool title" "fav fav" "find find";
   background: radial-gradient(120% 220% at 0% 0%, var(--frame-glow), transparent 55%), var(--frame);
   border-bottom: 1px solid var(--border);
@@ -1387,6 +1388,10 @@ body.bar-compact #chrome {
 body.bar-compact #toolbar { grid-area: tool; height: 46px; background: transparent; }
 body.bar-compact #titlebar { grid-area: title; height: 46px; align-items: center; background: transparent; padding-left: 2px; }
 body.bar-compact #tabs { height: 34px; align-items: center; padding: 0 6px; }
+/* много вкладок в одной строке — листаются колесом, а не наезжают на кнопки окна */
+body:is(.bar-compact, .bar-floating) #tabs { overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+body:is(.bar-compact, .bar-floating) #tabs::-webkit-scrollbar { display: none; }
+body:is(.bar-compact, .bar-floating) .tab:not(.pinned) { min-width: 72px; }
 body.bar-compact .tab { height: 34px; }
 body.bar-compact #newtab { margin: 0 0 0 4px; }
 body.bar-compact #winctl { align-self: stretch; }
@@ -2104,8 +2109,12 @@ body.url-collapsed #urlbox:not(.expanded) {
   transition: background .15s, transform .2s var(--spring);
 }
 body.url-collapsed #urlbox:not(.expanded):hover { transform: scale(1.06); }
-body.url-collapsed #urlbox:not(.expanded) > :not(#siteicon) { display: none; }
-body.url-collapsed #urlbox:not(.expanded) #siteicon { margin: 0; width: 34px; height: 34px; border-radius: 17px; }
+body.url-collapsed #urlbox:not(.expanded) > * { display: none; }
+/* свёрнутая строка — кнопка-лупа: сразу видно, что это поиск */
+body.url-collapsed #urlbox:not(.expanded)::before {
+  content: ""; width: 17px; height: 17px; background: var(--text);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-3.6-3.6'/%3E%3C/svg%3E") center / contain no-repeat;
+}
 body.url-collapsed #urlbox.expanded {
   position: absolute; z-index: 6; left: 6px; right: 6px; margin: 0;
   background: var(--surface); border-color: var(--accent);

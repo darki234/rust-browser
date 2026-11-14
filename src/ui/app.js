@@ -174,8 +174,13 @@ function toast(text) {
   const el = $('#toast');
   el.textContent = text;
   el.classList.add('show');
+  // поверх сайта окно интерфейса узкое — просим место под уведомление
+  send('toast', { w: el.offsetWidth, h: el.offsetHeight });
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove('show'), 2200);
+  toastTimer = setTimeout(() => {
+    el.classList.remove('show');
+    toastTimer = setTimeout(() => send('toast', {}), 350);
+  }, 2200);
 }
 
 // ---------- состояние ----------
@@ -297,7 +302,7 @@ function setState(next) {
   if (S.active !== lastActiveTab) { lastActiveTab = S.active; setIslandHidden(false); }
   renderTabs();
   // вкладки внутри острова прокручиваются: активная всегда на виду
-  if (document.body.classList.contains('island-tabs')) tabEls.get(S.active)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  if (tabsScroll()) tabEls.get(S.active)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   renderToolbar();
   renderFavbar();
   renderStart();
@@ -395,9 +400,10 @@ $('#win-max').addEventListener('click', () => send('maximize'));
 $('#win-close').addEventListener('click', () => send('close'));
 
 // Пустое место в полосе вкладок двигает окно, двойной щелчок разворачивает.
-// вкладки внутри острова листаются колесом мыши
+// вкладки внутри острова и в одной строке с панелью листаются колесом мыши
+function tabsScroll() { return ['island-tabs', 'bar-compact', 'bar-floating'].some((c) => document.body.classList.contains(c)); }
 el.tabs.addEventListener('wheel', (event) => {
-  if (!document.body.classList.contains('island-tabs') || el.tabs.scrollWidth <= el.tabs.clientWidth) return;
+  if (!tabsScroll() || el.tabs.scrollWidth <= el.tabs.clientWidth) return;
   event.preventDefault();
   el.tabs.scrollLeft += event.deltaY || event.deltaX;
 }, { passive: false });
@@ -650,7 +656,7 @@ function renderToolbar() {
   tb.classList.toggle('on', translated);
   tb.title = translated ? 'Показать оригинал' : 'Перевести страницу на русский';
   // «картинка в картинке» — когда на странице играет видео
-  $('#pipbtn').classList.toggle('show', !tab.start && !!tab.audio);
+  $('#pipbtn').classList.toggle('show', !tab.start && !!tab.audio && !!tab.video);
   el.reload.disabled = tab.start;
   el.reload.classList.toggle('loading', tab.loading);
   el.reload.title = tab.loading ? 'Остановить (Esc)' : 'Обновить (F5)';
@@ -1371,7 +1377,7 @@ function mainMenuNodes() {
     item({ icon: 'translate', label: /\.translate\.goog\//.test(activeTab()?.url || '') ? 'Показать оригинал' : 'Перевести страницу',
       disabled: !page || (/^ru/.test(activeTab()?.lang || '') && !/\.translate\.goog\//.test(activeTab()?.url || '')),
       onClick: () => send('translate', { original: /\.translate\.goog\//.test(activeTab()?.url || '') }) }),
-    item({ icon: 'pip', label: 'Картинка в картинке', kb: 'Alt+P', disabled: !page, onClick: () => send('pip') }),
+    item({ icon: 'pip', label: 'Картинка в картинке', kb: 'Alt+P', disabled: !page || !activeTab()?.video, onClick: () => send('pip') }),
     item({ icon: 'expand', label: 'Компактный режим', kb: 'Ctrl+Shift+K', check: !!S.settings.compact, onClick: () => set('compact', !S.settings.compact) }),
     item({ icon: 'split', label: S.split && [S.split.left, S.split.right].includes(S.active) ? 'Убрать разделение экрана' : 'Разделить экран', disabled: !page,
       onClick: () => send(S.split && [S.split.left, S.split.right].includes(S.active) ? 'unsplit' : 'split') }),
@@ -3142,6 +3148,10 @@ function urlRoom() {
 
 function measureUrl() {
   if (urlbox.classList.contains('expanded')) return;
+  // в одной строке с вкладками: колонка панели растёт за счёт вкладок, пока строке не хватит ~260px
+  if (document.body.classList.contains('bar-compact')) {
+    el.chrome.style.setProperty('--tool-need', Math.round(toolbarEl.clientWidth - urlRoom() + 260) + 'px');
+  }
   const collapse = !vertical() && toolbarEl.clientWidth > 0 && urlRoom() < 200;
   document.body.classList.toggle('url-collapsed', collapse);
 }

@@ -165,6 +165,8 @@ pub enum UserEvent {
     Processes(Vec<efficiency::ProcessInfo>, bool),
     /// Страница не загрузилась: (вкладка, вид ошибки для своей страницы ошибки).
     LoadFailed(u32, &'static str),
+    /// Тихий повтор загрузки после обрыва связи: (вкладка, адрес).
+    RetryLoad(u32, String),
 }
 
 pub enum DownloadEvent {
@@ -210,6 +212,10 @@ struct Tab {
     failed: bool,
     /// На странице есть поле пароля — показываем ключ, если для сайта есть пароли.
     pw_form: bool,
+    /// На странице есть видео — для «картинки в картинке».
+    video: bool,
+    /// Сколько раз подряд адрес уже перезапрашивали после обрыва и когда в последний раз.
+    retries: (String, u8, Option<Instant>),
     /// Язык страницы — чтобы предложить перевод.
     lang: String,
     /// На странице поля карты / адреса — у адреса появляется кнопка автозаполнения.
@@ -246,6 +252,8 @@ impl Tab {
             restore_scroll: None,
             failed: false,
             pw_form: false,
+            video: false,
+            retries: (String::new(), 0, None),
             lang: String::new(),
             dark_script: Default::default(),
             af_card: false,
@@ -364,6 +372,8 @@ struct App {
     next_id: u32,
     /// Закрытые вкладки для Ctrl+Shift+T.
     closed: Vec<SessionTab>,
+    /// Группы, опустевшие после закрытия вкладок, — для восстановления.
+    closed_groups: Vec<store::TabGroup>,
     downloads: Vec<Download>,
     adblock: Arc<AtomicBool>,
     download_dir: Arc<Mutex<String>>,
@@ -379,6 +389,8 @@ struct App {
     /// «Остров» поверх страницы: страница начинается с этой высоты (под вкладками),
     /// а интерфейс виден только в этих местах (x, y, ширина, высота, радиус — в CSS-пикселях).
     chrome_float: Option<(f64, Vec<[f64; 5]>)>,
+    /// Размер показанного уведомления (ширина, высота) — окно интерфейса его не обрежет.
+    toast: Option<(f64, f64)>,
     /// Боковая панель справа (создаётся при первом открытии).
     panel: Option<WebView>,
     /// Мессенджеры в боковой панели: живут, пока окно открыто, чтобы не входить заново.
@@ -530,6 +542,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         active: 0,
         next_id: 1,
         closed: Vec::new(),
+        closed_groups: Vec::new(),
         downloads: Vec::new(),
         keys,
         overlay: Overlay::None,
@@ -539,6 +552,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         chrome_height: DEFAULT_CHROME,
         chrome_side: 0.0,
         chrome_float: None,
+        toast: None,
         panel: None,
         panel_apps: HashMap::new(),
         fullscreen: false,
@@ -675,6 +689,15 @@ fn default_download_dir() -> String {
     std::env::var_os("USERPROFILE")
         .map(|home| PathBuf::from(home).join("Downloads").to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+/// Где на окне стоит уведомление: по центру снизу (как в style.css: bottom 28px),
+/// с запасом под тень и анимацию появления.
+fn toast_part(width: f64, height: f64, w: f64, h: f64) -> [f64; 5] {
+    const PAD: f64 = 16.0;
+    let x = ((width - w) / 2.0 - PAD).max(0.0);
+    let y = (height - 28.0 - h - PAD).max(0.0);
+    [x, y, (w + PAD * 2.0).min(width), h + PAD * 2.0 + 12.0, 0.0]
 }
 
 fn rect(x: f64, y: f64, width: f64, height: f64) -> Rect {
@@ -853,6 +876,7 @@ fn build_tab(app: &mut App, id: u32, bounds: Rect) -> wry::Result<WebView> {
 
     platform::hook_hotkeys(&webview, app.keys.clone(), proxy.clone());
     platform::hook_adblock(&webview, id, app.adblock.clone(), proxy.clone());
+    platform::set_adblock_filter(&webview, app.ubol_id.is_none());
     platform::hook_history(&webview, id, proxy.clone());
     platform::hook_messages(&webview, id, proxy.clone());
     platform::hook_crashes(&webview, id, proxy.clone());
@@ -938,14 +962,20 @@ impl App {
         let side = if self.is_fullscreen() { 0.0 } else { self.chrome_side };
         let on_start_page = self.active_webview().is_none();
 
-        let ui_rect = match self.overlay {
-            _ if on_start_page || self.splash => rect(0.0, 0.0, width, height),
-            Overlay::Full => rect(0.0, 0.0, width, height),
+        let (bx, by, bw, bh) = match self.overlay {
+            _ if on_start_page || self.splash => (0.0, 0.0, width, height),
+            Overlay::Full => (0.0, 0.0, width, height),
             // боковая колонка и так на всю высоту — подсказки помещаются в ней
-            _ if side > 0.0 => rect(0.0, 0.0, side, height),
-            Overlay::Sheet(extra) => rect(0.0, 0.0, width, (chrome + extra).min(height)),
-            Overlay::None => rect(0.0, 0.0, width, chrome),
+            _ if side > 0.0 => (0.0, 0.0, side, height),
+            Overlay::Sheet(extra) => (0.0, 0.0, width, (chrome + extra).min(height)),
+            Overlay::None => (0.0, 0.0, width, chrome),
         };
+        // Всплывающее уведомление внизу окна: окно интерфейса растягивается на всё окно,
+        // но видны в нём только панели и само уведомление — остальное пропускает страницу.
+        let toast = self.toast.filter(|_| {
+            matches!(self.overlay, Overlay::None | Overlay::Sheet(_)) && !on_start_page && !self.splash && !self.is_fullscreen()
+        });
+        let ui_rect = if toast.is_some() { rect(0.0, 0.0, width, height) } else { rect(bx, by, bw, bh) };
         let _ = self.ui.set_bounds(ui_rect);
         // «Остров» поверх страницы: окно интерфейса обрезается по полосе вкладок и острову.
         // Меню, подсказки, стартовая страница и полный экран — снова целиком.
@@ -954,8 +984,17 @@ impl App {
             && !self.splash
             && !self.is_fullscreen()
             && side == 0.0;
-        match (&self.chrome_float, floating) {
-            (Some((_, parts)), true) => {
+        let mut parts: Option<Vec<[f64; 5]>> = match (&self.chrome_float, floating) {
+            (Some((_, parts)), true) => Some(parts.clone()),
+            _ => None,
+        };
+        if let Some((w, h)) = toast {
+            let mut list = parts.take().unwrap_or_else(|| vec![[bx, by, bw, bh, 0.0]]);
+            list.push(toast_part(width, height, w, h));
+            parts = Some(list);
+        }
+        match parts {
+            Some(parts) => {
                 let scale = self.window.scale_factor();
                 let shape: Vec<[i32; 5]> = parts
                     .iter()
@@ -964,7 +1003,7 @@ impl App {
                 platform::set_shape(&self.ui, Some(&shape));
                 platform::raise(&self.ui);
             }
-            _ => platform::set_shape(&self.ui, None),
+            None => platform::set_shape(&self.ui, None),
         }
 
         // Сначала показываем новую вкладку и только потом прячем остальные: иначе
@@ -1500,6 +1539,7 @@ impl App {
                     tab.failed = false;
                     tab.blocked = 0;
                     tab.pw_form = false;
+                    tab.video = false;
                     tab.af_card = false;
                     tab.af_address = false;
                     self.dirty = true;
@@ -1669,11 +1709,37 @@ impl App {
                     return;
                 }
                 let dark = self.dark();
+                let proxy = self.proxy.clone();
                 let Some(tab) = self.tab_mut(id) else { return };
                 let Some(webview) = &tab.webview else { return };
+                // Обрыв связи часто случаен (VPN, смена сети) — как Chrome, сначала сами
+                // пробуем ещё пару раз и только потом показываем страницу ошибки.
+                if matches!(kind, "connection" | "timeout") {
+                    let (url, count, at) = &mut tab.retries;
+                    if *url != tab.url || at.is_none_or(|t| t.elapsed() > Duration::from_secs(30)) {
+                        *url = tab.url.clone();
+                        *count = 0;
+                    }
+                    if *count < 2 {
+                        *count += 1;
+                        *at = Some(Instant::now());
+                        let (url, delay) = (url.clone(), Duration::from_millis(300 * *count as u64));
+                        std::thread::spawn(move || {
+                            std::thread::sleep(delay);
+                            let _ = proxy.send_event(UserEvent::RetryLoad(id, url));
+                        });
+                        return;
+                    }
+                }
                 tab.failed = true;
                 let _ = webview.load_html(&pages::error_page(&tab.url, kind, dark));
                 self.dirty = true;
+            }
+            UserEvent::RetryLoad(id, url) => {
+                // за это время могли уйти на другой адрес — тогда повтор не нужен
+                if let Some(webview) = self.tab(id).filter(|t| t.url == url).and_then(|t| t.webview.as_ref()) {
+                    let _ = webview.load_url(&url);
+                }
             }
             UserEvent::Remote(urls) => {
                 if urls.is_empty() {
@@ -1706,6 +1772,10 @@ impl App {
                 }
                 platform::enable_extension(&self.ui, &id, self.store.settings.adblock);
                 self.ubol_id = Some(id);
+                // дальше рекламу режет uBlock Origin Lite внутри движка — свой перехват не нужен
+                for webview in self.tabs.iter().filter_map(|t| t.webview.as_ref()) {
+                    platform::set_adblock_filter(webview, false);
+                }
                 let ubol = self.ubol_id.as_deref().zip(self.ubol_folder.as_deref());
                 register_icons(&self.extensions, ubol);
                 self.refresh_extensions();
@@ -1736,6 +1806,17 @@ impl App {
                     self.new_tab(Some(saved.url));
                     if saved.pinned {
                         self.toggle_pin(self.active);
+                    } else if saved.group != 0 {
+                        // группа ещё есть — в неё; закрылась целиком — возвращаем и её
+                        if !self.groups.iter().any(|g| g.id == saved.group) {
+                            if let Some(i) = self.closed_groups.iter().rposition(|g| g.id == saved.group) {
+                                let group = self.closed_groups.remove(i);
+                                self.groups.push(group);
+                            }
+                        }
+                        if self.groups.iter().any(|g| g.id == saved.group) {
+                            self.set_group(self.active, saved.group);
+                        }
                     }
                 }
             }
@@ -2257,6 +2338,13 @@ impl App {
                 self.sent.clear(); // интерфейс перезагрузился — нужно всё состояние
                 self.dirty = true;
             }
+            "toast" => {
+                let size = message["w"].as_f64().zip(message["h"].as_f64());
+                if size != self.toast {
+                    self.toast = size;
+                    self.layout();
+                }
+            }
             "chrome" => {
                 let height = message["height"].as_f64().unwrap_or(DEFAULT_CHROME);
                 let side = message["side"].as_f64().unwrap_or(0.0);
@@ -2569,7 +2657,8 @@ impl App {
                 if self.tab(id).is_none() {
                     return; // вкладку уже закрыли — пустая группа не нужна
                 }
-                let gid = self.groups.iter().map(|g| g.id).max().unwrap_or(0) + 1;
+                // номера закрытых групп не занимаем: их ещё могут вернуть
+                let gid = self.groups.iter().chain(&self.closed_groups).map(|g| g.id).max().unwrap_or(0) + 1;
                 const COLORS: [&str; 8] = ["blue", "purple", "pink", "red", "orange", "yellow", "green", "cyan"];
                 let color = COLORS[(gid as usize - 1) % COLORS.len()].to_string();
                 self.groups.push(store::TabGroup { id: gid, name: String::new(), color, collapsed: false });
@@ -3210,6 +3299,7 @@ impl App {
                     "pinned": tab.pinned,
                     "zoom": tab.zoom,
                     "audio": tab.audio,
+                    "video": tab.video,
                     "muted": tab.muted,
                     "sleeping": tab.sleeping || (tab.webview.is_none() && !tab.url.is_empty()),
                     "lang": tab.lang,
@@ -3500,7 +3590,12 @@ impl App {
     fn prune_groups(&mut self) {
         let before = self.groups.len();
         let used: Vec<u32> = self.tabs.iter().map(|t| t.group).collect();
-        self.groups.retain(|g| used.contains(&g.id));
+        // опустевшая группа запоминается: Ctrl+Shift+T вернёт вкладку вместе с ней
+        let (kept, gone): (Vec<_>, Vec<_>) = std::mem::take(&mut self.groups).into_iter().partition(|g| used.contains(&g.id));
+        self.groups = kept;
+        self.closed_groups.extend(gone);
+        let excess = self.closed_groups.len().saturating_sub(20);
+        self.closed_groups.drain(..excess);
         if self.groups.len() != before {
             self.dirty = true;
             self.session_dirty = true;
@@ -3656,6 +3751,12 @@ impl App {
                 let Some(tab) = self.tab_mut(id) else { return };
                 if passwords::origin_of(&tab.url) == passwords::origin_of(url) {
                     tab.pw_form = true;
+                    self.dirty = true;
+                }
+            }
+            "has_video" => {
+                if let Some(tab) = self.tab_mut(id).filter(|t| !t.video) {
+                    tab.video = true;
                     self.dirty = true;
                 }
             }
@@ -4212,6 +4313,15 @@ const SCROLL_SCRIPT: &str = r#"(() => {
     sent = dir;
     try { window.chrome.webview.postMessage(JSON.stringify({ cmd: 'scroll_dir', dir, y })); } catch (e) {}
   }, { capture: true, passive: true });
+  // есть ли на странице видео — иначе «картинка в картинке» в меню неактивна
+  let videoAt = '';
+  const video = (e) => {
+    if (!(e.target instanceof HTMLVideoElement) || videoAt === location.href) return;
+    videoAt = location.href;
+    try { window.chrome.webview.postMessage(JSON.stringify({ cmd: 'has_video' })); } catch (e) {}
+  };
+  addEventListener('loadedmetadata', video, true);
+  addEventListener('play', video, true);
 })();"#;
 
 /// Поля параметров, которые относятся к этому компьютеру и не синхронизируются.

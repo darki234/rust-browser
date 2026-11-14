@@ -27,7 +27,7 @@ use webview2_com::{
     FindActiveMatchIndexChangedEventHandler, FindMatchCountChangedEventHandler,
     FindStartCompletedHandler, HistoryChangedEventHandler,
     IsDocumentPlayingAudioChangedEventHandler, Microsoft::Web::WebView2::Win32::*,
-    NavigationCompletedEventHandler,
+    NavigationCompletedEventHandler, NavigationStartingEventHandler,
     ProfileAddBrowserExtensionCompletedHandler, ProfileGetBrowserExtensionsCompletedHandler,
     StateChangedEventHandler, TrySuspendCompletedHandler, WebMessageReceivedEventHandler,
     WebResourceRequestedEventHandler,
@@ -352,11 +352,33 @@ pub fn hook_adblock(webview: &WebView, tab: u32, enabled: Arc<AtomicBool>, proxy
         Ok(())
     }));
     unsafe {
-        let _ = core.AddWebResourceRequestedFilter(
-            &HSTRING::from("*"),
-            COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
-        );
         let _ = core.add_WebResourceRequested(&handler, &mut 0i64);
+    }
+}
+
+/// Какие запросы идут через свой блокировщик. Каждый перехваченный запрос ждёт ответа
+/// от главного потока программы, поэтому сами страницы, видео и стили не трогаем:
+/// иначе сайты не грузятся, пока программа чем-то занята («Не удалось подключиться»).
+const ADBLOCK_CONTEXTS: [COREWEBVIEW2_WEB_RESOURCE_CONTEXT; 5] = [
+    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_SCRIPT,
+    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_IMAGE,
+    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_XML_HTTP_REQUEST,
+    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_FETCH,
+    COREWEBVIEW2_WEB_RESOURCE_CONTEXT_PING,
+];
+
+/// Включает перехват для своего блокировщика. Когда работает uBlock Origin Lite,
+/// он блокирует прямо в движке, и перехват выключается — запросы идут напрямую.
+pub fn set_adblock_filter(webview: &WebView, on: bool) {
+    let core = webview.webview();
+    let all = HSTRING::from("*");
+    unsafe {
+        for context in ADBLOCK_CONTEXTS {
+            let _ = core.RemoveWebResourceRequestedFilter(&all, context);
+            if on {
+                let _ = core.AddWebResourceRequestedFilter(&all, context);
+            }
+        }
     }
 }
 
@@ -544,10 +566,26 @@ pub fn error_kind(status: COREWEBVIEW2_WEB_ERROR_STATUS) -> Option<&'static str>
 }
 
 /// Сообщает о загрузках страницы, которые закончились ошибкой.
+/// Ошибка прерванного перехода не в счёт: сайт часто сам перенаправляет на другой адрес
+/// во время загрузки, и первый переход обрывается — страница ошибки закрыла бы новый.
 pub fn hook_load_errors(webview: &WebView, tab: u32, proxy: Proxy) {
+    let latest = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let started = latest.clone();
+    let starting = NavigationStartingEventHandler::create(Box::new(move |_, args| {
+        let Some(args) = args else { return Ok(()) };
+        let mut id = 0u64;
+        unsafe { args.NavigationId(&mut id)? };
+        started.store(id, Ordering::Relaxed);
+        Ok(())
+    }));
     let handler = NavigationCompletedEventHandler::create(Box::new(move |_, args| {
         let Some(args) = args else { return Ok(()) };
         unsafe {
+            let mut id = 0u64;
+            args.NavigationId(&mut id)?;
+            if id != latest.load(Ordering::Relaxed) {
+                return Ok(());
+            }
             let mut success = BOOL::default();
             args.IsSuccess(&mut success)?;
             if success.as_bool() {
@@ -562,6 +600,7 @@ pub fn hook_load_errors(webview: &WebView, tab: u32, proxy: Proxy) {
         Ok(())
     }));
     unsafe {
+        let _ = webview.webview().add_NavigationStarting(&starting, &mut 0i64);
         let _ = webview.webview().add_NavigationCompleted(&handler, &mut 0i64);
     }
 }
