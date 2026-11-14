@@ -1275,6 +1275,17 @@ impl App {
     }
 
     fn close_many(&mut self, ids: Vec<u32>) {
+        // активную закрывают вместе с другими — сразу переходим на ту, что останется:
+        // иначе по очереди открывались бы (и грузились) обречённые соседки
+        if ids.contains(&self.active) {
+            let index = self.index_of(self.active).unwrap_or(0);
+            let staying = |i: &usize| self.tabs.get(*i).is_some_and(|t| !ids.contains(&t.id));
+            let partner = self.visible_with(self.active).into_iter().filter_map(|t| self.index_of(t)).find(staying);
+            let next = partner.or_else(|| (index + 1..self.tabs.len()).chain((0..index).rev()).find(staying));
+            if let Some(next) = next {
+                self.activate(self.tabs[next].id);
+            }
+        }
         for id in ids {
             self.close_tab(id);
         }
@@ -2466,11 +2477,10 @@ impl App {
                 self.start_split(self.active, other);
             }
             "unsplit" => {
+                let partner = self.visible_with(self.active).into_iter().find(|t| *t != self.active);
                 self.split = None;
-                if let Some(tab) = self.visible_with(self.active).into_iter().find(|t| *t != self.active) {
-                    if let Some(tab) = self.tab_mut(tab) {
-                        tab.hidden_since = Some(Instant::now());
-                    }
+                if let Some(partner) = partner {
+                    self.hide_tab(partner);
                 }
                 self.layout();
                 self.dirty = true;
@@ -2484,6 +2494,9 @@ impl App {
             }
             "group_new" => {
                 let id = number("id") as u32;
+                if self.tab(id).is_none() {
+                    return; // вкладку уже закрыли — пустая группа не нужна
+                }
                 let gid = self.groups.iter().map(|g| g.id).max().unwrap_or(0) + 1;
                 const COLORS: [&str; 8] = ["blue", "purple", "pink", "red", "orange", "yellow", "green", "cyan"];
                 let color = COLORS[(gid as usize - 1) % COLORS.len()].to_string();
@@ -3294,12 +3307,22 @@ impl App {
         if self.tab(right).is_none() || left == right {
             return;
         }
-        // правая вкладка могла быть выгружена — загружаем, но остаёмся на левой
-        if self.tab(right).is_some_and(|t| t.webview.is_none() && !t.url.is_empty()) {
-            self.activate(right);
+        // правая вкладка могла быть выгружена — загрузим её, когда разделение уже на месте:
+        // если сделать её активной, фокус и адресная строка уедут в правую половину
+        let lazy = self.tab(right).filter(|t| t.webview.is_none() && !t.url.is_empty()).map(|t| t.url.clone());
+        // прежняя пара разделённого экрана: кто в новую не попал, уходит в фон
+        if let Some((l, r, _)) = self.split {
+            for old in [l, r] {
+                if old != left && old != right {
+                    self.hide_tab(old);
+                }
+            }
         }
         self.split = Some((left, right, 0.5));
         self.activate(left);
+        if let Some(url) = lazy {
+            self.navigate(right, &url); // фокус остаётся у активной левой половины
+        }
         if let Some(tab) = self.tab_mut(right) {
             tab.hidden_since = None;
             tab.sleeping = false;
@@ -3309,6 +3332,16 @@ impl App {
         }
         self.layout();
         self.dirty = true;
+    }
+
+    /// Вкладка ушла с экрана (но не через переключение): фоновый режим и отсчёт до сна.
+    fn hide_tab(&mut self, id: u32) {
+        if let Some(tab) = self.tab_mut(id) {
+            tab.hidden_since = Some(Instant::now());
+            if let Some(webview) = &tab.webview {
+                platform::set_background(webview, true);
+            }
+        }
     }
 
     /// Разделитель между половинами: курсор-стрелки над ним, перетаскивание меняет доли.

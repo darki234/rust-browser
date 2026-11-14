@@ -196,6 +196,46 @@ await check('остров и свои кнопки на панели', async () 
   await waitFor(() => ui.evaluate("!document.body.classList.contains('bar-island') && !document.querySelectorAll('#mybtns .mybtn').length && lastChromeKey.endsWith('|0')"));
 });
 
+await check('разделённый экран и группы вкладок', async () => {
+  await waitFor(() => ui.evaluate('S.tabs.length === 1'));
+  const first = await ui.evaluate('S.active');
+  const visible = async (hash) => {
+    const target = (await targets()).find((t) => t.url === FIXTURE + hash);
+    if (!target) return false;
+    const page = await connect((t) => t.id === target.id);
+    try { return await page.evaluate('document.visibilityState') === 'visible'; } finally { page.close(); }
+  };
+  await ui.evaluate(`send('open', { url: ${JSON.stringify(FIXTURE + '#b')}, newTab: true })`);
+  await waitFor(async () => (await targets()).some((t) => t.url === FIXTURE + '#b'));
+  const second = await ui.evaluate('S.active');
+  await ui.evaluate("send('split')");
+  await waitFor(async () => (await ui.evaluate(`S.split?.left === ${second} && S.split?.right === ${first}`)) && (await visible('')) && (await visible('#b')), 15000);
+  // закрыли активную половину — на экране остаётся вторая
+  await ui.evaluate(`send('close_tab', { id: ${second} })`);
+  await waitFor(() => ui.evaluate(`!S.split && S.active === ${first}`));
+  // группы: вкладка, брошенная внутрь группы, вступает в неё
+  for (const hash of ['#g1', '#g2']) {
+    await ui.evaluate(`send('open', { url: ${JSON.stringify(FIXTURE + hash)}, newTab: true })`);
+    await waitFor(async () => (await targets()).some((t) => t.url === FIXTURE + hash));
+  }
+  await waitFor(() => ui.evaluate('S.tabs.length === 3'));
+  const [, g1, g2] = await ui.evaluate('S.tabs.map((t) => t.id)');
+  await ui.evaluate(`send('group_new', { id: ${g1} })`);
+  await waitFor(() => ui.evaluate('S.groups.length === 1'));
+  await ui.evaluate('closeMenu()');
+  await ui.evaluate(`send('group_add', { id: ${g2}, group: S.groups[0].id })`);
+  await waitFor(() => ui.evaluate(`S.tabs.every((t) => (t.group !== 0) === (t.id !== ${first}))`));
+  await ui.evaluate(`send('move_tab', { id: ${first}, index: 1 })`);
+  await waitFor(() => ui.evaluate(`S.tabs[1].id === ${first} && S.tabs[1].group === S.groups[0].id`));
+  await ui.evaluate(`send('group_remove', { id: ${first} })`);
+  await waitFor(() => ui.evaluate(`S.tabs[1].group === 0`));
+  // свернули группу с активной вкладкой — активна вкладка вне группы
+  await ui.evaluate(`send('activate', { id: ${g2} }); send('group_edit', { group: S.groups[0].id, collapsed: true })`);
+  await waitFor(() => ui.evaluate(`S.active === ${first}`));
+  await ui.evaluate(`send('group_close', { group: S.groups[0].id })`);
+  await waitFor(() => ui.evaluate(`S.tabs.length === 1 && !S.groups.length && S.active === ${first}`));
+});
+
 await check('тема AMOLED и прозрачные панели', async () => {
   await ui.evaluate("send('set', { key: 'theme', value: 'amoled' }); send('set', { key: 'glass', value: 40 })");
   await waitFor(() => ui.evaluate("document.body.classList.contains('amoled') && document.body.classList.contains('glass') && getComputedStyle(document.body).getPropertyValue('--bg').trim() === '#000000'"));
