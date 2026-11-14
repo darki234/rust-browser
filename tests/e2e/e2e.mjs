@@ -185,6 +185,44 @@ await check('параметры по разделам и поиск по ним'
   await waitFor(() => ui.evaluate('innerHeight < 300'), 3000);
 });
 
+await check('поиск по параметрам находит сочетания клавиш', async () => {
+  await ui.evaluate("openHub('settings')");
+  await waitFor(() => ui.evaluate("document.querySelectorAll('.setcat').length >= 10"));
+  await ui.evaluate("el.hubq.value = 'ctrl+f'; el.hubq.dispatchEvent(new Event('input'))");
+  await waitFor(() => ui.evaluate("[...document.querySelectorAll('.keys kbd')].map((k) => k.textContent).join() === 'Ctrl+F'"));
+  await ui.evaluate("el.hubq.value = ''; closeHub()");
+  await waitFor(() => ui.evaluate('innerHeight < 300'), 3000);
+});
+
+await check('меню целиком внутри окна', async () => {
+  await ui.evaluate('openMainMenu()');
+  await waitFor(() => ui.evaluate("menuKind === 'main' && el.layer.classList.contains('open')"));
+  await sleep(400); // ждём конца анимации появления
+  const box = await ui.evaluate('(() => { const r = el.menu.getBoundingClientRect(); return [r.right, r.bottom, innerWidth, innerHeight]; })()');
+  if (box[0] > box[2] || box[1] > box[3]) throw new Error(`меню вылезло за окно: ${box}`);
+  await ui.evaluate('closeMenu()');
+  await waitFor(() => ui.evaluate('innerHeight < 200'), 3000);
+});
+
+await check('дата на новой вкладке: месяц со строчной', async () => {
+  const date = await ui.evaluate("getComputedStyle(el.date).textTransform + ' ' + el.date.textContent");
+  if (!/^none [А-ЯЁ][а-яё]+, \d+ [а-яё]+$/.test(date)) throw new Error(`дата: ${date}`);
+});
+
+await check('заставки в параметрах не обрывают друг друга', async () => {
+  await ui.evaluate("openHub('settings')");
+  await waitFor(() => ui.evaluate("el.hub.offsetHeight > 200"));
+  await ui.evaluate("playSplash('compass', true)");
+  await sleep(600);
+  await ui.evaluate("playSplash('aurora', true)");
+  await sleep(900); // первая уже закончилась бы, вторая ещё должна играть
+  const cls = await ui.evaluate("document.getElementById('splash').className");
+  if (cls !== 'show s-aurora') throw new Error(`вторая заставка оборвалась: ${cls}`);
+  await waitFor(() => ui.evaluate("!document.getElementById('splash').className"), 3000);
+  await ui.evaluate('closeHub()');
+  await waitFor(() => ui.evaluate('innerHeight < 300'), 3000);
+});
+
 await check('остров и свои кнопки на панели', async () => {
   await ui.evaluate("send('set', { key: 'bar_style', value: 'island' }); send('set', { key: 'buttons', value: [{ name: 'Тест', url: 'https://example.org/' }] })");
   await waitFor(() => ui.evaluate("document.body.classList.contains('bar-island') && document.querySelectorAll('#mybtns .mybtn').length === 1 && getComputedStyle($('#toolbar')).borderRadius !== '0px'"));

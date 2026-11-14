@@ -99,6 +99,11 @@ fn escape_html(text: &str) -> String {
 /// Своя страница вместо стандартной страницы ошибки WebView2.
 pub fn error_page(url: &str, kind: &str, dark: bool) -> String {
     let (title, hint) = describe_error(kind);
+    // сбой и зависание — беда самой страницы, а не сети: значок без «нет Wi-Fi»
+    let glyph = match kind {
+        "crash" | "hang" => r#"<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M12 11v4"/><path d="M12 18h.01"/>"#,
+        _ => r#"<path d="M5 12.5a10 10 0 0 1 14 0"/><path d="M8.5 16a5 5 0 0 1 7 0"/><path d="M12 19.5h.01"/><path d="m3 3 18 18"/>"#,
+    };
     let host = url.split("://").nth(1).unwrap_or(url).split('/').next().unwrap_or(url);
     // в JS адрес попадает через JSON — кавычки и скобки в нём ничего не сломают
     let url_js = serde_json::to_string(url).unwrap_or_else(|_| "\"\"".into()).replace("</", "<\\/");
@@ -138,8 +143,7 @@ pub fn error_page(url: &str, kind: &str, dark: bool) -> String {
 <div class="glow"></div>
 <div class="card">
   <div class="icon"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-    stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5a10 10 0 0 1 14 0"/>
-    <path d="M8.5 16a5 5 0 0 1 7 0"/><path d="M12 19.5h.01"/><path d="m3 3 18 18"/></svg></div>
+    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{glyph}</svg></div>
   <h1>{title}</h1>
   <div class="host">{host}</div>
   <p>{hint}</p>
@@ -157,6 +161,7 @@ pub fn error_page(url: &str, kind: &str, dark: bool) -> String {
 </body></html>"##,
         title = title,
         hint = hint,
+        glyph = glyph,
         host = escape_html(host),
         url_js = url_js,
     )
@@ -190,5 +195,13 @@ mod tests {
         assert!(html.contains("Не удалось найти сайт"));
         let host = error_page("https://a<b>.com/", "timeout", false);
         assert!(host.contains("a&lt;b&gt;.com"));
+    }
+
+    #[test]
+    fn crash_page_has_its_own_icon() {
+        let wifi = "m3 3 18 18";
+        assert!(error_page("https://a.com/", "dns", true).contains(wifi));
+        assert!(!error_page("https://a.com/", "crash", true).contains(wifi));
+        assert!(!error_page("https://a.com/", "hang", false).contains(wifi));
     }
 }

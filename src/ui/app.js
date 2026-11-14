@@ -1189,7 +1189,9 @@ function tick() {
   const now = new Date();
   $('#greeting').textContent = greetingFor(now.getHours());
   el.clock.textContent = now.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
-  el.date.textContent = now.toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' });
+  // с большой буквы только день недели: «Суббота, 14 ноября», а не «14 Ноября»
+  const date = now.toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' });
+  el.date.textContent = date.charAt(0).toUpperCase() + date.slice(1);
 }
 // Раз в минуту, ровно в её начале: интерфейс почти не просыпается зря.
 function scheduleTick() {
@@ -1293,9 +1295,13 @@ async function showMenu(kind, nodes, place) {
   await requestLayer('menu');
   if (menuKind !== kind) return;
   el.catcher.classList.add('open');
-  el.menu.style.left = el.menu.style.top = el.menu.style.right = '';
+  el.menu.style.left = el.menu.style.top = el.menu.style.right = el.menu.style.maxHeight = '';
   el.menu.classList.add('open');
-  place(el.menu.getBoundingClientRect());
+  // настоящие размеры, а не getBoundingClientRect: меню появляется уменьшенным (scale .94),
+  // и по рамке анимации оно вставало бы правым краем за окно
+  place({ width: el.menu.offsetWidth, height: el.menu.offsetHeight });
+  // в невысоком окне длинное меню не уходит за нижний край, а прокручивается
+  el.menu.style.maxHeight = Math.max(120, innerHeight - el.menu.offsetTop - 8) + 'px';
   el.menu.focus();
 }
 
@@ -2027,6 +2033,12 @@ function settingsPage() {
         if (row.textContent.toLowerCase().includes(query)) any = true;
         else row.remove();
       }
+      // сочетания клавиш — не строки параметров, а пары «что — клавиши»: ищем и по ним
+      for (const what of card.querySelectorAll('.keys > span')) {
+        const keys = what.nextElementSibling;
+        if ((what.textContent + ' ' + keys.textContent).toLowerCase().includes(query)) any = true;
+        else { what.remove(); keys.remove(); }
+      }
       return any;
     });
     if (!cards.length) cards = [emptyState('settings')];
@@ -2034,7 +2046,12 @@ function settingsPage() {
     cards = SETTINGS_CATS.find(([id]) => id === settingsCat)[2]().filter(Boolean);
   }
   // значения выставляем после вставки в документ, когда известны размеры кнопок
-  requestAnimationFrame(() => settingsUpdaters.forEach((update) => update()));
+  requestAnimationFrame(() => {
+    settingsUpdaters.forEach((update) => update());
+    // в узком окне разделы листаются вбок: выбранный должен быть на виду
+    const on = nav.querySelector('.on');
+    if (on) nav.scrollLeft = Math.max(0, on.offsetLeft - nav.clientWidth / 2 + on.offsetWidth / 2);
+  });
   return [nav, ...cards.map((card, i) => { card.style.setProperty('--i', i + 1); return card; })];
 }
 
@@ -2167,6 +2184,7 @@ document.addEventListener('keydown', (event) => {
       const step = event.key === 'ArrowDown' ? 1 : -1;
       menuSel = (menuSel + step + menuItems.length) % menuItems.length;
       menuItems.forEach((node, i) => node.classList.toggle('sel', i === menuSel));
+      menuItems[menuSel]?.scrollIntoView({ block: 'nearest' });
       return;
     }
     if (event.key === 'Enter' && menuSel >= 0) { menuItems[menuSel].click(); return; }
@@ -2975,6 +2993,7 @@ function warpStars(canvas, until) {
   requestAnimationFrame(frame);
 }
 
+let splashRun = 0;
 /** Играет заставку; preview — показ из параметров, тогда Rust не трогаем. */
 function playSplash(kind, preview = false) {
   const box = $('#splash');
@@ -2990,15 +3009,19 @@ function playSplash(kind, preview = false) {
   box.querySelector('.slogo').innerHTML = LOGO;
   if (kind === 'warp') warpStars(box.querySelector('canvas'), performance.now() + info.ms + 600);
   let done = false;
+  const run = ++splashRun;
   const finish = () => {
     if (done) return;
     done = true;
     removeEventListener('keydown', finish, true);
+    // поверх уже играет следующая заставка (в параметрах щёлкнули другую) — её не обрываем
+    if (run !== splashRun) { if (!preview) send('splash_done'); return; }
     box.classList.add('leave');
     setTimeout(() => {
+      if (!preview) send('splash_done');
+      if (run !== splashRun) return;
       box.className = '';
       box.replaceChildren();
-      if (!preview) send('splash_done');
     }, 480);
   };
   box.onmousedown = finish;
@@ -3007,10 +3030,13 @@ function playSplash(kind, preview = false) {
 }
 
 function splashSetting() {
+  const show = h('button', { class: 'text-btn outline', onclick: () => playSplash(S.settings.splash, true) }, 'Показать');
+  // без заставки показывать нечего
+  settingsUpdaters.push(() => { show.disabled = !SPLASHES[S.settings.splash]; });
   return setting('Заставка при запуске', 'Короткая анимация, пока открываются вкладки. Щелчок или клавиша пропускают её',
     segmented([...Object.entries(SPLASHES).map(([id, s]) => [id, s.name]), ['off', 'Без заставки']],
       () => S.settings.splash, (value) => { set('splash', value); if (value !== 'off') playSplash(value, true); }),
-    h('button', { class: 'text-btn outline', onclick: () => playSplash(S.settings.splash, true) }, 'Показать'));
+    show);
 }
 
 if (BOOT.splash && BOOT.splash !== 'off') {
