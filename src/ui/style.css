@@ -1708,13 +1708,13 @@ body.glass #hubnav, body.glass .card { background: var(--glass-surface-2); }
 #splash .sbar { display: none; }
 @keyframes s-letter { from { opacity: 0; transform: translateY(14px); filter: blur(6px); } }
 
-/* «Компас»: значок выпрыгивает, кольцо дорисовывается, стрелка докручивается до севера */
-.s-compass .sq { transform-origin: 50px 50px; animation: s-pop .6s var(--spring) backwards; }
-.s-compass .ring { stroke-dasharray: 100; animation: s-draw .8s .3s var(--ease) backwards; }
-.s-compass .needle { transform-origin: 50px 52px; animation: s-planet .8s .15s var(--spring) backwards; }
-.s-compass .spark { transform-origin: 80px 28px; animation: s-twinkle .7s .75s var(--spring) backwards; }
-@keyframes s-planet { from { opacity: 0; transform: scale(.2); } }
-@keyframes s-twinkle { from { opacity: 0; transform: scale(0) rotate(-90deg); } }
+/* «Комета»: фон выпрыгивает, курсор влетает снизу слева, за ним прорисовываются шлейфы, волна */
+.s-compass .sq { transform-origin: 256px 256px; animation: s-pop .55s var(--spring) backwards; }
+.s-compass .arrow { animation: s-fly .75s .2s cubic-bezier(.2, .9, .25, 1.12) backwards; }
+.s-compass .trail { stroke-dasharray: 100; animation: s-trail .6s .55s var(--ease) backwards; }
+.s-compass .t2 { animation-delay: .62s; }
+.s-compass .t3 { animation-delay: .69s; }
+.s-compass .slogo { position: relative; }
 .s-compass .slogo::before {
   content: "";
   position: absolute;
@@ -1723,17 +1723,16 @@ body.glass #hubnav, body.glass .card { background: var(--glass-surface-2); }
   width: 112px;
   height: 112px;
   margin: -56px 0 0 -56px;
-  border-radius: 32px;
+  border-radius: 30px;
   border: 2px solid color-mix(in srgb, var(--accent) 70%, #fff);
-  animation: s-wave 1.1s .35s var(--ease) both;
+  animation: s-wave 1.1s .5s var(--ease) both;
 }
-.s-compass .slogo { position: relative; }
 .s-compass.leave .slogo { animation: s-zoom .48s cubic-bezier(.6, 0, .8, .4) forwards; }
 .s-compass.leave { animation: s-fade .48s .08s ease-in forwards; }
 .s-compass.leave .stitle { animation: s-fade .2s ease-in forwards; }
-@keyframes s-pop { from { opacity: 0; transform: scale(.3) rotate(-25deg); } }
-@keyframes s-draw { from { stroke-dashoffset: 100; } }
-@keyframes s-spin { from { opacity: 0; transform: rotate(-600deg) scale(.4); } }
+@keyframes s-pop { from { opacity: 0; transform: scale(.3) rotate(-18deg); } }
+@keyframes s-fly { from { opacity: 0; transform: translate(-150px, 150px) scale(.5); } }
+@keyframes s-trail { from { stroke-dashoffset: -100; } } /* шлейф тянется от курсора назад */
 @keyframes s-wave { from { opacity: .9; transform: scale(1); } to { opacity: 0; transform: scale(2.6); } }
 @keyframes s-zoom { to { opacity: 0; transform: scale(9); } }
 @keyframes s-fade { to { opacity: 0; } }
