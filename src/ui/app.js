@@ -555,14 +555,17 @@ function startTabDrag(event, id, node) {
       node.classList.add('dragging');
       nodes.forEach((n) => n !== node && n.classList.add('shifting'));
     }
-    const min = axis.start(rects[0]) - axis.start(rects[from]);
-    const max = axis.end(rects[rects.length - 1]) - axis.end(rects[from]);
+    // вкладки свёрнутых групп спрятаны (нулевой размер) — местом для вставки они не считаются
+    const shown = rects.filter((r) => axis.size(r) > 0);
+    const min = axis.start(shown[0]) - axis.start(rects[from]);
+    const max = axis.end(shown[shown.length - 1]) - axis.end(rects[from]);
     const shift = Math.max(min, Math.min(max, dx));
     node.style.transform = `${axis.move}(${shift}px)`;
 
     const center = axis.start(rects[from]) + axis.size(rects[from]) / 2 + shift;
     target = from;
     rects.forEach((r, i) => {
+      if (!axis.size(r)) return;
       const middle = axis.start(r) + axis.size(r) / 2;
       // запас в пиксель: дотянутая до края вкладка должна встать на крайнее место,
       // даже если дробные координаты чуть разошлись
