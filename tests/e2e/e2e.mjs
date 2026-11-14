@@ -189,7 +189,8 @@ await check('поиск по параметрам находит сочетан�
   await ui.evaluate("openHub('settings')");
   await waitFor(() => ui.evaluate("document.querySelectorAll('.setcat').length >= 10"));
   await ui.evaluate("el.hubq.value = 'ctrl+f'; el.hubq.dispatchEvent(new Event('input'))");
-  await waitFor(() => ui.evaluate("[...document.querySelectorAll('.keys kbd')].map((k) => k.textContent).join() === 'Ctrl+F'"));
+  // в редакторе клавиш остаётся только строка с этим сочетанием
+  await waitFor(() => ui.evaluate("[...document.querySelectorAll('.keyrow kbd')].map((k) => k.textContent).join() === 'Ctrl+F'"));
   await ui.evaluate("el.hubq.value = ''; closeHub()");
   await waitFor(() => ui.evaluate('innerHeight < 300'), 3000);
 });

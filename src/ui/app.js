@@ -1362,7 +1362,8 @@ function mainMenuNodes() {
     sep(),
     item({ icon: 'search', label: 'Найти на странице', kb: 'Ctrl+F', disabled: !page, onClick: () => setTimeout(openFind, 140) }),
     item({ icon: 'print', label: 'Печать', kb: 'Ctrl+P', disabled: !page, onClick: () => send('print') }),
-    item({ icon: 'translate', label: /\.translate\.goog\//.test(activeTab()?.url || '') ? 'Показать оригинал' : 'Перевести страницу', disabled: !page,
+    item({ icon: 'translate', label: /\.translate\.goog\//.test(activeTab()?.url || '') ? 'Показать оригинал' : 'Перевести страницу',
+      disabled: !page || (/^ru/.test(activeTab()?.lang || '') && !/\.translate\.goog\//.test(activeTab()?.url || '')),
       onClick: () => send('translate', { original: /\.translate\.goog\//.test(activeTab()?.url || '') }) }),
     item({ icon: 'pip', label: 'Картинка в картинке', kb: 'Alt+P', disabled: !page, onClick: () => send('pip') }),
     item({ icon: 'expand', label: 'Компактный режим', kb: 'Ctrl+Shift+K', check: !!S.settings.compact, onClick: () => set('compact', !S.settings.compact) }),
@@ -2988,7 +2989,8 @@ function recordKey(event) {
 
 function keysCards() {
   const rows = KEY_ACTIONS.map(([id, name, def]) => {
-    const kbd = h('kbd', {});
+    // подпись сразу — по ней ищет поиск в параметрах
+    const kbd = h('kbd', {}, (S.settings.shortcuts || []).find((s) => s.action === id)?.label || def);
     const change = h('button', { class: 'text-btn outline', onclick: () => {
       if (recordingAction) stopRecording();
       recordingAction = id;
