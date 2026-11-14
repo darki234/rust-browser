@@ -98,6 +98,8 @@ pub enum Hotkey {
     Pip,
     /// Компактный режим: панели прячутся в тонкую полоску.
     Compact,
+    /// «Только сайт»: все панели спрятаны, появляются у верхнего края окна.
+    SiteOnly,
     /// Разделить экран / убрать разделение.
     Split,
     Find,
@@ -173,6 +175,7 @@ impl Hotkey {
             (true, true, false) if letter('I') => Self::DevTools,
             (true, true, false) if key == DELETE => Self::Settings,
             (true, true, false) if letter('K') => Self::Compact,
+            (true, true, false) if letter('F') => Self::SiteOnly,
             (true, true, false) if key == TAB => Self::PrevTab,
             _ => return None,
         })
@@ -180,14 +183,14 @@ impl Hotkey {
 }
 
 /// Действия, которым можно назначить свои клавиши: (действие, id в настройках).
-pub const EDITABLE: [(Hotkey, &str); 30] = [
+pub const EDITABLE: [(Hotkey, &str); 31] = [
     (Hotkey::NewTab, "new_tab"), (Hotkey::CloseTab, "close_tab"), (Hotkey::ReopenTab, "reopen_tab"),
     (Hotkey::NewWindow, "new_window"), (Hotkey::InPrivate, "inprivate"), (Hotkey::FocusUrl, "focus_url"),
     (Hotkey::NextTab, "next_tab"), (Hotkey::PrevTab, "prev_tab"), (Hotkey::Reload, "reload"),
     (Hotkey::Back, "back"), (Hotkey::Forward, "forward"), (Hotkey::Bookmark, "bookmark"),
     (Hotkey::Bookmarks, "bookmarks"), (Hotkey::History, "history"), (Hotkey::Downloads, "downloads"),
     (Hotkey::Settings, "settings"), (Hotkey::PasteGo, "paste_go"), (Hotkey::TaskManager, "task_manager"),
-    (Hotkey::Panel, "panel"), (Hotkey::Pip, "pip"), (Hotkey::Compact, "compact"), (Hotkey::Split, "split"),
+    (Hotkey::Panel, "panel"), (Hotkey::Pip, "pip"), (Hotkey::Compact, "compact"), (Hotkey::SiteOnly, "site_only"), (Hotkey::Split, "split"),
     (Hotkey::Find, "find"), (Hotkey::ZoomIn, "zoom_in"), (Hotkey::ZoomOut, "zoom_out"),
     (Hotkey::Print, "print"), (Hotkey::DevTools, "devtools"), (Hotkey::FavBar, "favbar"),
     (Hotkey::Fullscreen, "fullscreen"), (Hotkey::Menu, "menu"),

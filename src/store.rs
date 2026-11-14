@@ -82,6 +82,8 @@ pub struct Settings {
     pub process_limit: u32,
     /// Компактный режим: панели спрятаны в тонкую полоску сверху.
     pub compact: bool,
+    /// Адрес прямо в активной вкладке (как в Safari): отдельной адресной строки нет.
+    pub url_in_tab: bool,
     /// Свой вид сайтов: хост → шрифт, оттенок, скрытые элементы, CSS.
     pub boosts: std::collections::BTreeMap<String, crate::boosts::Boost>,
     /// Свои сочетания клавиш.
@@ -144,6 +146,7 @@ impl Default for Settings {
             auto_update: true,
             process_limit: 0,
             compact: false,
+            url_in_tab: false,
             boosts: Default::default(),
             shortcuts: Vec::new(),
             update_source: String::new(),

@@ -284,6 +284,39 @@ await check('узкий остров: адресная строка-кнопка
   await waitFor(() => ui.evaluate("!urlbox.classList.contains('expanded') && !document.body.classList.contains('url-collapsed')"));
 });
 
+await check('готовые раскладки, адрес во вкладке и «только сайт»', async () => {
+  const server = createServer((req, res) => { res.setHeader('content-type', 'text/html; charset=utf-8'); res.end('<title>Страница</title><p>текст</p>'); });
+  await new Promise((r) => server.listen(8768, '127.0.0.1', r));
+  try {
+    await ui.evaluate("send('navigate', { text: 'http://127.0.0.1:8768/a' })");
+    await waitFor(() => ui.evaluate("activeTab()?.url.includes(':8768/a') && !activeTab().start")).catch((e) => { throw new Error('шаг 1: ' + e.message); });
+    // раскладка «Остров» одним щелчком и подсветка выбранной
+    await ui.evaluate("settingsCat = 'layout'; openHub('settings')");
+    await waitFor(() => ui.evaluate("document.querySelectorAll('.preset').length === 5")).catch((e) => { throw new Error('шаг 2: ' + e.message); });
+    await ui.evaluate("[...document.querySelectorAll('.preset')].find((b) => b.textContent.startsWith('Остров')).click()");
+    await waitFor(() => ui.evaluate("S.settings.barStyle === 'island' && !!S.settings.islandTabs")).catch((e) => { throw new Error('шаг 3: ' + e.message); });
+    await waitFor(() => ui.evaluate("document.querySelector('.preset.on b')?.textContent === 'Остров'")).catch((e) => { throw new Error('шаг 4: ' + e.message); });
+    await ui.evaluate("closeHub(); send('set', { key: 'bar_style', value: 'classic' }); send('set', { key: 'island_tabs', value: false })");
+    await waitFor(() => ui.evaluate("!layerKind"));
+    // адрес во вкладке: строки нет, вкладка показывает адрес, Ctrl+L раскрывает ввод
+    await ui.evaluate("send('set', { key: 'url_in_tab', value: true })");
+    await waitFor(() => ui.evaluate("document.body.classList.contains('url-in-tab') && getComputedStyle(urlbox).display === 'none'")).catch((e) => { throw new Error('шаг 5: ' + e.message); });
+    await waitFor(() => ui.evaluate("document.querySelector('.tab.active .title').textContent.includes('127.0.0.1:8768/a')")).catch((e) => { throw new Error('шаг 6: ' + e.message); });
+    await ui.evaluate("ui.focusUrl()"); // как Ctrl+L
+    await waitFor(() => ui.evaluate("urlbox.classList.contains('expanded') && urlbox.offsetWidth > 300")).catch((e) => { throw new Error('шаг 7: ' + e.message); });
+    // в неактивном тестовом окне blur не приходит — закрываем подсказки и строку сами
+    await ui.evaluate("el.url.blur(); closeSheet(); collapseUrl(); send('set', { key: 'url_in_tab', value: false })");
+    await waitFor(() => ui.evaluate("!document.body.classList.contains('url-in-tab') && getComputedStyle(urlbox).display !== 'none'")).catch((e) => { throw new Error('шаг 8: ' + e.message); });
+    // «только сайт»: панели — невидимая полоска, сайт с самого верха
+    await ui.evaluate("send('site_only')");
+    await waitFor(() => ui.evaluate("S.siteOnly && document.body.classList.contains('site-only') && innerHeight <= 6")).catch(async (e) => { throw new Error('шаг 9: ' + e.message); });
+    await ui.evaluate("send('site_only')");
+    await waitFor(() => ui.evaluate("!S.siteOnly && innerHeight > 60")).catch((e) => { throw new Error('шаг 10: ' + e.message); });
+  } finally {
+    server.close();
+  }
+});
+
 await check('тема AMOLED и прозрачные панели', async () => {
   await ui.evaluate("send('set', { key: 'theme', value: 'amoled' }); send('set', { key: 'glass', value: 40 })");
   await waitFor(() => ui.evaluate("document.body.classList.contains('amoled') && document.body.classList.contains('glass') && getComputedStyle(document.body).getPropertyValue('--bg').trim() === '#000000'"));

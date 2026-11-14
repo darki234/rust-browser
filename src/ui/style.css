@@ -842,9 +842,12 @@ body[data-wall="image"] #wallbtn { color: #fff; background: rgba(0, 0, 0, .3); b
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 24px 24px 56px;
+  padding: 24px 24px 18px;
   overflow-y: auto;
 }
+/* пустой элемент сверху и строка статистики снизу делят свободное место: содержимое
+   по центру, статистика у нижнего края; не хватает места — она просто идёт после плиток */
+.start-inner::before { content: ""; margin-top: auto; }
 .start-inner > * { animation: rise .6s var(--ease) backwards; }
 .start-inner > :nth-child(2) { animation-delay: .05s; }
 .start-inner > :nth-child(3) { animation-delay: .1s; }
@@ -983,8 +986,8 @@ body.inprivate #privatenote { display: flex; }
 .tiles-hint { color: var(--muted); font-size: 13px; text-align: center; }
 
 #stat {
-  position: absolute;
-  bottom: 18px;
+  margin-top: auto;
+  padding-top: 24px;
   display: flex;
   align-items: center;
   gap: 7px;
@@ -1197,6 +1200,22 @@ body.inprivate #privatenote { display: flex; }
 
 /* ---------- параметры ---------- */
 
+/* готовые раскладки */
+.presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 10px; }
+.preset { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; padding: 10px; border-radius: 14px;
+  border: 1px solid var(--border); background: var(--hover); text-align: left;
+  transition: border-color .15s, transform .2s var(--spring), background .15s; }
+.preset:hover { transform: translateY(-2px); background: var(--press); }
+.preset.on { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+.preset-art { width: 100%; }
+.preset-art svg { width: 100%; height: auto; display: block; margin-bottom: 4px; }
+.preset-art .w { fill: none; stroke: var(--border); }
+.preset-art .a { fill: var(--accent); opacity: .85; }
+.preset-art .b { fill: var(--muted); opacity: .45; }
+.preset-art .c { fill: var(--muted); opacity: .25; }
+.preset b { font-weight: 600; }
+.preset small { color: var(--muted); font-size: 11.5px; line-height: 1.3; }
+
 .card {
   margin: 0 10px 14px;
   padding: 6px 0;
@@ -1389,9 +1408,9 @@ body.bar-compact #toolbar { grid-area: tool; height: 46px; background: transpare
 body.bar-compact #titlebar { grid-area: title; height: 46px; align-items: center; background: transparent; padding-left: 2px; }
 body.bar-compact #tabs { height: 34px; align-items: center; padding: 0 6px; }
 /* много вкладок в одной строке — листаются колесом, а не наезжают на кнопки окна */
-body:is(.bar-compact, .bar-floating) #tabs { overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
-body:is(.bar-compact, .bar-floating) #tabs::-webkit-scrollbar { display: none; }
-body:is(.bar-compact, .bar-floating) .tab:not(.pinned) { min-width: 72px; }
+body:is(.bar-classic, .bar-compact, .bar-floating) #tabs { overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+body:is(.bar-classic, .bar-compact, .bar-floating) #tabs::-webkit-scrollbar { display: none; }
+body:is(.bar-classic, .bar-compact, .bar-floating) .tab:not(.pinned) { min-width: 72px; }
 body.bar-compact .tab { height: 34px; }
 body.bar-compact #newtab { margin: 0 0 0 4px; }
 body.bar-compact #winctl { align-self: stretch; }
@@ -2079,6 +2098,9 @@ body.compact-mode:not(.compact-open) #chrome::before {
   content: ""; position: absolute; z-index: 30; top: 1px; left: 50%; width: 64px; height: 4px; margin-left: -32px;
   border-radius: 2px; background: color-mix(in srgb, var(--accent) 70%, var(--faint)); opacity: .7; visibility: visible;
 }
+/* «Только сайт»: полоска для наведения есть, но её не видно */
+body.site-only.compact-mode:not(.compact-open) #chrome { max-height: 4px; background: transparent; border: 0; box-shadow: none; }
+body.site-only.compact-mode:not(.compact-open) #chrome::before { opacity: 0; }
 body.compact-mode.compact-open #chrome { box-shadow: 0 12px 34px rgba(0, 0, 0, .35); animation: slide-down .2s var(--ease); }
 /* ---------- редактор клавиш ---------- */
 .keyrow { min-height: 46px; }
@@ -2115,6 +2137,12 @@ body.url-collapsed #urlbox:not(.expanded)::before {
   content: ""; width: 17px; height: 17px; background: var(--text);
   -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-3.6-3.6'/%3E%3C/svg%3E") center / contain no-repeat;
 }
+/* адрес во вкладке (как в Safari): своей строки нет, раскрытая растягивается на всю панель */
+body.url-in-tab #urlbox:not(.expanded) { display: none; }
+body.url-in-tab #chrome { position: relative; }
+body.url-in-tab #toolbar { position: static; }
+body.url-in-tab .tab.active.urltab:not(.pinned) { flex: 0 0 300px; min-width: 200px; max-width: 45%; }
+body.url-in-tab .tab.urltab .title { cursor: text; }
 body.url-collapsed #urlbox.expanded {
   position: absolute; z-index: 6; left: 6px; right: 6px; margin: 0;
   background: var(--surface); border-color: var(--accent);

@@ -233,7 +233,7 @@ const hsl = (h, s, l) => `hsl(${((h % 360) + 360) % 360} ${Math.round(s * 100)}%
 
 let appearanceKey = null;
 function applyAppearance(s) {
-  const key = [s.accent, s.tintFrame, s.motion, s.barStyle, s.newtabLayout, S.dark, s.theme, s.glass, s.islandWidth, s.islandRadius, s.islandTabs].join('|');
+  const key = [s.accent, s.tintFrame, s.motion, s.barStyle, !!S.siteOnly, s.newtabLayout, S.dark, s.theme, s.glass, s.islandWidth, s.islandRadius, s.islandTabs].join('|');
   if (key === appearanceKey) return;
   appearanceKey = key;
   const root = document.documentElement.style;
@@ -253,7 +253,9 @@ function applyAppearance(s) {
   const body = document.body.classList;
   body.toggle('tint', !!s.tintFrame);
   for (const m of ['smooth', 'fast', 'bouncy', 'off']) body.toggle('motion-' + m, s.motion === m);
-  for (const b of ['classic', 'compact', 'floating', 'vertical', 'island']) body.toggle('bar-' + b, s.barStyle === b);
+  // вертикальные вкладки на время «только сайта» уступают обычной полосе: её проще прятать
+  const bar = S.siteOnly && s.barStyle === 'vertical' ? 'classic' : s.barStyle;
+  for (const b of ['classic', 'compact', 'floating', 'vertical', 'island']) body.toggle('bar-' + b, bar === b);
   // остров: ширина в процентах окна, скругление 0–100 % (100 % — капсула при высоте 46 px)
   body.toggle('island-tabs', s.barStyle === 'island' && !!s.islandTabs);
   root.setProperty('--island-w', String(s.islandWidth ?? 62));
@@ -291,6 +293,9 @@ function colorSetting() {
 }
 
 let lastActiveTab = null;
+let lastScrollKey = '';
+let wasSiteOnly = false;
+let lastUrlInTab = false;
 function setState(next) {
   // Rust присылает только изменившиеся части: закладки, загрузки и параметры — не каждый раз.
   S = { ...S, ...next };
@@ -301,10 +306,22 @@ function setState(next) {
   document.body.classList.toggle('panel-open', !!S.panelOpen);
   $('#panelbtn').classList.toggle('on', !!S.panelOpen);
   applyAppearance(S.settings);
+  document.body.classList.toggle('site-only', !!S.siteOnly);
+  if (urlInTab() !== lastUrlInTab) { lastUrlInTab = urlInTab(); requestAnimationFrame(measureUrl); }
+  if (!!S.siteOnly !== wasSiteOnly) {
+    wasSiteOnly = !!S.siteOnly;
+    if (wasSiteOnly) toast('Только сайт: панели — у верхнего края окна. Выход — Ctrl+Shift+F');
+    requestAnimationFrame(reportChrome);
+  }
   if (S.active !== lastActiveTab) { lastActiveTab = S.active; setIslandHidden(false); }
   renderTabs();
   // вкладки внутри острова прокручиваются: активная всегда на виду
-  if (tabsScroll()) tabEls.get(S.active)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  // (только когда сменилась активная или число вкладок: состояние приходит до 25 раз в секунду)
+  const scrollKey = S.active + '|' + S.tabs.length + '|' + tabsScroll();
+  if (scrollKey !== lastScrollKey) {
+    lastScrollKey = scrollKey;
+    if (tabsScroll()) tabEls.get(S.active)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
   renderToolbar();
   renderFavbar();
   renderStart();
@@ -352,9 +369,14 @@ function reportChrome() {
   const side = vertical() ? Math.round(box.width) : 0;
   const real = side ? 0 : Math.round(box.height);
   const compact = document.body.classList.contains('compact-mode');
-  const height = compact ? 6 : real;
+  const siteOnly = compact && !!S.siteOnly;
+  const height = siteOnly ? 4 : compact ? 6 : real;
   if (!height && !side) return;
-  const float = compact ? null : chromeShape();
+  // «только сайт»: страница от самого верха, а над ней — невидимая полоска для наведения
+  // (раскрытые панели — целиком, с запасом под тень)
+  const float = siteOnly
+    ? { top: 0, parts: [[0, 0, innerWidth, compactOpen ? real + 40 : 4, 0]] }
+    : compact ? null : chromeShape();
   const key = height + '|' + side + '|' + JSON.stringify(float);
   if (key === floatKey) return;
   floatKey = key;
@@ -365,7 +387,7 @@ function reportChrome() {
   // раскрытый компактный режим вырос — окно интерфейса растёт вместе с ним
   if (compact && compactOpen && !layerKind) send('overlay', { mode: 'sheet', height: compactExtra() + (sheetOpen ? sheetHeight : 0) });
   // страница начинается под вкладками: снимок под меню и библиотекой — оттуда же
-  document.body.classList.toggle('island-float', !!float);
+  document.body.classList.toggle('island-float', !!float && !siteOnly);
   if (float) document.documentElement.style.setProperty('--page-top', float.top + 'px');
   send('chrome', { height, side, float });
 }
@@ -403,7 +425,7 @@ $('#win-close').addEventListener('click', () => send('close'));
 
 // Пустое место в полосе вкладок двигает окно, двойной щелчок разворачивает.
 // вкладки внутри острова и в одной строке с панелью листаются колесом мыши
-function tabsScroll() { return ['island-tabs', 'bar-compact', 'bar-floating'].some((c) => document.body.classList.contains(c)); }
+function tabsScroll() { return ['island-tabs', 'bar-classic', 'bar-compact', 'bar-floating'].some((c) => document.body.classList.contains(c)); }
 el.tabs.addEventListener('wheel', (event) => {
   if (!tabsScroll() || el.tabs.scrollWidth <= el.tabs.clientWidth) return;
   event.preventDefault();
@@ -515,8 +537,12 @@ function updateTab(node, tab) {
   node.classList.toggle('pinned', tab.pinned);
   node.classList.toggle('sleeping', tab.sleeping && tab.id !== S.active);
   const title = tab.start ? 'Новая вкладка' : tab.title || prettyUrl(tab.url) || 'Загрузка…';
+  // адрес во вкладке: активная показывает сайт и путь вместо заголовка
+  const asUrl = urlInTab() && tab.id === S.active && !tab.start && !!tab.url;
+  node.classList.toggle('urltab', asUrl);
+  const shown = asUrl ? prettyUrl(tab.url).replace(/^http:\/\//, '') : title;
   const titleEl = node.querySelector('.title');
-  if (titleEl.textContent !== title) titleEl.textContent = title;
+  if (titleEl.textContent !== shown) titleEl.textContent = shown;
   node.title = tab.sleeping && tab.id !== S.active ? `${title}\nВкладка спит и не тратит ресурсы` : title;
 
   // Значок пересоздаём, только когда он действительно меняется.
@@ -543,6 +569,7 @@ function updateTab(node, tab) {
 /** Нажатие активирует вкладку, а протягивание переставляет её среди соседей. */
 function startTabDrag(event, id, node) {
   if (event.button !== 0 || event.target.closest('.tab-btn')) return;
+  const wasActive = id === S.active;
   send('activate', { id });
 
   const nodes = aliveTabNodes();
@@ -603,6 +630,8 @@ function startTabDrag(event, id, node) {
     node.removeEventListener('pointermove', move);
     node.removeEventListener('pointerup', up);
     node.removeEventListener('pointercancel', up);
+    // адрес во вкладке: щелчок по уже активной вкладке открывает строку ввода
+    if (!dragging && wasActive && urlInTab() && !activeTab()?.start) openUrlFromTab(node);
     if (!dragging) return;
     // Сразу ставим вкладку на новое место, чтобы ничего не прыгало до ответа Rust.
     for (const n of nodes) {
@@ -951,6 +980,8 @@ el.url.addEventListener('keydown', (event) => {
 
 function focusUrl() {
   const target = activeTab()?.start && !layerKind ? el.startq : el.url;
+  // свёрнутая строка или адрес во вкладке — раскрываем сразу, не дожидаясь события focus
+  if (target === el.url) expandUrl();
   target.focus();
   target.select();
 }
@@ -1380,6 +1411,7 @@ function mainMenuNodes() {
       disabled: !page || (/^ru/.test(activeTab()?.lang || '') && !/\.translate\.goog\//.test(activeTab()?.url || '')),
       onClick: () => send('translate', { original: /\.translate\.goog\//.test(activeTab()?.url || '') }) }),
     item({ icon: 'pip', label: 'Картинка в картинке', kb: 'Alt+P', disabled: !page || !activeTab()?.video, onClick: () => send('pip') }),
+    item({ icon: 'expand', label: 'Только сайт', kb: 'Ctrl+Shift+F', check: !!S.siteOnly, onClick: () => send('site_only') }),
     item({ icon: 'expand', label: 'Компактный режим', kb: 'Ctrl+Shift+K', check: !!S.settings.compact, onClick: () => set('compact', !S.settings.compact) }),
     item({ icon: 'split', label: S.split && [S.split.left, S.split.right].includes(S.active) ? 'Убрать разделение экрана' : 'Разделить экран', disabled: !page,
       onClick: () => send(S.split && [S.split.left, S.split.right].includes(S.active) ? 'unsplit' : 'split') }),
@@ -1507,7 +1539,9 @@ const SECTIONS = {
 
 let hubSection = null;
 let tasksData = null;
-let tasksTimer = 0;
+let tasksWatch = false;
+// диспетчер открыт — браузер сам присылает список, когда в нём что-то поменялось
+function watchTasks(on) { if (on !== tasksWatch) { tasksWatch = on; send('tasks_watch', { on }); } }
 let historyItems = [];
 let hubKey = null;
 
@@ -1535,7 +1569,7 @@ async function openHub(section) {
   }
 
   hubKey = null;
-  clearInterval(tasksTimer);
+  watchTasks(section === 'tasks');
   if (section === 'history') {
     historyItems = [];
     el.hublist.replaceChildren();
@@ -1545,7 +1579,6 @@ async function openHub(section) {
     tasksData = null;
     el.hublist.replaceChildren();
     send('tasks');
-    tasksTimer = setInterval(() => { if (hubSection === 'tasks') send('tasks'); }, 2000);
   } else {
     renderHubList(true);
   }
@@ -1560,7 +1593,7 @@ async function openHub(section) {
 
 function closeHub(instant = false) {
   if (!hubSection) return;
-  clearInterval(tasksTimer);
+  watchTasks(false);
   hubSection = null;
   el.hubbtn.classList.remove('on');
   if (instant) {
@@ -1955,6 +1988,7 @@ const SETTINGS_CATS = [
     typeof wallGalleryCard === 'function' && wallGalleryCard(),
   ]],
   ['layout', 'Панели и вкладки', () => [
+    presetsCard(),
     h('div', { class: 'card' }, h('h2', {}, 'Панели'),
       setting('Вид панели', 'Классика, всё в одну строку, парящая панель или вкладки слева',
         segmented([['classic', 'Классика'], ['compact', 'Компакт'], ['floating', 'Плавающая'], ['island', 'Остров'], ['vertical', 'Вертикальные вкладки']],
@@ -1962,6 +1996,8 @@ const SETTINGS_CATS = [
       ...islandSettings(),
       setting('Компактный режим', 'Вкладки и адресная строка свёрнуты в тонкую полоску сверху и выезжают при наведении мыши — почти весь экран для сайта · Ctrl+Shift+K',
         toggle(() => S.settings.compact, (value) => set('compact', value))),
+      setting('Адрес во вкладке', 'Как в Safari: отдельной адресной строки нет, адрес показывает активная вкладка — щелчок по ней или Ctrl+L открывает ввод',
+        toggle(() => S.settings.urlInTab, (value) => set('url_in_tab', value))),
       setting('Панель избранного', 'Сайты из избранного под адресной строкой · Ctrl+Shift+B',
         toggle(() => S.settings.favbar, (value) => set('favbar', value))),
       setting('Боковая панель', 'Заметки, калькулятор и мессенджеры справа · Ctrl+Shift+E',
@@ -2957,7 +2993,7 @@ const KEY_ACTIONS = [
   ['print', 'Печать', 'Ctrl+P'], ['fullscreen', 'Во весь экран', 'F11'], ['devtools', 'Инструменты разработчика', 'F12'],
   ['favbar', 'Панель избранного', 'Ctrl+Shift+B'], ['task_manager', 'Диспетчер вкладок', 'Shift+Esc'],
   ['panel', 'Боковая панель', 'Ctrl+Shift+E'], ['pip', 'Картинка в картинке', 'Alt+P'],
-  ['compact', 'Компактный режим', 'Ctrl+Shift+K'], ['split', 'Разделить экран', '—'],
+  ['compact', 'Компактный режим', 'Ctrl+Shift+K'], ['site_only', 'Только сайт', 'Ctrl+Shift+F'], ['split', 'Разделить экран', '—'],
   ['paste_go', 'Вставить и перейти', 'Ctrl+Shift+L'], ['menu', 'Меню', 'Alt+F'],
 ];
 const KEY_NAMES = { 37: '←', 38: '↑', 39: '→', 40: '↓', 32: 'Пробел', 13: 'Enter', 9: 'Tab', 27: 'Esc', 46: 'Del', 8: 'Backspace',
@@ -3032,11 +3068,47 @@ function keysCards() {
   ];
 }
 
+// ---------- готовые раскладки ----------
+// Один щелчок — набор настроек вида сразу (как пресеты Vivaldi): схема рисуется SVG.
+const PRESETS = [
+  { id: 'classic', name: 'Классика', hint: 'вкладки и адрес в две строки',
+    set: { bar_style: 'classic', compact: false, favbar: true },
+    svg: '<rect x="2" y="2" width="56" height="5" rx="1.5" class="a"/><rect x="2" y="9" width="56" height="5" rx="1.5" class="b"/><rect x="2" y="16" width="56" height="2" rx="1" class="c"/>' },
+  { id: 'island', name: 'Остров', hint: 'всё в плавающем островке',
+    set: { bar_style: 'island', island_tabs: true, compact: false, favbar: false },
+    svg: '<rect x="10" y="3" width="40" height="7" rx="3.5" class="a"/>' },
+  { id: 'min', name: 'Минимум', hint: 'одна строка, прячется сама',
+    set: { bar_style: 'compact', compact: true, favbar: false },
+    svg: '<rect x="2" y="2" width="56" height="2" rx="1" class="a"/>' },
+  { id: 'vertical', name: 'Вертикальная', hint: 'вкладки списком слева',
+    set: { bar_style: 'vertical', compact: false, favbar: false },
+    svg: '<rect x="2" y="2" width="14" height="32" rx="2" class="a"/><rect x="4" y="5" width="10" height="2" rx="1" class="b"/><rect x="4" y="9" width="10" height="2" rx="1" class="b"/><rect x="4" y="13" width="10" height="2" rx="1" class="b"/>' },
+  { id: 'floating', name: 'Плавающая', hint: 'парящая панель над сайтом',
+    set: { bar_style: 'floating', compact: false, favbar: false },
+    svg: '<rect x="2" y="2" width="56" height="5" rx="1.5" class="b"/><rect x="5" y="9" width="50" height="6" rx="3" class="a"/>' },
+];
+// подсвечивается по виду панели; избранное — мелочь, его могли включить отдельно
+const presetActive = (p) => Object.entries(p.set).filter(([k]) => k !== 'favbar').every(([k, v]) =>
+  (k === 'bar_style' ? S.settings.barStyle : k === 'island_tabs' ? !!S.settings.islandTabs : !!S.settings[k]) === v);
+function presetsCard() {
+  const grid = h('div', { class: 'presets' });
+  const render = () => grid.replaceChildren(...PRESETS.map((p) => {
+    const art = h('span', { class: 'preset-art' });
+    art.innerHTML = `<svg viewBox="0 0 60 36"><rect x=".5" y=".5" width="59" height="35" rx="4" class="w"/>${p.svg}</svg>`;
+    return h('button', { class: 'preset' + (presetActive(p) ? ' on' : ''), title: p.hint,
+      onclick: () => { for (const [k, v] of Object.entries(p.set)) set(k, v); toast(`Раскладка «${p.name}»`); setTimeout(render, 150); } },
+      art, h('b', {}, p.name), h('small', {}, p.hint));
+  }));
+  render();
+  return h('div', { class: 'card' }, h('h2', {}, 'Готовые раскладки'), grid);
+}
+
 // ---------- компактный режим ----------
 // Панели свёрнуты в тонкую полоску сверху; наведение раскрывает их поверх страницы,
 // а сама страница не сдвигается.
 
-const compactOn = () => !!S.settings.compact && !activeTab()?.start && !vertical() && !document.body.classList.contains('fullscreen');
+// «Только сайт» — тот же компактный режим, но полоска невидима, а сайт занимает всё окно
+const compactOn = () => (!!S.settings.compact || !!S.siteOnly) && !activeTab()?.start && !vertical() && !document.body.classList.contains('fullscreen');
 let compactOpen = false;
 let compactTimer = 0;
 const compactExtra = () => (compactOpen ? Math.max(0, Math.round(el.chrome.getBoundingClientRect().height) - 6) : 0);
@@ -3154,17 +3226,27 @@ function measureUrl() {
   if (document.body.classList.contains('bar-compact')) {
     el.chrome.style.setProperty('--tool-need', Math.round(toolbarEl.clientWidth - urlRoom() + 260) + 'px');
   }
-  const collapse = !vertical() && toolbarEl.clientWidth > 0 && urlRoom() < 200;
+  document.body.classList.toggle('url-in-tab', urlInTab());
+  const collapse = urlInTab() || (!vertical() && toolbarEl.clientWidth > 0 && urlRoom() < 200);
   document.body.classList.toggle('url-collapsed', collapse);
 }
 // размер острова поменялся (ширина в параметрах, окно) — пересчитать и строку, и форму окна
 new ResizeObserver(() => requestAnimationFrame(() => { measureUrl(); reportChrome(); })).observe(toolbarEl);
 
-function expandUrl() {
+// адрес во вкладке: включён и раскладка не вертикальная
+function urlInTab() { return !!S.settings.urlInTab && !vertical(); }
+function openUrlFromTab(node) {
+  expandUrl(node);
+  el.url.focus();
+  el.url.select();
+}
+
+function expandUrl(from) {
   if (!document.body.classList.contains('url-collapsed') || urlbox.classList.contains('expanded')) return;
-  // строка вырастает из кнопки: запоминаем, где кнопка стоит, — оттуда и раскрытие
-  const bar = toolbarEl.getBoundingClientRect();
-  const btn = urlbox.getBoundingClientRect();
+  // строка вырастает из кнопки (или из вкладки): запоминаем, где она стоит, — оттуда и раскрытие
+  const anchor = from instanceof Element ? from : (urlInTab() ? tabEls.get(S.active) : null);
+  const bar = (urlInTab() ? el.chrome : toolbarEl).getBoundingClientRect();
+  const btn = (anchor || urlbox).getBoundingClientRect();
   urlbox.style.setProperty('--from-l', Math.max(0, btn.left - bar.left - 6) + 'px');
   urlbox.style.setProperty('--from-r', Math.max(0, bar.right - btn.right - 6) + 'px');
   urlbox.classList.add('expanded');
@@ -3189,7 +3271,7 @@ urlbox.addEventListener('click', (event) => {
   urlJustExpanded = false;
   event.stopPropagation();
 }, true);
-el.url.addEventListener('focus', expandUrl);
+el.url.addEventListener('focus', () => expandUrl());
 el.url.addEventListener('blur', () => setTimeout(() => {
   if (document.activeElement !== el.url && !menuKind) collapseUrl();
 }, 150));

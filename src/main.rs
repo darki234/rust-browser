@@ -53,6 +53,7 @@ const DEFAULT_CHROME: f64 = 86.0;
 const PUSH_INTERVAL: Duration = Duration::from_millis(40);
 /// Как часто проверять, не пора ли усыпить фоновые вкладки.
 const SLEEP_CHECK: Duration = Duration::from_secs(30);
+const TASKS_EVERY: Duration = Duration::from_secs(2);
 
 /// Поисковые системы: идентификатор, название, адрес запроса. Первая — по умолчанию.
 const ENGINES: [(&str, &str, &str); 4] = [
@@ -415,6 +416,15 @@ struct App {
     session_dirty: bool,
     last_save: Instant,
     last_sleep_check: Instant,
+    /// Диспетчер задач открыт: раз в 2 секунды обновляем список, а интерфейсу
+    /// отправляем, только если что-то поменялось.
+    tasks_watch: bool,
+    /// Страница боковой панели заморожена, пока панель закрыта.
+    panel_sleeping: bool,
+    /// «Только сайт»: панели спрятаны до наведения на верх окна (на время сеанса).
+    site_only: bool,
+    last_tasks: Instant,
+    tasks_sent: std::cell::RefCell<String>,
     quit: bool,
 }
 
@@ -570,6 +580,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         session_dirty: false,
         last_save: Instant::now(),
         last_sleep_check: Instant::now(),
+        tasks_watch: false,
+        panel_sleeping: false,
+        site_only: false,
+        last_tasks: Instant::now(),
+        tasks_sent: Default::default(),
         quit: false,
     };
     app.apply_theme();
@@ -652,6 +667,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if app.dirty {
             // отложенное обновление интерфейса — проснуться, когда оно разрешено
             *control_flow = ControlFlow::WaitUntil(app.last_push + PUSH_INTERVAL);
+        }
+        if app.tasks_watch {
+            let next = app.last_tasks + TASKS_EVERY;
+            if let ControlFlow::WaitUntil(at) = *control_flow {
+                *control_flow = ControlFlow::WaitUntil(at.min(next));
+            }
         }
         if app.overlay_pending {
             // проснуться вовремя, чтобы открыть меню и без снимка
@@ -978,7 +999,7 @@ impl App {
     /// Где страница: под панелью или справа от боковой колонки.
     /// Ширина боковой панели справа (0 — закрыта или полный экран).
     fn panel_width(&self) -> f64 {
-        if self.panel.is_none() || !self.store.settings.sidebar_open || self.is_fullscreen() {
+        if self.panel.is_none() || !self.store.settings.sidebar_open || self.is_fullscreen() || self.site_only {
             return 0.0;
         }
         let (width, _) = window_size(&self.window);
@@ -1107,6 +1128,12 @@ impl App {
         }
     }
 
+    fn toggle_site_only(&mut self) {
+        self.site_only = !self.site_only;
+        self.layout(); // боковая панель прячется вместе со всем остальным
+        self.dirty = true;
+    }
+
     fn toggle_panel(&mut self) {
         if self.panel.is_none() {
             match build_panel(self) {
@@ -1122,6 +1149,7 @@ impl App {
         self.store.save_settings();
         let app = self.store.settings.sidebar_app.clone();
         self.set_panel_app(&app);
+        self.sleep_panel();
         self.dirty = true;
     }
 
@@ -1916,6 +1944,7 @@ impl App {
             Hotkey::PasteGo => self.paste_and_go(),
             Hotkey::TaskManager => self.open_hub("tasks"),
             Hotkey::Panel => self.toggle_panel(),
+            Hotkey::SiteOnly => self.toggle_site_only(),
             Hotkey::Compact => {
                 let on = !self.store.settings.compact;
                 self.store.settings.compact = on;
@@ -2289,6 +2318,7 @@ impl App {
             "island_tabs" => settings.island_tabs = value.as_bool().unwrap_or(settings.island_tabs),
             "auto_update" => settings.auto_update = value.as_bool().unwrap_or(settings.auto_update),
             "compact" => settings.compact = value.as_bool().unwrap_or(settings.compact),
+            "url_in_tab" => settings.url_in_tab = value.as_bool().unwrap_or(settings.url_in_tab),
             "shortcuts" => {
                 let Ok(list) = serde_json::from_value::<Vec<store::Shortcut>>(value.clone()) else { return };
                 settings.shortcuts = list
@@ -3052,7 +3082,15 @@ impl App {
                 self.dirty = true;
             }
             "site_info" => self.send_site_info(),
-            "tasks" => self.refresh_processes(true),
+            "tasks" => {
+                self.tasks_sent.borrow_mut().clear(); // открыли заново — список нужен в любом случае
+                self.refresh_processes(true);
+            }
+            "site_only" => self.toggle_site_only(),
+            "tasks_watch" => {
+                self.tasks_watch = message["on"].as_bool().unwrap_or(false);
+                self.last_tasks = Instant::now();
+            }
             "unload_tab" => {
                 self.unload_tab(id);
                 self.refresh_processes(true);
@@ -3229,6 +3267,18 @@ impl App {
             "onBattery": self.on_battery,
             "sleepLimit": self.sleep_limit(),
         });
+        // память в списке — с точностью до мегабайта: мелкие колебания не перерисовывают его
+        let mut rounded = info.clone();
+        for row in rounded["rows"].as_array_mut().into_iter().flatten() {
+            row["memory"] = json!(row["memory"].as_u64().unwrap_or(0) >> 20);
+        }
+        rounded["total"] = json!(info["total"].as_u64().unwrap_or(0) >> 20);
+        rounded["other"] = json!(info["other"].as_u64().unwrap_or(0) >> 20);
+        let key = rounded.to_string();
+        if *self.tasks_sent.borrow() == key {
+            return;
+        }
+        *self.tasks_sent.borrow_mut() = key;
         let _ = self.ui.evaluate_script(&format!("ui.showTasks({info})"));
     }
 
@@ -3273,6 +3323,10 @@ impl App {
     /// Вызывается после каждой пачки событий: передаёт накопленные изменения,
     /// сохраняет данные и усыпляет давно скрытые вкладки.
     fn flush(&mut self) {
+        if self.tasks_watch && self.last_tasks.elapsed() >= TASKS_EVERY && !self.window.is_minimized() {
+            self.last_tasks = Instant::now();
+            self.refresh_processes(true);
+        }
         if self.dirty && self.last_push.elapsed() >= PUSH_INTERVAL {
             self.push_state();
         }
@@ -3320,7 +3374,22 @@ impl App {
         }
     }
 
+    /// Закрытая боковая панель (заметки, калькулятор) засыпает сразу — WebView2 сам
+    /// разбудит её, когда панель снова покажут. Мессенджеры не трогаем: в них уведомления.
+    fn sleep_panel(&mut self) {
+        let hidden = self.panel_width() == 0.0;
+        match &self.panel {
+            Some(panel) if hidden && !self.panel_sleeping => {
+                platform::suspend(panel);
+                self.panel_sleeping = true;
+            }
+            Some(_) if !hidden => self.panel_sleeping = false,
+            _ => {}
+        }
+    }
+
     fn sleep_background_tabs(&mut self) {
+        self.sleep_panel();
         let minutes = self.sleep_limit();
         // Выгрузка отменила бы загрузку, поэтому пока что-то качается — только сон.
         let downloading = self.downloads.iter().any(|d| d.state == "progress" || d.state == "paused");
@@ -3408,6 +3477,7 @@ impl App {
                 "autoUpdate": settings.auto_update,
                 "processLimit": settings.process_limit,
                 "compact": settings.compact,
+                "urlInTab": settings.url_in_tab,
                 "shortcuts": settings.shortcuts,
                 "processLimitActive": PROCESS_LIMIT.load(Ordering::Relaxed),
                 "updateSource": settings.update_source,
@@ -3434,6 +3504,7 @@ impl App {
             "ubolId": self.ubol_id,
             "isDefault": self.is_default,
             "panelOpen": self.panel_width() > 0.0,
+            "siteOnly": self.site_only,
             "onBattery": self.on_battery,
             "importSources": self.import_sources,
             "logins": self.vault.logins.iter().map(|l| json!({
