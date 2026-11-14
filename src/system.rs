@@ -285,7 +285,8 @@ pub fn register() -> bool {
     let Ok(exe) = std::env::current_exe() else { return false };
     let exe = exe.to_string_lossy().to_string();
     let icon = format!("{exe},0");
-    let open = format!("\"{exe}\" \"%1\"");
+    // %1 — после --single-argument и без кавычек, как у Chrome: см. split_args
+    let open = format!("\"{exe}\" {SINGLE_ARGUMENT} %1");
     let caps = format!(r"{APP_KEY}\Capabilities");
 
     let mut ok = true;
@@ -327,6 +328,26 @@ pub fn open_default_apps_settings() {
 // ---------- адреса из командной строки ----------
 
 /// Путь к файлу превращает в file:///, остальное оставляет как есть.
+/// Разбирает аргументы запуска на флаги («--inprivate», «--uninstall»…) и адреса.
+/// Ссылки и файлы Windows передаёт после «--single-argument» (так их регистрирует
+/// `register`): всё, что за ним, — один адрес и флагом не считается. Иначе ссылка
+/// с кавычкой внутри (`https://x/" --uninstall "`) превратилась бы в отдельный флаг.
+pub fn split_args(args: &[String]) -> (Vec<String>, Vec<String>) {
+    let tail = args.iter().position(|a| a == SINGLE_ARGUMENT);
+    let head = &args[..tail.unwrap_or(args.len())];
+    let flags = head.iter().filter(|a| a.starts_with("--")).cloned().collect();
+    let mut addresses: Vec<String> = head.iter().filter(|a| !a.starts_with("--")).cloned().collect();
+    if let Some(i) = tail {
+        let single = args[i + 1..].join(" ");
+        if !single.trim().is_empty() {
+            addresses.push(single);
+        }
+    }
+    (flags, addresses)
+}
+
+const SINGLE_ARGUMENT: &str = "--single-argument";
+
 pub fn arg_to_address(arg: &str) -> String {
     let path = Path::new(arg);
     if arg.contains("://") || !path.is_absolute() || !path.exists() {
@@ -364,6 +385,22 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, other);
         assert!(a.starts_with(r"\\.\pipe\RustBrowser-"));
+    }
+
+    #[test]
+    fn link_after_single_argument_never_becomes_a_flag() {
+        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // так Windows разобьёт `"exe" --single-argument https://x/" --uninstall "`
+        let (flags, urls) = split_args(&args(&["--single-argument", "https://x/", "--uninstall", ""]));
+        assert!(flags.is_empty());
+        assert_eq!(urls, ["https://x/ --uninstall "]);
+        // путь к файлу с пробелами без кавычек склеивается обратно
+        let (_, urls) = split_args(&args(&["--single-argument", r"C:\Мои", r"файлы\a.html"]));
+        assert_eq!(urls, [r"C:\Мои файлы\a.html"]);
+        // обычный запуск: флаги и адреса как раньше
+        let (flags, urls) = split_args(&args(&["--inprivate", "https://a.com/"]));
+        assert_eq!((flags, urls), (args(&["--inprivate"]), args(&["https://a.com/"])));
+        assert_eq!(split_args(&args(&["--single-argument"])), (Vec::new(), Vec::new()));
     }
 
     #[test]

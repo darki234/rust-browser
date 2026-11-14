@@ -12,7 +12,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     fs,
-    io::{Cursor, Read},
+    io::Cursor,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -200,9 +200,10 @@ fn unzip(archive: &[u8], into: &Path) -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
         }
-        let mut bytes = Vec::with_capacity(file.size() as usize);
-        file.read_to_end(&mut bytes)?;
-        fs::write(path, bytes)?;
+        // пишем потоком: размер из заголовка zip может быть враньём, а память под
+        // заявленные гигабайты уронила бы весь браузер
+        let mut out = fs::File::create(path)?;
+        std::io::copy(&mut file, &mut out)?;
     }
     Ok(())
 }
@@ -450,6 +451,71 @@ mod tests {
         // SHA-256 пустой строки начинается с e3b0c442…: e→o, 3→d, b→l, 0→a…
         assert_eq!(id_from_key(b""), "odlameecjipmbmbejkplpemijjgpljce");
         assert!(valid_id(&id_from_key(b"any key")));
+    }
+
+    /// Простейший zip без сжатия: [(имя, содержимое)].
+    fn stored_zip(files: &[(&str, &[u8])]) -> Vec<u8> {
+        fn crc32(data: &[u8]) -> u32 {
+            let mut crc = !0u32;
+            for &byte in data {
+                crc ^= u32::from(byte);
+                for _ in 0..8 {
+                    crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+                }
+            }
+            !crc
+        }
+        let (mut out, mut central) = (Vec::new(), Vec::new());
+        for (name, data) in files {
+            let offset = out.len() as u32;
+            let common = |v: &mut Vec<u8>| {
+                v.extend_from_slice(&[20, 0, 0, 0, 0, 0, 0, 0, 0, 0]); // версия, флаги, метод 0, время, дата
+                v.extend_from_slice(&crc32(data).to_le_bytes());
+                v.extend_from_slice(&(data.len() as u32).to_le_bytes());
+                v.extend_from_slice(&(data.len() as u32).to_le_bytes());
+                v.extend_from_slice(&(name.len() as u16).to_le_bytes());
+                v.extend_from_slice(&0u16.to_le_bytes());
+            };
+            out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+            common(&mut out);
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(data);
+            central.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+            central.extend_from_slice(&[20, 0]);
+            common(&mut central);
+            central.extend_from_slice(&[0; 10]); // комментарий, диск, атрибуты
+            central.extend_from_slice(&offset.to_le_bytes());
+            central.extend_from_slice(name.as_bytes());
+        }
+        let cd_offset = out.len() as u32;
+        out.extend_from_slice(&central);
+        out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&(files.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(files.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(central.len() as u32).to_le_bytes());
+        out.extend_from_slice(&cd_offset.to_le_bytes());
+        out.extend_from_slice(&[0; 2]);
+        out
+    }
+
+    #[test]
+    fn unzip_stays_inside_its_folder() {
+        let root = std::env::temp_dir().join(format!("rb-unzip-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let into = root.join("ext");
+        let archive = stored_zip(&[
+            ("manifest.json", b"{}"),
+            ("js/app.js", b"1"),
+            ("../evil.txt", b"x"),
+            ("/abs.txt", b"x"),
+        ]);
+        unzip(&archive, &into).unwrap();
+        assert_eq!(fs::read(into.join("manifest.json")).unwrap(), b"{}");
+        assert_eq!(fs::read(into.join("js").join("app.js")).unwrap(), b"1");
+        assert!(!root.join("evil.txt").exists());
+        assert!(!Path::new("/abs.txt").exists());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

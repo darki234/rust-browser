@@ -146,8 +146,8 @@ pub enum UserEvent {
     ExtPopupSize(f64, f64),
     /// Итог проверки паролей на утечки, повторы и простоту.
     PwHealth(Vec<autofill::Health>),
-    /// Windows Hello ответил на просьбу подставить карту (номер карты, итог).
-    CardVerified(usize, passwords::Verdict),
+    /// Windows Hello ответил на просьбу подставить карту (номер карты, сайт на экране в тот миг, итог).
+    CardVerified(usize, String, passwords::Verdict),
     /// Щелчок внутри вкладки — при разделённом экране она становится активной.
     PageFocused(u32),
     /// Найдена и поставлена новая версия браузера (или ошибка).
@@ -398,6 +398,8 @@ struct App {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // ссылка из Windows идёт после --single-argument и флагом стать не может
+    let (args, addresses) = system::split_args(&args);
     let inprivate = args.iter().any(|arg| arg == "--inprivate");
     let new_window = args.iter().any(|arg| arg == "--new-window");
     // «Параметры → Приложения → Удалить»
@@ -412,11 +414,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             system::wait_for_exit(pid, Duration::from_secs(15));
         }
     }
-    let urls: Vec<String> = args
-        .iter()
-        .filter(|arg| !arg.starts_with("--"))
-        .map(|arg| system::arg_to_address(arg))
-        .collect();
+    let urls: Vec<String> = addresses.iter().map(|arg| system::arg_to_address(arg)).collect();
 
     // Браузер уже открыт — отдаём ему адреса (ссылку из Telegram и т. п.) и выходим.
     let pipe = system::pipe_name(&data_dir());
@@ -1537,8 +1535,8 @@ impl App {
                 };
                 let _ = self.ui.evaluate_script(&format!("ui.toast({text:?})"));
             }
-            UserEvent::CardVerified(index, verdict) => match verdict {
-                passwords::Verdict::Verified => self.fill_autofill("card", index),
+            UserEvent::CardVerified(index, origin, verdict) => match verdict {
+                passwords::Verdict::Verified => self.fill_autofill("card", index, &origin),
                 passwords::Verdict::Canceled => {}
                 passwords::Verdict::Unavailable => {
                     let _ = self.ui.evaluate_script("ui.toast('Включите ПИН-код Windows Hello — без него карты не подставляются')");
@@ -2655,17 +2653,19 @@ impl App {
             }
             "af_fill" => {
                 let index = number("index") as usize;
+                // сайт, который сейчас на экране: подставляем только в него
+                let Some(origin) = self.page_origin() else { return };
                 match message["kind"].as_str() {
-                    Some("address") => self.fill_autofill("address", index),
+                    Some("address") => self.fill_autofill("address", index, &origin),
                     Some("card") if index < self.autofill.cards.len() => {
                         // номер карты — только после Windows Hello
                         if self.pw_verified.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
-                            self.fill_autofill("card", index);
+                            self.fill_autofill("card", index, &origin);
                             return;
                         }
                         let proxy = self.proxy.clone();
                         passwords::verify(self.window.hwnd(), "Rust Browser: подтвердите, что это вы, чтобы подставить карту", move |verdict| {
-                            let _ = proxy.send_event(UserEvent::CardVerified(index, verdict));
+                            let _ = proxy.send_event(UserEvent::CardVerified(index, origin, verdict));
                         });
                     }
                     _ => {}
@@ -3412,8 +3412,18 @@ impl App {
         self.dirty = true;
     }
 
-    /// Подставляет адрес или карту в страницу на экране — только на HTTPS-сайт.
-    fn fill_autofill(&mut self, kind: &str, index: usize) {
+    /// Origin страницы, которая сейчас в активной вкладке (HTTPS или localhost). Адрес —
+    /// у самого WebView2: tab.url меняется уже в начале перехода, когда на экране ещё
+    /// прежняя страница.
+    fn page_origin(&self) -> Option<String> {
+        let tab = self.active_tab()?;
+        let current = tab.webview.as_ref()?.url().ok()?;
+        let origin = passwords::origin_of(&current)?;
+        (passwords::origin_of(&tab.url).as_deref() == Some(origin.as_str())).then_some(origin)
+    }
+
+    /// Подставляет адрес или карту в страницу на экране — только на HTTPS-сайт `origin`.
+    fn fill_autofill(&mut self, kind: &str, index: usize, origin: &str) {
         let fields = match kind {
             "address" => self.autofill.addresses.get(index).map(autofill::address_fields),
             _ => self.autofill.cards.get(index).map(autofill::card_fields),
@@ -3422,9 +3432,12 @@ impl App {
         if kind == "card" {
             self.pw_verified = Some(Instant::now());
         }
-        let Some(tab) = self.active_tab().filter(|t| passwords::origin_of(&t.url).is_some()) else { return };
-        let Some(webview) = tab.webview.as_ref() else { return };
-        let _ = webview.evaluate_script(&autofill::fill_script(&fields));
+        // пока шла проверка Windows Hello, вкладка могла смениться или уйти на другой сайт
+        if self.page_origin().as_deref() != Some(origin) {
+            return;
+        }
+        let Some(webview) = self.active_tab().and_then(|t| t.webview.as_ref()) else { return };
+        let _ = webview.evaluate_script(&autofill::fill_script(origin, &fields));
         let _ = webview.focus();
     }
 
@@ -3487,7 +3500,9 @@ impl App {
                 }
             }
             "pw_capture" => {
-                if self.inprivate || !self.store.settings.passwords {
+                // предложение показывается только для активной вкладки: фоновая не должна
+                // молча подменить его своим логином, пока человек смотрит на чужой сайт
+                if self.inprivate || !self.store.settings.passwords || id != self.active {
                     return;
                 }
                 let Some(origin) = passwords::origin_of(url) else { return };
@@ -3522,24 +3537,27 @@ impl App {
             self.save_vault();
             let _ = self.ui.evaluate_script("ui.toast('Пароль сохранён и зашифрован')");
         }
+        // вкладка могла уже уйти на другой сайт — тогда форма входа там не наша
         if let Some(tab) = self.tab_mut(offer.tab) {
-            tab.pw_form = true;
+            if passwords::origin_of(&tab.url).as_deref() == Some(offer.origin.as_str()) {
+                tab.pw_form = true;
+            }
         }
     }
 
     /// Подставляет пароль только по щелчку в интерфейсе и только на тот же сайт.
     fn fill_password(&mut self, index: usize) {
         let Some(login) = self.vault.logins.get(index) else { return };
-        let Some(tab) = self.active_tab() else { return };
-        if passwords::origin_of(&tab.url).as_deref() != Some(login.origin.as_str()) {
+        // сверяем и с адресом вкладки, и с тем, что на самом деле открыто в WebView2
+        if self.page_origin().as_deref() != Some(login.origin.as_str()) {
             return;
         }
-        let Some(webview) = tab.webview.as_ref() else { return };
+        let Some(webview) = self.active_tab().and_then(|t| t.webview.as_ref()) else { return };
         let Some(password) = passwords::unprotect(&login.secret) else {
             let _ = self.ui.evaluate_script("ui.toast('Не удалось расшифровать пароль')");
             return;
         };
-        let _ = webview.evaluate_script(&passwords::fill_script(&login.username, &password));
+        let _ = webview.evaluate_script(&passwords::fill_script(&login.origin, &login.username, &password));
         let _ = webview.focus();
         self.vault.logins[index].used = unix_now();
         self.store.write_named("passwords.json", &self.vault);

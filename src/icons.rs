@@ -114,13 +114,12 @@ fn fetch(host: &str) -> Option<(Vec<u8>, &'static str)> {
 /// curl.exe есть в каждой Windows 10/11; окна консоли не будет.
 fn curl(url: &str, limit: u64, seconds: u32) -> Option<(Vec<u8>, String)> {
     use std::os::windows::process::CommandExt;
-    let mut command = Command::new("curl.exe");
-    command.args(["-sSLf", "--max-time", &seconds.to_string(), "--max-redirs", "5", "--max-filesize", &limit.to_string(), "-A", UA]);
-    command.args(["-H", "Accept-Language: ru,en;q=0.8", "-w", "\n%{url_effective}"]);
-    if let Some(proxy) = PROXY.lock().ok().and_then(|p| p.clone()) {
-        command.args(["-x", &proxy]);
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return None;
     }
-    let output = command.arg(url).creation_flags(0x0800_0000).output().ok()?;
+    let mut command = Command::new("curl.exe");
+    command.args(curl_args(url, limit, seconds, PROXY.lock().ok().and_then(|p| p.clone())));
+    let output = command.creation_flags(0x0800_0000).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -129,6 +128,27 @@ fn curl(url: &str, limit: u64, seconds: u32) -> Option<(Vec<u8>, String)> {
     let final_url = String::from_utf8_lossy(&body[split + 1..]).to_string();
     body.truncate(split);
     Some((body, final_url))
+}
+
+/// Аргументы curl. Адрес значка берётся со страницы сайта, поэтому:
+/// `-g` — без «шаблонов» curl: иначе `https://x/[1-99999999]` или `{a,b,…}` превратился бы
+/// в миллионы запросов, а их ответы копились бы в памяти браузера;
+/// `--proto` — только http(s), в том числе при переадресациях.
+fn curl_args(url: &str, limit: u64, seconds: u32, proxy: Option<String>) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "-sSLf", "-g", "--proto", "=http,https", "--proto-redir", "=http,https",
+        "--max-time", &seconds.to_string(), "--max-redirs", "5", "--max-filesize", &limit.to_string(), "-A", UA,
+        "-H", "Accept-Language: ru,en;q=0.8", "-w", "\n%{url_effective}",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    if let Some(proxy) = proxy {
+        args.extend(["-x".to_string(), proxy]);
+    }
+    // «--» не нужен: адрес всегда начинается с http(s)://, флагом он не станет
+    args.push(url.to_string());
+    args
 }
 
 fn download_page(url: &str) -> Option<(String, String)> {
@@ -295,6 +315,19 @@ mod tests {
         assert_eq!(icons[0].url, "https://cdn.site.ru/touch.png?v=1&x=2");
         assert_eq!(icons[1].url, "https://site.ru/big.png");
         assert_eq!(icons.len(), 3);
+    }
+
+    #[test]
+    fn curl_never_expands_page_supplied_globs() {
+        let url = "https://victim.ru/[1-99999999]{a,b}.png";
+        let args = curl_args(url, 1000, 15, None);
+        assert!(args.iter().any(|a| a == "-g"), "без -g curl раскроет шаблон в адресе");
+        assert_eq!(args.iter().position(|a| a == "--proto").map(|i| args[i + 1].as_str()), Some("=http,https"));
+        assert_eq!(args.iter().position(|a| a == "--proto-redir").map(|i| args[i + 1].as_str()), Some("=http,https"));
+        assert_eq!(args.last().map(String::as_str), Some(url));
+        // со страницы может прийти что угодно — до curl доходят только http(s)
+        assert!(curl("-o C:/x", 10, 1).is_none());
+        assert!(curl("file:///C:/Windows/win.ini", 10, 1).is_none());
     }
 
     #[test]
