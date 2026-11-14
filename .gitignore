@@ -2,3 +2,8 @@
 /Rust Browser.exe
 # видеообои качает assets/walls/fetch.ps1
 assets/walls/*.webm
+
+# прежняя версия после обновления на ходу
+*.old
+*.old2
+*.old3
