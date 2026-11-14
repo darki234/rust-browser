@@ -343,6 +343,8 @@ struct App {
     autofill: autofill::Profile,
     /// Результат проверки паролей (по номерам в хранилище) и идёт ли проверка.
     pw_health: Vec<autofill::Health>,
+    /// autofill.json есть, но не расшифровывается — не перезаписываем его.
+    autofill_locked: bool,
     pw_checking: bool,
     /// Аккаунт для синхронизации (None — не вошли).
     account: Option<sync::Account>,
@@ -514,6 +516,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cursor: (0.0, 0.0),
         autofill: Default::default(),
         pw_health: Vec::new(),
+        autofill_locked: false,
         pw_checking: false,
         account: None,
         account_busy: false,
@@ -572,7 +575,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.new_tab(Some(url));
     }
     app.extensions = app.store.read_named("extensions.json");
-    app.autofill = autofill::Profile::load(&app.store.read_named("autofill.json"));
+    let stored_autofill: autofill::Stored = app.store.read_named("autofill.json");
+    // не расшифровалось (другая учётная запись Windows, повреждение) — файл не трогаем,
+    // иначе первое же сохранение стёрло бы адреса и карты
+    app.autofill_locked = !stored_autofill.data.is_empty() && passwords::unprotect(&stored_autofill.data).is_none();
+    app.autofill = autofill::Profile::load(&stored_autofill);
     // аккаунт: первая синхронизация — сразу после запуска, когда окно уже на экране
     if !app.inprivate {
         let account: sync::Account = app.store.read_named("account.json");
@@ -3501,6 +3508,10 @@ impl App {
     // ---------- пароли ----------
 
     fn save_autofill(&mut self) {
+        if self.autofill_locked {
+            let _ = self.ui.evaluate_script("ui.toast('Файл адресов и карт не расшифровался — чтобы его не стереть, изменения не сохраняются')");
+            return;
+        }
         if let Some(stored) = self.autofill.store() {
             self.store.write_named("autofill.json", &stored);
         }
@@ -3988,15 +3999,21 @@ static EXT_ICONS: std::sync::Mutex<Vec<(String, PathBuf)>> = std::sync::Mutex::n
 fn register_icons(list: &[webstore::Installed], ubol: Option<(&str, &Path)>) {
     let mut icons: Vec<(String, PathBuf)> = list
         .iter()
-        .filter(|e| !e.icon.is_empty())
+        .filter(|e| safe_relative(&e.icon))
         .map(|e| (e.id.clone(), e.folder.join(&e.icon)))
         .collect();
-    if let Some((id, info)) = ubol.and_then(|(id, f)| webstore::describe(f).map(|i| (id, i))).filter(|(_, i)| !i.icon.is_empty()) {
+    if let Some((id, info)) = ubol.and_then(|(id, f)| webstore::describe(f).map(|i| (id, i))).filter(|(_, i)| safe_relative(&i.icon)) {
         icons.push((id.to_string(), info.folder.join(&info.icon)));
     }
     if let Ok(mut guard) = EXT_ICONS.lock() {
         *guard = icons;
     }
+}
+
+/// Путь из manifest.json — только внутри папки расширения: без «..», без диска и корня.
+fn safe_relative(path: &str) -> bool {
+    !path.is_empty()
+        && Path::new(path).components().all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir))
 }
 
 fn extension_icon(id: &str) -> Option<PathBuf> {
@@ -4938,6 +4955,16 @@ mod tests {
         assert!(args.contains("--renderer-process-limit=4"));
         assert!(args.starts_with("--disable-features=msWebOOUI"));
         assert!(!engine_args(None, 0).contains("renderer-process-limit"));
+    }
+
+    #[test]
+    fn manifest_paths_stay_inside_extension() {
+        assert!(safe_relative("icons/128.png"));
+        assert!(safe_relative("./icon.png"));
+        assert!(!safe_relative("../../secret.txt"));
+        assert!(!safe_relative(r"C:\Windows\win.ini"));
+        assert!(!safe_relative("/etc/passwd"));
+        assert!(!safe_relative(""));
     }
 
     #[test]

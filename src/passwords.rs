@@ -365,7 +365,8 @@ mod tests {
     #[test]
     fn dpapi_round_trip() {
         let secret = protect("пароль 123").unwrap();
-        assert!(!secret.contains("123"));
+        // в шифре нет самого пароля (в hex он выглядел бы так); «123» в шифре может встретиться случайно
+        assert!(!secret.contains(&hex("пароль 123".as_bytes())));
         assert_eq!(unprotect(&secret).as_deref(), Some("пароль 123"));
         assert_eq!(unprotect("zz"), None);
     }
