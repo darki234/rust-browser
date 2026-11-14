@@ -275,6 +275,15 @@ await check('разделённый экран и группы вкладок', 
   await waitFor(() => ui.evaluate(`S.tabs.length === 1 && !S.groups.length && S.active === ${first}`));
 });
 
+await check('узкий остров: адресная строка-кнопка раскрывается', async () => {
+  await ui.evaluate("send('set', { key: 'bar_style', value: 'island' }); send('set', { key: 'island_width', value: 40 })");
+  await waitFor(() => ui.evaluate("document.body.classList.contains('url-collapsed') && urlbox.offsetWidth < 50"));
+  await ui.evaluate("urlbox.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))");
+  await waitFor(() => ui.evaluate("urlbox.classList.contains('expanded') && urlbox.offsetWidth > 300"));
+  await ui.evaluate("el.url.blur(); send('set', { key: 'island_width', value: 62 }); send('set', { key: 'bar_style', value: 'classic' })");
+  await waitFor(() => ui.evaluate("!urlbox.classList.contains('expanded') && !document.body.classList.contains('url-collapsed')"));
+});
+
 await check('тема AMOLED и прозрачные панели', async () => {
   await ui.evaluate("send('set', { key: 'theme', value: 'amoled' }); send('set', { key: 'glass', value: 40 })");
   await waitFor(() => ui.evaluate("document.body.classList.contains('amoled') && document.body.classList.contains('glass') && getComputedStyle(document.body).getPropertyValue('--bg').trim() === '#000000'"));

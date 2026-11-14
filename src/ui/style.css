@@ -2097,3 +2097,23 @@ body.compact-mode.compact-open #chrome { box-shadow: 0 12px 34px rgba(0, 0, 0, .
 .boost-hidden button { width: 22px; height: 22px; border: 0; border-radius: 11px; background: transparent; color: var(--muted); }
 .boost-hidden button:hover { background: var(--press); color: var(--text); }
 .menu:has(.boost-sec) { width: 360px; }
+
+/* ---------- адресная строка-кнопка ---------- */
+#toolbar { position: relative; }
+body.url-collapsed #urlbox:not(.expanded) {
+  flex: none; width: 34px; padding: 0; margin: 0 4px; justify-content: center; cursor: pointer;
+  transition: background .15s, transform .2s var(--spring);
+}
+body.url-collapsed #urlbox:not(.expanded):hover { transform: scale(1.06); }
+body.url-collapsed #urlbox:not(.expanded) > :not(#siteicon) { display: none; }
+body.url-collapsed #urlbox:not(.expanded) #siteicon { margin: 0; width: 34px; height: 34px; border-radius: 17px; }
+body.url-collapsed #urlbox.expanded {
+  position: absolute; z-index: 6; left: 6px; right: 6px; margin: 0;
+  background: var(--surface); border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent), var(--shadow-sm);
+  animation: url-stretch .28s var(--ease);
+}
+@keyframes url-stretch {
+  from { clip-path: inset(0 var(--from-r, 0) 0 var(--from-l, 0) round 17px); }
+  to { clip-path: inset(0 0 0 0 round 17px); }
+}

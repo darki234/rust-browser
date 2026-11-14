@@ -308,6 +308,9 @@ function setState(next) {
   renderSplitButton();
   renderCompact();
   renderBoostMenu();
+  // фокус ушёл со строки (в неактивном окне blur может не прийти) — сворачиваем
+  if (urlbox.classList.contains('expanded') && document.activeElement !== el.url && !sheetOpen) collapseUrl();
+  requestAnimationFrame(measureUrl);
   el.menubtn.classList.toggle('dot', !!S.install?.updateReady);
   if (hubSection && hubSection !== 'history') renderHubList(false);
   if (menuKind === 'main') refreshMainMenu();
@@ -3110,6 +3113,74 @@ function renderBoostMenu() {
   const key = JSON.stringify(S.settings.boosts || {});
   if (key !== boostKey) { boostKey = key; boostRedraw(); }
 }
+
+
+// ---------- адресная строка-кнопка ----------
+// Если места мало (узкий остров, окно), строка сворачивается в круглую кнопку-лупу
+// вместо обрезанного «Адр…». Щелчок или Ctrl+L — растягивается на всю панель.
+
+const urlbox = $('#urlbox');
+const toolbarEl = $('#toolbar');
+
+/** Сколько места досталось бы строке, если бы она была обычной. */
+function urlRoom() {
+  let used = 0;
+  const walk = (parent) => {
+    for (const c of parent.children) {
+      if (c === urlbox) continue;
+      const cs = getComputedStyle(c);
+      if (cs.display === 'contents') { walk(c); continue; }
+      if (cs.display === 'none' || cs.position === 'absolute') continue;
+      used += c.offsetWidth + parseFloat(cs.marginLeft) + parseFloat(cs.marginRight);
+    }
+  };
+  walk(toolbarEl);
+  const cs = getComputedStyle(toolbarEl);
+  const gap = parseFloat(cs.columnGap) || 0;
+  return toolbarEl.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight) - used - gap * toolbarEl.children.length - 12;
+}
+
+function measureUrl() {
+  if (urlbox.classList.contains('expanded')) return;
+  const collapse = !vertical() && toolbarEl.clientWidth > 0 && urlRoom() < 200;
+  document.body.classList.toggle('url-collapsed', collapse);
+}
+// размер острова поменялся (ширина в параметрах, окно) — пересчитать и строку, и форму окна
+new ResizeObserver(() => requestAnimationFrame(() => { measureUrl(); reportChrome(); })).observe(toolbarEl);
+
+function expandUrl() {
+  if (!document.body.classList.contains('url-collapsed') || urlbox.classList.contains('expanded')) return;
+  // строка вырастает из кнопки: запоминаем, где кнопка стоит, — оттуда и раскрытие
+  const bar = toolbarEl.getBoundingClientRect();
+  const btn = urlbox.getBoundingClientRect();
+  urlbox.style.setProperty('--from-l', Math.max(0, btn.left - bar.left - 6) + 'px');
+  urlbox.style.setProperty('--from-r', Math.max(0, bar.right - btn.right - 6) + 'px');
+  urlbox.classList.add('expanded');
+}
+function collapseUrl() {
+  if (!urlbox.classList.contains('expanded')) return;
+  urlbox.classList.remove('expanded');
+  requestAnimationFrame(measureUrl);
+}
+urlbox.addEventListener('mousedown', (event) => {
+  if (!document.body.classList.contains('url-collapsed') || urlbox.classList.contains('expanded')) return;
+  event.preventDefault();
+  expandUrl();
+  el.url.focus();
+  el.url.select();
+  urlJustExpanded = true;
+});
+// щелчок по свёрнутой строке только раскрывает её, а не открывает сведения о сайте
+let urlJustExpanded = false;
+urlbox.addEventListener('click', (event) => {
+  if (!urlJustExpanded) return;
+  urlJustExpanded = false;
+  event.stopPropagation();
+}, true);
+el.url.addEventListener('focus', expandUrl);
+el.url.addEventListener('blur', () => setTimeout(() => {
+  if (document.activeElement !== el.url && !menuKind) collapseUrl();
+}, 150));
 
 // ---------- заставка запуска ----------
 
