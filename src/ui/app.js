@@ -306,6 +306,7 @@ function setState(next) {
   renderMyButtons();
   renderAutofillButton();
   renderSplitButton();
+  renderCompact();
   el.menubtn.classList.toggle('dot', !!S.install?.updateReady);
   if (hubSection && hubSection !== 'history') renderHubList(false);
   if (menuKind === 'main') refreshMainMenu();
@@ -338,16 +339,20 @@ function chromeShape() {
 function reportChrome() {
   const box = el.chrome.getBoundingClientRect();
   const side = vertical() ? Math.round(box.width) : 0;
-  const height = side ? 0 : Math.round(box.height);
+  const real = side ? 0 : Math.round(box.height);
+  const compact = document.body.classList.contains('compact-mode');
+  const height = compact ? 6 : real;
   if (!height && !side) return;
-  const float = chromeShape();
+  const float = compact ? null : chromeShape();
   const key = height + '|' + side + '|' + JSON.stringify(float);
   if (key === floatKey) return;
   floatKey = key;
   lastChromeKey = height + '|' + side;
   lastChrome = height || side;
-  document.documentElement.style.setProperty('--bar-h', height + 'px');
+  document.documentElement.style.setProperty('--bar-h', real + 'px');
   document.documentElement.style.setProperty('--side-w', side + 'px');
+  // раскрытый компактный режим вырос — окно интерфейса растёт вместе с ним
+  if (compact && compactOpen && !layerKind) send('overlay', { mode: 'sheet', height: compactExtra() + (sheetOpen ? sheetHeight : 0) });
   // страница начинается под вкладками: снимок под меню и библиотекой — оттуда же
   document.body.classList.toggle('island-float', !!float);
   if (float) document.documentElement.style.setProperty('--page-top', float.top + 'px');
@@ -835,7 +840,7 @@ function closeSheet() {
   selected = -1;
   suggestRows = [];
   el.sheet.classList.remove('open');
-  if (!layerKind) send('overlay', { mode: 'none' });
+  if (!layerKind) send('overlay', compactOpen ? { mode: 'sheet', height: compactExtra() } : { mode: 'none' });
   if (islandFloats()) reportChrome();
 }
 
@@ -887,7 +892,7 @@ function setSuggestions(seq, list) {
   const height = el.sheet.offsetHeight;
   if (!layerKind && height !== sheetHeight) {
     sheetHeight = height;
-    send('overlay', { mode: 'sheet', height });
+    send('overlay', { mode: 'sheet', height: height + compactExtra() });
     // остров поверх страницы: список подсказок — карточка, вокруг неё видна страница
     if (islandFloats()) reportChrome();
   }
@@ -1353,6 +1358,7 @@ function mainMenuNodes() {
     item({ icon: 'translate', label: /\.translate\.goog\//.test(activeTab()?.url || '') ? 'Показать оригинал' : 'Перевести страницу', disabled: !page,
       onClick: () => send('translate', { original: /\.translate\.goog\//.test(activeTab()?.url || '') }) }),
     item({ icon: 'pip', label: 'Картинка в картинке', kb: 'Alt+P', disabled: !page, onClick: () => send('pip') }),
+    item({ icon: 'expand', label: 'Компактный режим', kb: 'Ctrl+Shift+K', check: !!S.settings.compact, onClick: () => set('compact', !S.settings.compact) }),
     item({ icon: 'split', label: S.split && [S.split.left, S.split.right].includes(S.active) ? 'Убрать разделение экрана' : 'Разделить экран', disabled: !page,
       onClick: () => send(S.split && [S.split.left, S.split.right].includes(S.active) ? 'unsplit' : 'split') }),
     item({ icon: 'moon2', label: 'Тёмная тема для этого сайта', check: !!activeTab()?.dark, disabled: !page, onClick: () => send('dark_site') }),
@@ -1931,6 +1937,8 @@ const SETTINGS_CATS = [
         segmented([['classic', 'Классика'], ['compact', 'Компакт'], ['floating', 'Плавающая'], ['island', 'Остров'], ['vertical', 'Вертикальные вкладки']],
           () => S.settings.barStyle, (value) => set('bar_style', value))),
       ...islandSettings(),
+      setting('Компактный режим', 'Вкладки и адресная строка свёрнуты в тонкую полоску сверху и выезжают при наведении мыши — почти весь экран для сайта · Ctrl+Shift+K',
+        toggle(() => S.settings.compact, (value) => set('compact', value))),
       setting('Панель избранного', 'Сайты из избранного под адресной строкой · Ctrl+Shift+B',
         toggle(() => S.settings.favbar, (value) => set('favbar', value))),
       setting('Боковая панель', 'Заметки, калькулятор и мессенджеры справа · Ctrl+Shift+E',
@@ -2002,18 +2010,7 @@ const SETTINGS_CATS = [
     importCard(),
     installCard(),
   ]],
-  ['keys', 'Клавиши', () => [
-    h('div', { class: 'card' }, h('h2', {}, 'Сочетания клавиш'),
-      h('div', { class: 'keys' }, ...[
-        ['Новая вкладка / закрыть', 'Ctrl+T / Ctrl+W'], ['Вернуть закрытую вкладку', 'Ctrl+Shift+T'],
-        ['Новое окно / окно InPrivate', 'Ctrl+N / Ctrl+Shift+N'], ['Следующая / предыдущая вкладка', 'Ctrl+Tab / Ctrl+Shift+Tab'],
-        ['Адресная строка', 'Ctrl+L, Alt+D'], ['Найти на странице', 'Ctrl+F'],
-        ['Масштаб', 'Ctrl + / Ctrl − / Ctrl+0'], ['Во весь экран', 'F11'],
-        ['Избранное / журнал / загрузки', 'Ctrl+Shift+O / Ctrl+H / Ctrl+J'],
-        ['Диспетчер вкладок', 'Shift+Esc'],
-        ['Боковая панель', 'Ctrl+Shift+E'], ['Меню', 'Alt+F'],
-      ].flatMap(([what, keys]) => [h('span', {}, what), h('kbd', {}, keys)]))),
-  ]],
+  ['keys', 'Клавиши', () => keysCards()],
 ];
 
 function openSettingsCat(id) {
@@ -2908,6 +2905,136 @@ function installCard() {
 
 function updateReady() {
   toast('Новая версия установлена — перезапустите браузер, когда будет удобно');
+}
+
+
+// ---------- редактор сочетаний клавиш ----------
+
+const KEY_ACTIONS = [
+  ['new_tab', 'Новая вкладка', 'Ctrl+T'], ['close_tab', 'Закрыть вкладку', 'Ctrl+W'],
+  ['reopen_tab', 'Вернуть закрытую вкладку', 'Ctrl+Shift+T'], ['new_window', 'Новое окно', 'Ctrl+N'],
+  ['inprivate', 'Окно InPrivate', 'Ctrl+Shift+N'], ['focus_url', 'Адресная строка', 'Ctrl+L, Alt+D, F6'],
+  ['next_tab', 'Следующая вкладка', 'Ctrl+Tab'], ['prev_tab', 'Предыдущая вкладка', 'Ctrl+Shift+Tab'],
+  ['reload', 'Обновить', 'Ctrl+R, F5'], ['back', 'Назад', 'Alt+←'], ['forward', 'Вперёд', 'Alt+→'],
+  ['bookmark', 'В избранное', 'Ctrl+D'], ['bookmarks', 'Избранное', 'Ctrl+Shift+O'],
+  ['history', 'Журнал', 'Ctrl+H'], ['downloads', 'Загрузки', 'Ctrl+J'], ['settings', 'Очистить данные', 'Ctrl+Shift+Del'],
+  ['find', 'Найти на странице', 'Ctrl+F'], ['zoom_in', 'Крупнее', 'Ctrl+='], ['zoom_out', 'Мельче', 'Ctrl+−'],
+  ['print', 'Печать', 'Ctrl+P'], ['fullscreen', 'Во весь экран', 'F11'], ['devtools', 'Инструменты разработчика', 'F12'],
+  ['favbar', 'Панель избранного', 'Ctrl+Shift+B'], ['task_manager', 'Диспетчер вкладок', 'Shift+Esc'],
+  ['panel', 'Боковая панель', 'Ctrl+Shift+E'], ['pip', 'Картинка в картинке', 'Alt+P'],
+  ['compact', 'Компактный режим', 'Ctrl+Shift+K'], ['split', 'Разделить экран', '—'],
+  ['paste_go', 'Вставить и перейти', 'Ctrl+Shift+L'], ['menu', 'Меню', 'Alt+F'],
+];
+const KEY_NAMES = { 37: '←', 38: '↑', 39: '→', 40: '↓', 32: 'Пробел', 13: 'Enter', 9: 'Tab', 27: 'Esc', 46: 'Del', 8: 'Backspace',
+  33: 'PageUp', 34: 'PageDown', 36: 'Home', 35: 'End', 45: 'Insert', 187: '=', 189: '−', 188: ',', 190: '.', 191: '/', 186: ';', 222: "'", 219: '[', 221: ']', 220: '\\', 192: '`' };
+let recordingAction = null;
+
+function comboLabel(event) {
+  const key = event.keyCode;
+  const name = KEY_NAMES[key] || (key >= 112 && key <= 123 ? 'F' + (key - 111) : (key >= 48 && key <= 90 ? String.fromCharCode(key) : event.key.toUpperCase()));
+  return [event.ctrlKey && 'Ctrl', event.shiftKey && 'Shift', event.altKey && 'Alt', name].filter(Boolean).join('+');
+}
+
+function stopRecording() {
+  recordingAction = null;
+  send('keys_record', { on: false });
+  removeEventListener('keydown', recordKey, true);
+  settingsUpdaters.forEach((u) => u());
+}
+
+function recordKey(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  if (['Control', 'Shift', 'Alt', 'Meta'].includes(event.key)) return;
+  if (event.key === 'Escape' && !event.ctrlKey && !event.altKey && !event.shiftKey) return stopRecording();
+  const isF = event.keyCode >= 112 && event.keyCode <= 123;
+  if (!event.ctrlKey && !event.altKey && !isF) {
+    toast('Добавьте Ctrl или Alt — одиночные клавиши нужны сайтам');
+    return;
+  }
+  const mods = (event.ctrlKey ? 1 : 0) | (event.shiftKey ? 2 : 0) | (event.altKey ? 4 : 0);
+  const label = comboLabel(event);
+  const list = (S.settings.shortcuts || []).filter((s) => s.action !== recordingAction);
+  const taken = list.find((s) => s.key === event.keyCode && s.mods === mods)
+    || KEY_ACTIONS.find(([id, , def]) => id !== recordingAction && !list.some((s) => s.action === id) && def.split(', ').includes(label));
+  if (taken) {
+    const name = KEY_ACTIONS.find(([id]) => id === (taken.action || taken[0]))?.[1];
+    toast(`${label} уже занято: «${name}». Сначала поменяйте его там`);
+    return;
+  }
+  set('shortcuts', [...list, { action: recordingAction, key: event.keyCode, mods, label }]);
+  stopRecording();
+}
+
+function keysCards() {
+  const rows = KEY_ACTIONS.map(([id, name, def]) => {
+    const kbd = h('kbd', {});
+    const change = h('button', { class: 'text-btn outline', onclick: () => {
+      if (recordingAction) stopRecording();
+      recordingAction = id;
+      send('keys_record', { on: true });
+      addEventListener('keydown', recordKey, true);
+      settingsUpdaters.forEach((u) => u());
+    } }, 'Изменить');
+    const reset = h('button', { class: 'text-btn', onclick: () => set('shortcuts', (S.settings.shortcuts || []).filter((s) => s.action !== id)) }, 'Сбросить');
+    settingsUpdaters.push(() => {
+      const custom = (S.settings.shortcuts || []).find((s) => s.action === id);
+      const recording = recordingAction === id;
+      kbd.textContent = recording ? 'Нажмите сочетание… (Esc — отмена)' : custom ? custom.label : def;
+      kbd.classList.toggle('rec', recording);
+      kbd.classList.toggle('custom', !!custom && !recording);
+      reset.style.display = custom ? '' : 'none';
+    });
+    return h('div', { class: 'set keyrow' }, h('div', { class: 'label' }, name), h('div', { class: 'controls' }, kbd, reset, change));
+  });
+  return [
+    h('div', { class: 'card' }, h('h2', {}, 'Сочетания клавиш'),
+      h('div', { class: 'ext-hint acc-intro' }, 'Нажмите «Изменить» и затем новое сочетание. Своё сочетание заменяет стандартное для этого действия. Ctrl+1…9 — вкладка по номеру'),
+      ...rows,
+      h('div', { class: 'set' }, h('div', { class: 'label' }), h('div', { class: 'controls' },
+        h('button', { class: 'text-btn outline', onclick: () => set('shortcuts', []) }, 'Вернуть все стандартные')))),
+  ];
+}
+
+// ---------- компактный режим ----------
+// Панели свёрнуты в тонкую полоску сверху; наведение раскрывает их поверх страницы,
+// а сама страница не сдвигается.
+
+const compactOn = () => !!S.settings.compact && !activeTab()?.start && !vertical() && !document.body.classList.contains('fullscreen');
+let compactOpen = false;
+let compactTimer = 0;
+const compactExtra = () => (compactOpen ? Math.max(0, Math.round(el.chrome.getBoundingClientRect().height) - 6) : 0);
+
+function setCompactOpen(open) {
+  clearTimeout(compactTimer);
+  if (open === compactOpen) return;
+  compactOpen = open;
+  document.body.classList.toggle('compact-open', open);
+  if (open) {
+    requestAnimationFrame(() => { if (compactOpen && !layerKind) send('overlay', { mode: 'sheet', height: compactExtra() + (sheetOpen ? sheetHeight : 0) }); });
+  } else if (!layerKind && !sheetOpen) {
+    send('overlay', { mode: 'none' });
+  }
+}
+function scheduleCompactClose() {
+  clearTimeout(compactTimer);
+  compactTimer = setTimeout(() => {
+    if (document.activeElement === el.url || menuKind || sheetOpen || layerKind) return scheduleCompactClose();
+    setCompactOpen(false);
+  }, 600);
+}
+el.chrome.addEventListener('mouseenter', () => { if (compactOn()) setCompactOpen(true); });
+el.chrome.addEventListener('mouseleave', () => { if (compactOn() && compactOpen) scheduleCompactClose(); });
+el.url.addEventListener('focus', () => { if (compactOn()) setCompactOpen(true); });
+el.url.addEventListener('blur', () => { if (compactOn() && compactOpen) scheduleCompactClose(); });
+
+function renderCompact() {
+  const on = compactOn();
+  if (document.body.classList.contains('compact-mode') !== on) {
+    document.body.classList.toggle('compact-mode', on);
+    if (!on && compactOpen) setCompactOpen(false);
+    requestAnimationFrame(reportChrome);
+  }
 }
 
 // ---------- заставка запуска ----------

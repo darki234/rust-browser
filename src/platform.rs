@@ -96,6 +96,10 @@ pub enum Hotkey {
     /// Ctrl+Shift+E — боковая панель.
     Panel,
     Pip,
+    /// Компактный режим: панели прячутся в тонкую полоску.
+    Compact,
+    /// Разделить экран / убрать разделение.
+    Split,
     Find,
     ZoomIn,
     ZoomOut,
@@ -168,10 +172,34 @@ impl Hotkey {
             (true, true, false) if letter('L') => Self::PasteGo,
             (true, true, false) if letter('I') => Self::DevTools,
             (true, true, false) if key == DELETE => Self::Settings,
+            (true, true, false) if letter('K') => Self::Compact,
             (true, true, false) if key == TAB => Self::PrevTab,
             _ => return None,
         })
     }
+}
+
+/// Действия, которым можно назначить свои клавиши: (действие, id в настройках).
+pub const EDITABLE: [(Hotkey, &str); 30] = [
+    (Hotkey::NewTab, "new_tab"), (Hotkey::CloseTab, "close_tab"), (Hotkey::ReopenTab, "reopen_tab"),
+    (Hotkey::NewWindow, "new_window"), (Hotkey::InPrivate, "inprivate"), (Hotkey::FocusUrl, "focus_url"),
+    (Hotkey::NextTab, "next_tab"), (Hotkey::PrevTab, "prev_tab"), (Hotkey::Reload, "reload"),
+    (Hotkey::Back, "back"), (Hotkey::Forward, "forward"), (Hotkey::Bookmark, "bookmark"),
+    (Hotkey::Bookmarks, "bookmarks"), (Hotkey::History, "history"), (Hotkey::Downloads, "downloads"),
+    (Hotkey::Settings, "settings"), (Hotkey::PasteGo, "paste_go"), (Hotkey::TaskManager, "task_manager"),
+    (Hotkey::Panel, "panel"), (Hotkey::Pip, "pip"), (Hotkey::Compact, "compact"), (Hotkey::Split, "split"),
+    (Hotkey::Find, "find"), (Hotkey::ZoomIn, "zoom_in"), (Hotkey::ZoomOut, "zoom_out"),
+    (Hotkey::Print, "print"), (Hotkey::DevTools, "devtools"), (Hotkey::FavBar, "favbar"),
+    (Hotkey::Fullscreen, "fullscreen"), (Hotkey::Menu, "menu"),
+];
+
+pub fn hotkey_by_id(id: &str) -> Option<Hotkey> {
+    EDITABLE.iter().find(|(_, name)| *name == id).map(|(h, _)| *h)
+}
+
+/// Модификаторы одной цифрой: 1 — Ctrl, 2 — Shift, 4 — Alt.
+pub fn mods(ctrl: bool, shift: bool, alt: bool) -> u8 {
+    u8::from(ctrl) | (u8::from(shift) << 1) | (u8::from(alt) << 2)
 }
 
 /// Состояние, от которого зависит, перехватывать ли Esc.
@@ -179,6 +207,23 @@ impl Hotkey {
 pub struct KeyState {
     pub fullscreen: AtomicBool,
     pub find_open: AtomicBool,
+    /// Пользователь записывает новое сочетание — клавиши не перехватываем.
+    pub recording: AtomicBool,
+    /// Свои сочетания: (клавиша, модификаторы, действие).
+    pub custom: std::sync::RwLock<Vec<(u32, u8, Hotkey)>>,
+}
+
+impl KeyState {
+    /// Свои клавиши важнее стандартных; у переназначенного действия стандартные отключаются.
+    pub fn resolve(&self, key: u32, ctrl: bool, shift: bool, alt: bool) -> Option<Hotkey> {
+        let custom = self.custom.read().ok()?;
+        let m = mods(ctrl, shift, alt);
+        if let Some((_, _, hotkey)) = custom.iter().find(|(k, km, _)| *k == key && *km == m) {
+            return Some(*hotkey);
+        }
+        let hotkey = Hotkey::from_keys(key, ctrl, shift, alt)?;
+        (!custom.iter().any(|(_, _, h)| *h == hotkey)).then_some(hotkey)
+    }
 }
 
 /// Поднимает webview над соседними: новые дочерние окна wry создаёт поверх всех.
@@ -246,12 +291,13 @@ pub fn hook_hotkeys(webview: &WebView, keys: Arc<KeyState>, proxy: Proxy) {
                 return Ok(());
             }
 
+            if keys.recording.load(Ordering::Relaxed) {
+                return Ok(()); // в параметрах записывают новое сочетание
+            }
             let mut key = 0u32;
             args.VirtualKey(&mut key)?;
             let down = |vk: u16| GetKeyState(vk as i32) < 0;
-            let Some(hotkey) =
-                Hotkey::from_keys(key, down(VK_CONTROL.0), down(VK_SHIFT.0), down(VK_MENU.0))
-            else {
+            let Some(hotkey) = keys.resolve(key, down(VK_CONTROL.0), down(VK_SHIFT.0), down(VK_MENU.0)) else {
                 return Ok(());
             };
             // Esc нужен сайтам, забираем его только когда он закрывает наше.
@@ -1181,6 +1227,13 @@ mod tests {
         assert_eq!(Hotkey::from_keys(key('F'), true, false, false), Some(Hotkey::Find));
         assert_eq!(Hotkey::from_keys(key('F'), false, false, true), Some(Hotkey::Menu));
         assert_eq!(Hotkey::from_keys(key('L'), true, true, false), Some(Hotkey::PasteGo));
+        // свои клавиши: новое сочетание работает, старое у этого действия отключается
+        let keys = KeyState::default();
+        keys.custom.write().unwrap().push((key('Y'), mods(true, false, true), Hotkey::NewTab));
+        assert_eq!(keys.resolve(key('Y'), true, false, true), Some(Hotkey::NewTab));
+        assert_eq!(keys.resolve(key('T'), true, false, false), None);
+        assert_eq!(keys.resolve(key('W'), true, false, false), Some(Hotkey::CloseTab));
+        assert_eq!(hotkey_by_id("pip"), Some(Hotkey::Pip));
         assert_eq!(Hotkey::from_keys(0x1B, false, true, false), Some(Hotkey::TaskManager));
         assert_eq!(Hotkey::from_keys(key('E'), true, true, false), Some(Hotkey::Panel));
         assert_eq!(Hotkey::from_keys(0x09, true, false, false), Some(Hotkey::NextTab));

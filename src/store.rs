@@ -25,6 +25,15 @@ pub struct Visit {
     pub time: u64,
 }
 
+/// Своё сочетание клавиш: действие, код клавиши (VK), модификаторы (1 Ctrl, 2 Shift, 4 Alt), подпись.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Shortcut {
+    pub action: String,
+    pub key: u32,
+    pub mods: u8,
+    pub label: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct CustomButton {
     pub name: String,
@@ -71,6 +80,10 @@ pub struct Settings {
     pub auto_update: bool,
     /// Лимит процессов страниц (0 — сам движок решает).
     pub process_limit: u32,
+    /// Компактный режим: панели спрятаны в тонкую полоску сверху.
+    pub compact: bool,
+    /// Свои сочетания клавиш.
+    pub shortcuts: Vec<Shortcut>,
     pub update_source: String,
     /// Свои кнопки на панели: сайт одним нажатием.
     pub buttons: Vec<CustomButton>,
@@ -128,6 +141,8 @@ impl Default for Settings {
             dark_all: false,
             auto_update: true,
             process_limit: 0,
+            compact: false,
+            shortcuts: Vec::new(),
             update_source: String::new(),
             buttons: Vec::new(),
             history_cleared: 0,

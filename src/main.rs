@@ -454,6 +454,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => window.theme() == WindowTheme::Dark,
     };
     let keys = Arc::new(KeyState::default());
+    apply_shortcuts(&keys, &store.settings.shortcuts);
 
     // Профиль лежит в папке данных, а не рядом с exe: программу можно
     // переносить и запускать откуда угодно. У InPrivate профиль отдельный.
@@ -1714,6 +1715,17 @@ impl App {
             Hotkey::PasteGo => self.paste_and_go(),
             Hotkey::TaskManager => self.open_hub("tasks"),
             Hotkey::Panel => self.toggle_panel(),
+            Hotkey::Compact => {
+                let on = !self.store.settings.compact;
+                self.store.settings.compact = on;
+                self.store.save_settings();
+                self.dirty = true;
+            }
+            Hotkey::Split => {
+                let inside = self.split.is_some_and(|(l, r, _)| self.active == l || self.active == r);
+                let cmd = if inside { r#"{"cmd":"unsplit"}"# } else { r#"{"cmd":"split"}"# };
+                self.handle_ui(cmd);
+            }
             Hotkey::Pip => {
                 if let Some(webview) = self.active_webview() {
                     platform::run_with_gesture(webview, PIP_SCRIPT);
@@ -2075,6 +2087,16 @@ impl App {
             }
             "island_tabs" => settings.island_tabs = value.as_bool().unwrap_or(settings.island_tabs),
             "auto_update" => settings.auto_update = value.as_bool().unwrap_or(settings.auto_update),
+            "compact" => settings.compact = value.as_bool().unwrap_or(settings.compact),
+            "shortcuts" => {
+                let Ok(list) = serde_json::from_value::<Vec<store::Shortcut>>(value.clone()) else { return };
+                settings.shortcuts = list
+                    .into_iter()
+                    .filter(|s| platform::hotkey_by_id(&s.action).is_some() && s.key > 0 && s.key < 256 && s.mods < 8)
+                    .map(|s| store::Shortcut { label: s.label.chars().take(40).collect(), ..s })
+                    .collect();
+                apply_shortcuts(&self.keys, &settings.shortcuts);
+            }
             "process_limit" => {
                 // применяется после перезапуска: аргументы движка задаются при его старте
                 if let Some(limit @ (0 | 2 | 4 | 6 | 8 | 12)) = value.as_u64() {
@@ -2527,6 +2549,7 @@ impl App {
                 }
             }
             "check_update" => self.check_update(true),
+            "keys_record" => self.keys.recording.store(message["on"].as_bool().unwrap_or(false), Ordering::Relaxed),
             "__toast_latest" => {
                 let _ = self.ui.evaluate_script("ui.toast('У вас последняя версия')");
             }
@@ -3136,6 +3159,8 @@ impl App {
                 "darkAll": settings.dark_all,
                 "autoUpdate": settings.auto_update,
                 "processLimit": settings.process_limit,
+                "compact": settings.compact,
+                "shortcuts": settings.shortcuts,
                 "processLimitActive": PROCESS_LIMIT.load(Ordering::Relaxed),
                 "updateSource": settings.update_source,
                 "darkSites": settings.dark_sites,
@@ -4426,6 +4451,16 @@ impl WithNetwork for WebViewBuilder<'_> {
     fn with_network(self, config: Option<wry::ProxyConfig>) -> Self {
         use wry::WebViewBuilderExtWindows;
         self.with_additional_browser_args(engine_args(config.as_ref(), PROCESS_LIMIT.load(Ordering::Relaxed)))
+    }
+}
+
+/// Свои сочетания клавиш из параметров — в общее состояние клавиатуры.
+fn apply_shortcuts(keys: &KeyState, list: &[store::Shortcut]) {
+    if let Ok(mut custom) = keys.custom.write() {
+        *custom = list
+            .iter()
+            .filter_map(|s| Some((s.key, s.mods, platform::hotkey_by_id(&s.action)?)))
+            .collect();
     }
 }
 
