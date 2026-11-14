@@ -165,6 +165,8 @@ pub enum UserEvent {
     Processes(Vec<efficiency::ProcessInfo>, bool),
     /// Страница не загрузилась: (вкладка, вид ошибки для своей страницы ошибки).
     LoadFailed(u32, &'static str),
+    /// Картинка значка вкладки в PNG — от самого движка, без повторной загрузки с сайта.
+    FaviconImage(u32, Vec<u8>),
     /// Тихий повтор загрузки после обрыва связи: (вкладка, адрес).
     RetryLoad(u32, String),
 }
@@ -372,6 +374,8 @@ struct App {
     next_id: u32,
     /// Закрытые вкладки для Ctrl+Shift+T.
     closed: Vec<SessionTab>,
+    /// Значки вкладок, сохранённые на диск: хост → (версия, размер файла).
+    tab_icons: HashMap<String, (u32, usize)>,
     /// Группы, опустевшие после закрытия вкладок, — для восстановления.
     closed_groups: Vec<store::TabGroup>,
     downloads: Vec<Download>,
@@ -543,6 +547,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         next_id: 1,
         closed: Vec::new(),
         closed_groups: Vec::new(),
+        tab_icons: load_tab_icons(),
         downloads: Vec::new(),
         keys,
         overlay: Overlay::None,
@@ -691,6 +696,27 @@ fn default_download_dir() -> String {
         .unwrap_or_default()
 }
 
+/// Хост для файла значка вкладки (без www., только безопасные символы).
+fn tab_icon_host(url: &str) -> Option<String> {
+    let host = adblock::host_of(url)?.to_ascii_lowercase();
+    let host = host.trim_start_matches("www.").to_string();
+    icons::valid_host(&host).then_some(host)
+}
+
+/// Значки вкладок, сохранённые в прошлые запуски: спящие вкладки сразу со значком.
+fn load_tab_icons() -> HashMap<String, (u32, usize)> {
+    let Ok(entries) = std::fs::read_dir(data_dir().join("tab-icons")) else { return HashMap::new() };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            let host = name.strip_suffix(".png")?.to_string();
+            let size = e.metadata().ok()?.len() as usize;
+            icons::valid_host(&host).then_some((host, (1, size)))
+        })
+        .collect()
+}
+
 /// Где на окне стоит уведомление: по центру снизу (как в style.css: bottom 28px),
 /// с запасом под тень и анимацию появления.
 fn toast_part(width: f64, height: f64, w: f64, h: f64) -> [f64; 5] {
@@ -759,6 +785,21 @@ fn build_ui(
                         responder.respond(response);
                     }
                 });
+                return;
+            }
+            // значок вкладки с диска — сохранён из движка, сеть не нужна
+            if let Some(host) = path.strip_prefix("/tabicon/") {
+                let file = icons::valid_host(host).then(|| data_dir().join("tab-icons").join(format!("{host}.png")));
+                let response = match file.and_then(|f| std::fs::read(f).ok()) {
+                    Some(bytes) => wry::http::Response::builder()
+                        .header("Content-Type", "image/png")
+                        .header("Cache-Control", "max-age=31536000")
+                        .body(std::borrow::Cow::Owned(bytes)),
+                    None => wry::http::Response::builder().status(404).body(std::borrow::Cow::Owned(Vec::new())),
+                };
+                if let Ok(response) = response {
+                    responder.respond(response);
+                }
                 return;
             }
             let range = request.headers().get("range").and_then(|v| v.to_str().ok());
@@ -905,6 +946,14 @@ impl App {
 
     fn index_of(&self, id: u32) -> Option<usize> {
         self.tabs.iter().position(|t| t.id == id)
+    }
+
+    /// Значок вкладки: сохранённый с диска (без сети), иначе адрес значка сайта.
+    fn tab_favicon(&self, tab: &Tab) -> String {
+        match tab_icon_host(&tab.url).and_then(|h| self.tab_icons.get(&h).map(|(v, _)| (h, *v))) {
+            Some((host, version)) => format!("http://rb.localhost/tabicon/{host}?v={version}"),
+            None => tab.favicon.clone(),
+        }
     }
 
     fn active_tab(&self) -> Option<&Tab> {
@@ -1593,6 +1642,19 @@ impl App {
             }
             UserEvent::Hotkey(hotkey) => self.handle_hotkey(hotkey),
             UserEvent::Download(event) => self.handle_download(event),
+            UserEvent::FaviconImage(id, bytes) => {
+                let Some(host) = self.tab(id).and_then(|t| tab_icon_host(&t.url)) else { return };
+                if self.tab_icons.get(&host).is_some_and(|(_, old)| *old == bytes.len()) {
+                    return; // тот же значок
+                }
+                let dir = data_dir().join("tab-icons");
+                let _ = std::fs::create_dir_all(&dir);
+                if std::fs::write(dir.join(format!("{host}.png")), &bytes).is_ok() {
+                    let version = self.tab_icons.get(&host).map_or(1, |(v, _)| v + 1);
+                    self.tab_icons.insert(host, (version, bytes.len()));
+                    self.dirty = true;
+                }
+            }
             UserEvent::Favicon(id, uri) => {
                 if let Some(tab) = self.tab_mut(id) {
                     tab.favicon = uri;
@@ -3149,7 +3211,7 @@ impl App {
                     "id": tab.id,
                     "title": tab.title,
                     "url": tab.url,
-                    "favicon": tab.favicon,
+                    "favicon": self.tab_favicon(tab),
                     "state": state,
                     "memory": bytes,
                     "shared": shared,
@@ -3290,7 +3352,7 @@ impl App {
                     "id": tab.id,
                     "title": tab.title,
                     "url": tab.url,
-                    "favicon": tab.favicon,
+                    "favicon": self.tab_favicon(tab),
                     "loading": tab.loading,
                     "blocked": tab.blocked,
                     "canBack": tab.can_back,

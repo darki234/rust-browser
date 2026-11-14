@@ -21,7 +21,7 @@ use webview2_com::{
     take_pwstr, AcceleratorKeyPressedEventHandler, BytesReceivedChangedEventHandler,
     BrowserExtensionEnableCompletedHandler, BrowserExtensionRemoveCompletedHandler,
     AddScriptToExecuteOnDocumentCreatedCompletedHandler, CallDevToolsProtocolMethodCompletedHandler,
-    CapturePreviewCompletedHandler, FocusChangedEventHandler, ProcessFailedEventHandler,
+    CapturePreviewCompletedHandler, FocusChangedEventHandler, GetFaviconCompletedHandler, ProcessFailedEventHandler,
     ContainsFullScreenElementChangedEventHandler,
     DownloadStartingEventHandler, FaviconChangedEventHandler,
     FindActiveMatchIndexChangedEventHandler, FindMatchCountChangedEventHandler,
@@ -499,8 +499,21 @@ pub fn hook_page_state(webview: &WebView, tab: u32, proxy: Proxy) {
             let handler = FaviconChangedEventHandler::create(Box::new(move |sender, _| {
                 let Some(sender) = sender else { return Ok(()) };
                 let mut uri = PWSTR::null();
-                sender.cast::<ICoreWebView2_15>()?.FaviconUri(&mut uri)?;
+                let core15 = sender.cast::<ICoreWebView2_15>()?;
+                core15.FaviconUri(&mut uri)?;
                 let _ = favicon.send_event(UserEvent::Favicon(tab, take_pwstr(uri)));
+                // Сам значок движок уже скачал — забираем картинку у него, а не с сайта:
+                // через медленную сеть повторная загрузка значка часто не доходила.
+                let image = favicon.clone();
+                let done = GetFaviconCompletedHandler::create(Box::new(move |result, stream| {
+                    if let (Ok(()), Some(stream)) = (result, stream) {
+                        if let Some(bytes) = read_stream(&stream).filter(|b| b.len() > 60) {
+                            let _ = image.send_event(UserEvent::FaviconImage(tab, bytes));
+                        }
+                    }
+                    Ok(())
+                }));
+                let _ = core15.GetFavicon(COREWEBVIEW2_FAVICON_IMAGE_FORMAT_PNG, &done);
                 Ok(())
             }));
             let _ = core15.add_FaviconChanged(&handler, &mut 0i64);

@@ -149,6 +149,8 @@ function favicon(url, large = false, known = '') {
     img.onerror = () => { img.onerror = null; img.src = fallback; };
     img.src = 'http://rb.localhost/siteicon/' + encodeURIComponent(host.replace(/^www\./, '')) + '?v=' + iconsVersion;
   } else {
+    // значок с сайта не дошёл (медленная сеть) — берём сохранённый на диске
+    img.onerror = () => { img.onerror = null; img.src = 'http://rb.localhost/siteicon/' + encodeURIComponent(host.replace(/^www\./, '')) + '?v=' + iconsVersion; };
     img.src = fallback;
   }
   return box;
