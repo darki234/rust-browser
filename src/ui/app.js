@@ -1971,7 +1971,18 @@ const SETTINGS_CATS = [
       setting('Экономия при работе от батареи', () => S.onBattery
           ? 'Сейчас от батареи: фоновые вкладки засыпают через 5 минут'
           : 'От батареи фоновые вкладки будут засыпать через 5 минут',
-        toggle(() => S.settings.batterySaver, (value) => set('battery_saver', value)))),
+        toggle(() => S.settings.batterySaver, (value) => set('battery_saver', value))),
+      setting('Процессы движка', () => {
+          const want = S.settings.processLimit || 0, now = S.settings.processLimitActive || 0;
+          const base = 'Меньше процессов — меньше памяти, но тяжёлая вкладка может притормозить соседние с того же процесса';
+          return want !== now ? base + '. Изменение заработает после перезапуска браузера' : base;
+        },
+        segmented([[0, 'Авто'], [2, '2'], [4, '4'], [8, '8']], () => S.settings.processLimit || 0, (value) => set('process_limit', value)),
+        (() => {
+          const b = h('button', { class: 'text-btn outline', onclick: () => send('restart_update') }, 'Перезапустить');
+          settingsUpdaters.push(() => { b.style.display = (S.settings.processLimit || 0) !== (S.settings.processLimitActive || 0) ? '' : 'none'; });
+          return b;
+        })())),
   ]],
   ['downloads', 'Загрузки', () => [
     h('div', { class: 'card' }, h('h2', {}, 'Загрузки'),

@@ -460,6 +460,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let profile = if inprivate { "WebView2-InPrivate" } else { "WebView2" };
     let mut web_context = WebContext::new(Some(data_dir().join(profile)));
     let network = proxy_config(&store.settings);
+    PROCESS_LIMIT.store(store.settings.process_limit, Ordering::Relaxed);
     // прокси меняется только с перезапуском — значкам сайтов хватает значения при старте
     icons::set_proxy(match store.settings.proxy_mode.as_str() {
         "http" | "socks5" if valid_proxy_host(&store.settings.proxy_host) && store.settings.proxy_port > 0 => Some(format!(
@@ -2074,6 +2075,12 @@ impl App {
             }
             "island_tabs" => settings.island_tabs = value.as_bool().unwrap_or(settings.island_tabs),
             "auto_update" => settings.auto_update = value.as_bool().unwrap_or(settings.auto_update),
+            "process_limit" => {
+                // применяется после перезапуска: аргументы движка задаются при его старте
+                if let Some(limit @ (0 | 2 | 4 | 6 | 8 | 12)) = value.as_u64() {
+                    settings.process_limit = limit as u32;
+                }
+            }
             "dark_all" => {
                 settings.dark_all = value.as_bool().unwrap_or(settings.dark_all);
                 self.store.save_settings();
@@ -3128,6 +3135,8 @@ impl App {
                 "islandTabs": settings.island_tabs,
                 "darkAll": settings.dark_all,
                 "autoUpdate": settings.auto_update,
+                "processLimit": settings.process_limit,
+                "processLimitActive": PROCESS_LIMIT.load(Ordering::Relaxed),
                 "updateSource": settings.update_source,
                 "darkSites": settings.dark_sites,
                 "buttons": settings.buttons,
@@ -4412,12 +4421,31 @@ trait WithNetwork {
 }
 
 impl WithNetwork for WebViewBuilder<'_> {
+    /// Аргументы движка собираем сами: те же, что ставит wry, плюс прокси и лимит процессов.
+    /// У всех webview они одинаковые — иначе WebView2 не дал бы им общий профиль.
     fn with_network(self, config: Option<wry::ProxyConfig>) -> Self {
-        match config {
-            Some(config) => self.with_proxy_config(config),
-            None => self,
-        }
+        use wry::WebViewBuilderExtWindows;
+        self.with_additional_browser_args(engine_args(config.as_ref(), PROCESS_LIMIT.load(Ordering::Relaxed)))
     }
+}
+
+/// Сколько процессов страниц может запустить движок (0 — сколько решит сам).
+static PROCESS_LIMIT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn engine_args(proxy: Option<&wry::ProxyConfig>, process_limit: u32) -> String {
+    let mut args = String::from(
+        "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required",
+    );
+    match proxy {
+        Some(wry::ProxyConfig::Http(e)) => args.push_str(&format!(" --proxy-server=http://{}:{}", e.host, e.port)),
+        Some(wry::ProxyConfig::Socks5(e)) => args.push_str(&format!(" --proxy-server=socks5://{}:{}", e.host, e.port)),
+        None => {}
+    }
+    if process_limit > 0 {
+        // сайты делят процессы: меньше памяти, но одна тяжёлая вкладка может тормозить соседей
+        args.push_str(&format!(" --renderer-process-limit={process_limit}"));
+    }
+    args
 }
 
 /// Прокси из настроек для движка (None — без прокси).
@@ -4772,6 +4800,16 @@ mod tests {
         assert!(!is_hex_color("#4f5bf"));
         assert!(!is_hex_color("#4f5bfz"));
         assert!(!is_hex_color("red;}body{"));
+    }
+
+    #[test]
+    fn engine_args_include_proxy_and_limit() {
+        let proxy = wry::ProxyConfig::Socks5(wry::ProxyEndpoint { host: "127.0.0.1".into(), port: "1080".into() });
+        let args = engine_args(Some(&proxy), 4);
+        assert!(args.contains("--proxy-server=socks5://127.0.0.1:1080"));
+        assert!(args.contains("--renderer-process-limit=4"));
+        assert!(args.starts_with("--disable-features=msWebOOUI"));
+        assert!(!engine_args(None, 0).contains("renderer-process-limit"));
     }
 
     #[test]

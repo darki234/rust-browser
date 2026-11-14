@@ -69,6 +69,8 @@ pub struct Settings {
     pub dark_all: bool,
     /// Обновляться самому и откуда брать новые сборки.
     pub auto_update: bool,
+    /// Лимит процессов страниц (0 — сам движок решает).
+    pub process_limit: u32,
     pub update_source: String,
     /// Свои кнопки на панели: сайт одним нажатием.
     pub buttons: Vec<CustomButton>,
@@ -125,6 +127,7 @@ impl Default for Settings {
             dark_sites: Vec::new(),
             dark_all: false,
             auto_update: true,
+            process_limit: 0,
             update_source: String::new(),
             buttons: Vec::new(),
             history_cleared: 0,
