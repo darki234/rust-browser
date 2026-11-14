@@ -331,7 +331,6 @@ function setState(next) {
   renderAutofillButton();
   renderSplitButton();
   renderCompact();
-  renderBoostMenu();
   // фокус ушёл со строки (в неактивном окне blur может не прийти) — сворачиваем
   if (urlbox.classList.contains('expanded') && document.activeElement !== el.url && !sheetOpen) collapseUrl();
   requestAnimationFrame(measureUrl);
@@ -1416,7 +1415,6 @@ function mainMenuNodes() {
     item({ icon: 'split', label: S.split && [S.split.left, S.split.right].includes(S.active) ? 'Убрать разделение экрана' : 'Разделить экран', disabled: !page,
       onClick: () => send(S.split && [S.split.left, S.split.right].includes(S.active) ? 'unsplit' : 'split') }),
     item({ icon: 'moon2', label: 'Тёмная тема для этого сайта', check: !!activeTab()?.dark, disabled: !page, onClick: () => send('dark_site') }),
-    item({ icon: 'bolt', label: 'Настроить этот сайт…', disabled: !page, onClick: () => setTimeout(openBoostMenu, 140) }),
     item({ icon: 'bar', label: 'Панель избранного', kb: 'Ctrl+Shift+B', check: S.settings.favbar,
       onClick: () => send('set', { key: 'favbar', value: !S.settings.favbar }) }),
     item({ icon: 'code', label: 'Инструменты разработчика', kb: 'F12', disabled: !page, onClick: () => send('devtools') }),
@@ -3146,55 +3144,6 @@ function renderCompact() {
 }
 
 
-// ---------- свой вид сайта («бусты») ----------
-
-const BOOST_FONTS = ['Segoe UI Variable Text', 'Georgia', 'Cambria', 'Calibri', 'Bahnschrift', 'Consolas', 'Comic Sans MS', 'Verdana'];
-const BOOST_TINTS = ['#3b82f6', '#8b5cf6', '#ec4899', '#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4'];
-
-function openBoostMenu() {
-  const tab = activeTab();
-  const host = hostOf(tab?.url || '').replace(/^www\./, '');
-  if (!host || !/^https?:/.test(tab.url)) return toast('Свой вид можно задать только для сайта');
-  const draw = () => {
-    const b = (S.settings.boosts || {})[host] || { font: '', tint: '', hidden: [], css: '' };
-    const fonts = h('div', { class: 'boost-chips' },
-      h('button', { class: 'boost-chip' + (!b.font ? ' on' : ''), onclick: () => send('boost_set', { font: '' }) }, 'Как на сайте'),
-      ...BOOST_FONTS.map((f) => h('button', { class: 'boost-chip' + (b.font === f ? ' on' : ''), style: `font-family:"${f}"`, onclick: () => send('boost_set', { font: f }) }, f.replace(' Variable Text', ''))));
-    const tints = h('div', { class: 'gcolors' },
-      h('button', { class: 'swatch none' + (!b.tint ? ' on' : ''), title: 'Без оттенка', onclick: () => send('boost_set', { tint: '' }) }),
-      ...BOOST_TINTS.map((c) => h('button', { class: 'swatch' + (b.tint === c ? ' on' : ''), style: `--c:${c}`, onclick: () => send('boost_set', { tint: c }) })));
-    const css = h('textarea', { class: 'field boost-css', placeholder: 'Свой CSS для сайта, например: body { font-size: 18px }', spellcheck: 'false' });
-    css.value = b.css || '';
-    css.addEventListener('keydown', (e) => e.stopPropagation());
-    const hidden = b.hidden.map((s, index) => h('div', { class: 'boost-hidden' }, h('code', {}, s),
-      h('button', { title: 'Показать снова', onclick: () => send('boost_set', { unhide: index }) }, '×')));
-    return [
-      h('div', { class: 'menu-title' }, `Свой вид: ${host}`),
-      h('div', { class: 'boost-sec' }, h('small', {}, 'Шрифт'), fonts),
-      h('div', { class: 'boost-sec' }, h('small', {}, 'Оттенок'), tints),
-      h('div', { class: 'boost-sec' }, h('small', {}, `Скрытые элементы: ${b.hidden.length}`), ...hidden,
-        h('button', { class: 'text-btn outline', onclick: () => { closeMenu(); setTimeout(() => send('boost_pick'), 150); } }, 'Скрыть элемент на странице')),
-      h('div', { class: 'boost-sec' }, h('small', {}, 'Свой CSS'), css,
-        h('div', { class: 'boost-row' },
-          h('button', { class: 'text-btn primary', onclick: () => send('boost_set', { css: css.value }) }, 'Применить CSS'),
-          h('button', { class: 'text-btn', onclick: () => send('boost_set', { reset: true }) }, 'Сбросить всё'))),
-    ];
-  };
-  boostRedraw = () => { if (menuKind === 'boost') el.menu.replaceChildren(...draw()); };
-  showMenu('boost', draw(), () => {
-    const anchor = el.menubtn.getBoundingClientRect();
-    el.menu.style.left = Math.max(8, Math.min(anchor.right - 360, innerWidth - 370)) + 'px';
-    el.menu.style.top = anchor.bottom + 8 + 'px';
-  });
-}
-let boostRedraw = () => {};
-let boostKey = '';
-function renderBoostMenu() {
-  const key = JSON.stringify(S.settings.boosts || {});
-  if (key !== boostKey) { boostKey = key; boostRedraw(); }
-}
-
-
 // ---------- адресная строка-кнопка ----------
 // Если места мало (узкий остров, окно), строка сворачивается в круглую кнопку-лупу
 // вместо обрезанного «Адр…». Щелчок или Ctrl+L — растягивается на всю панель.
@@ -3223,7 +3172,8 @@ function urlRoom() {
 function measureUrl() {
   if (urlbox.classList.contains('expanded')) return;
   // в одной строке с вкладками: колонка панели растёт за счёт вкладок, пока строке не хватит ~260px
-  if (document.body.classList.contains('bar-compact')) {
+  // (адрес во вкладке — строки нет, место под неё не держим)
+  if (document.body.classList.contains('bar-compact') && !urlInTab()) {
     el.chrome.style.setProperty('--tool-need', Math.round(toolbarEl.clientWidth - urlRoom() + 260) + 'px');
   }
   document.body.classList.toggle('url-in-tab', urlInTab());

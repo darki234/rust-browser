@@ -84,8 +84,6 @@ pub struct Settings {
     pub compact: bool,
     /// Адрес прямо в активной вкладке (как в Safari): отдельной адресной строки нет.
     pub url_in_tab: bool,
-    /// Свой вид сайтов: хост → шрифт, оттенок, скрытые элементы, CSS.
-    pub boosts: std::collections::BTreeMap<String, crate::boosts::Boost>,
     /// Свои сочетания клавиш.
     pub shortcuts: Vec<Shortcut>,
     pub update_source: String,
@@ -147,7 +145,6 @@ impl Default for Settings {
             process_limit: 0,
             compact: false,
             url_in_tab: false,
-            boosts: Default::default(),
             shortcuts: Vec::new(),
             update_source: String::new(),
             buttons: Vec::new(),
