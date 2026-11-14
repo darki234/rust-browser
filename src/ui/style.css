@@ -1393,6 +1393,10 @@ body.bar-compact #winctl { align-self: stretch; }
 body.bar-compact #favbar { grid-area: fav; background: transparent; }
 body.bar-compact #findbar { grid-area: find; background: transparent; }
 body.bar-compact.tint #toolbar { background: transparent; }
+/* в узком окне одной строке не хватает места: кнопки окна уезжали за край — вкладки над панелью */
+@media (max-width: 600px) {
+  body.bar-compact #chrome { grid-template-columns: minmax(0, 1fr); grid-template-areas: "title" "tool" "fav" "find"; }
+}
 
 /* «Плавающая»: панель навигации парит над страницей со скруглёнными краями */
 body.bar-floating #chrome {
@@ -1478,6 +1482,11 @@ body.bar-vertical #newtab:hover { transform: none; color: var(--text); }
 body.bar-vertical #progress { top: 0; bottom: auto; }
 body.bar-vertical #tabs::-webkit-scrollbar { width: 8px; }
 body.bar-vertical #tabs::-webkit-scrollbar-thumb { background: var(--press); border-radius: 4px; }
+/* в узком окне колонка вкладок занимала больше половины: странице почти не оставалось места */
+@media (max-width: 600px) {
+  body.bar-vertical { --side-w: 210px; }
+  body.bar-vertical #chrome { width: 210px; }
+}
 body.bar-vertical #start { margin-left: var(--side-w); }
 body.bar-vertical #layer { top: 0; left: var(--side-w); }
 body.bar-vertical #sheet {
