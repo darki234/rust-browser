@@ -89,7 +89,10 @@ fun BrowserApp(b: Browser, activity: MainActivity) {
     val systemDark = isSystemInDarkTheme()
     val dark = when (store.theme) { "light" -> false; "dark", "amoled" -> true; else -> systemDark }
     val p = palette(dark, store.theme == "amoled", store.accent)
-    LaunchedEffect(dark, store.theme) { activity.applySystemBars() }
+    LaunchedEffect(dark, store.theme) {
+        activity.applySystemBars()
+        b.retheme(dark) // открытые сайты тоже узнают о смене темы
+    }
     val tab = b.active
 
     Box(Modifier.fillMaxSize().background(p.bg)) {

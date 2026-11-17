@@ -65,6 +65,11 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.TextRange
@@ -163,7 +168,12 @@ private fun SearchScreen(b: Browser, p: Palette) {
             Box(Modifier.weight(1f)) {
                 if (query.text.isEmpty()) Text("Поиск или адрес", color = p.muted, fontSize = 16.sp)
                 BasicTextField(
-                    query, { query = it }, Modifier.fillMaxWidth().focusRequester(focus),
+                    query, { query = it },
+                    Modifier.fillMaxWidth().focusRequester(focus)
+                        // Enter с аппаратной клавиатуры (планшет, Chromebook) — как кнопка «Перейти»
+                        .onPreviewKeyEvent {
+                            if (it.key == Key.Enter && it.type == KeyEventType.KeyUp) { b.navigate(query.text); true } else false
+                        },
                     singleLine = true,
                     textStyle = TextStyle(color = p.text, fontSize = 16.sp),
                     cursorBrush = SolidColor(p.accent),

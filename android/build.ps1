@@ -4,7 +4,8 @@
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 if (-not (subst | Select-String '^R:')) { subst R: $repo }
-$env:JAVA_HOME = (Get-ChildItem "$env:LOCALAPPDATA\Android\jdk" -Directory | Select-Object -First 1).FullName
+# инструменты Android лежат на диске D (на C мало места)
+$env:JAVA_HOME = (Get-ChildItem "D:\Android\jdk" -Directory | Select-Object -First 1).FullName
 Push-Location R:\android
 try {
     & .\gradlew.bat assembleRelease --console=plain

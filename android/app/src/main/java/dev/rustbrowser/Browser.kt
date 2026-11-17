@@ -85,6 +85,7 @@ class Browser(private val activity: MainActivity, val store: Store) {
         val index = tabs.indexOfFirst { it.id == activeId }
         if (index >= 0 && activate) tabs.add(index + 1, tab) else tabs.add(tab)
         if (activate) activate(tab)
+        saveSessionSoon()
         return tab
     }
 
@@ -92,6 +93,7 @@ class Browser(private val activity: MainActivity, val store: Store) {
         active?.let { if (it.id != tab.id) capture(it) }
         activeId = tab.id
         islandShown = true
+        saveSessionSoon()
         attach(tab)
     }
 
@@ -116,6 +118,7 @@ class Browser(private val activity: MainActivity, val store: Store) {
         tab.webView?.let { host.removeView(it); it.destroy() }
         tab.webView = null
         if (tab.incognito && tabs.none { it.incognito }) dropIncognito()
+        saveSessionSoon()
         if (tab.id == activeId) {
             val next = tabs.getOrNull(index) ?: tabs.getOrNull(index - 1)
             if (next != null) activate(next) else newTab()
@@ -200,6 +203,28 @@ class Browser(private val activity: MainActivity, val store: Store) {
 
     // ---------- тёмные сайты, память, сеанс ----------
 
+    /**
+     * Тема интерфейса сменилась. WebView узнаёт светлый или тёмный режим только при
+     * создании, поэтому вкладки пересоздаются, а их история переносится (saveState).
+     */
+    private var themedDark: Boolean? = null
+    fun retheme(dark: Boolean) {
+        val was = themedDark
+        themedDark = dark
+        if (was == null || was == dark) return
+        tabs.forEach { tab ->
+            val old = tab.webView ?: return@forEach
+            val state = android.os.Bundle()
+            old.saveState(state)
+            host.removeView(old)
+            old.destroy()
+            val fresh = createWebView(tab)
+            tab.webView = fresh
+            if (fresh.restoreState(state) == null) fresh.loadUrl(tab.url)
+        }
+        active?.let { attach(it) }
+    }
+
     fun applyDarkSites() {
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) return
         tabs.forEach { t -> t.webView?.let { WebSettingsCompat.setAlgorithmicDarkeningAllowed(it.settings, store.darkSites) } }
@@ -220,6 +245,13 @@ class Browser(private val activity: MainActivity, val store: Store) {
         CookieManager.getInstance().flush()
     }
     fun resumeActive() { active?.webView?.let { it.resumeTimers(); it.onResume() } }
+
+    /** Сеанс пишется вскоре после любого изменения: убитое системой приложение не теряет вкладки. */
+    private val saveTask = Runnable { saveSession() }
+    fun saveSessionSoon() {
+        main.removeCallbacks(saveTask)
+        main.postDelayed(saveTask, 1000)
+    }
 
     fun saveSession() {
         val normal = tabs.filter { !it.incognito }
@@ -363,7 +395,7 @@ class Browser(private val activity: MainActivity, val store: Store) {
             tab.loading = false
             tab.canBack = view.canGoBack()
             tab.canForward = view.canGoForward()
-            if (!tab.incognito) store.addVisit(url, view.title ?: "")
+            if (!tab.incognito) { store.addVisit(url, view.title ?: ""); saveSessionSoon() }
         }
 
         override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
