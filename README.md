@@ -1,41 +1,72 @@
+<div align="center">
+
+<img src="assets/icon.png" width="112" alt="Rust Browser">
+
 # Rust Browser
 
-Лёгкий браузер для Windows на Rust ([wry](https://github.com/tauri-apps/wry) + WebView2) с интерфейсом в виде плавающего «острова», плюс версия для Android.
+**Лёгкий браузер для Windows и Android с интерфейсом в виде плавающего «острова»**
 
-## Возможности
+![Rust](https://img.shields.io/badge/Rust-2021-dea584?logo=rust&logoColor=white)
+![Platform](https://img.shields.io/badge/Windows-WebView2-0078d4?logo=windows&logoColor=white)
+![Android](https://img.shields.io/badge/Android-Kotlin-3ddc84?logo=android&logoColor=white)
+![License](https://img.shields.io/badge/license-MIT-blue)
 
-- плавающий «остров» с адресной строкой, прячется при прокрутке; режим «только сайт», компактный режим, вертикальные вкладки
-- группы вкладок и разделённый экран
-- встроенный блокировщик рекламы (uBlock Origin Lite) и собственный список блокировки
-- тёмная тема для сайтов, перевод страниц, «бусты» (свой вид сайтов), картинка в картинке
-- менеджер паролей и карт с шифрованием, проверка паролей на утечки, автозаполнение
-- редактор горячих клавиш, поиск по клавишам
-- синхронизация закладок и истории с Android через зашифрованный файл в облачной папке (например, OneDrive)
+</div>
 
-## Сборка (Windows)
+---
 
-Нужны Rust (stable) и установленный WebView2 Runtime.
+## ✨ Возможности
 
-```
+| | |
+|---|---|
+| 🏝️ **Остров** | плавающая панель с адресной строкой, прячется при прокрутке; режимы «только сайт» и «компакт», вертикальные вкладки |
+| 🗂️ **Вкладки** | группы вкладок, разделённый экран, значки сайтов |
+| 🛡️ **Блокировка** | встроенный uBlock Origin Lite и собственный список блокировки |
+| 🌙 **Внешний вид** | тёмная тема для сайтов (уже тёмные не портит), «бусты» — свой вид для каждого сайта |
+| 🔐 **Приватность** | менеджер паролей и карт с шифрованием, проверка паролей на утечки, автозаполнение |
+| ⌨️ **Удобство** | редактор горячих клавиш, поиск по клавишам, перевод страниц, картинка в картинке |
+| 🔄 **Синхронизация** | закладки и история между Windows и Android через зашифрованный файл в облачной папке (например, OneDrive) |
+
+## 🚀 Сборка
+
+### Windows
+
+Нужны [Rust](https://rustup.rs) (stable) и WebView2 Runtime.
+
+```powershell
 cargo build --release
 ```
 
-Результат: `target/release/rust-browser.exe`.
+Готовый файл: `target/release/rust-browser.exe`.
 
-## Сборка (Android)
+### Android
 
-Нужны JDK и Android SDK. Подпись выполняется локальным ключом `android/rustbrowser.keystore`, в репозитории его нет. Создайте свой ключ с тем же именем или поправьте `signingConfigs` в `android/app/build.gradle.kts`.
+Нужны JDK и Android SDK. Сборка подписывается локальным ключом `android/rustbrowser.keystore`, в репозитории его нет: создайте свой с тем же именем или поправьте `signingConfigs` в `android/app/build.gradle.kts`.
 
-```
+```powershell
 .\android\build.ps1
 ```
 
 Скрипт рассчитан на мои пути (`D:\Android`), поправьте их под себя.
 
-## Проверки
+## 🧪 Проверки
 
-```
+```powershell
 cargo test
 ```
 
-Сквозные проверки описаны в `tests/e2e/README.md`.
+Сквозные проверки браузера описаны в [`tests/e2e/README.md`](tests/e2e/README.md).
+
+## 🧱 Устройство
+
+| Путь | Что там |
+|---|---|
+| `src/` | десктопный браузер на Rust: окно (`tao` + `wry`), WebView2, блокировщик, пароли, синхронизация |
+| `src/ui/` | интерфейс острова и страниц |
+| `android/` | версия для Android (Kotlin, Jetpack Compose) |
+| `assets/` | иконки и скрипты их генерации |
+| `tests/e2e/` | сквозные проверки |
+
+## 📄 Лицензия
+
+[MIT](LICENSE)
