@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Окно сразу тёмное и без заголовка: при запуске нет белой вспышки. -->
+    <style name="Theme.RustBrowser" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/backdrop</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+    <!-- Тема для страниц: от неё сайты узнают, светлый или тёмный режим (prefers-color-scheme). -->
+    <style name="Page.Light" parent="android:Theme.Material.Light.NoActionBar" />
+    <style name="Page.Dark" parent="android:Theme.Material.NoActionBar" />
+    <color name="backdrop">#FF121318</color>
+    <color name="icon_bg">#FFE2338F</color>
+</resources>
