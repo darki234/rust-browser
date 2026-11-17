@@ -423,6 +423,7 @@ private fun Empty(text: String, p: Palette) {
 private fun SettingsList(b: Browser, p: Palette, activity: MainActivity) {
     val s = b.store
     LazyColumn(contentPadding = PaddingValues(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        item { AccountCard(activity, p) }
         item {
             Card(p, "Оформление") {
                 Label("Тема", p)
@@ -533,4 +534,96 @@ private fun FindBar(b: Browser, p: Palette) {
         IconBtn(RbIcons.down, "Следующее", p.text, size = 40.dp) { b.findNext(true) }
         IconBtn(RbIcons.close, "Закрыть", p.text, size = 40.dp) { b.findClose() }
     }
+}
+
+// ---------- аккаунт: синхронизация с компьютером ----------
+
+@Composable
+private fun AccountCard(activity: MainActivity, p: Palette) {
+    val sync = activity.sync
+    val acc = sync.account
+    var login by remember { mutableStateOf(false) }
+    Card(p, "Аккаунт") {
+        if (acc == null) {
+            Text("Закладки и история — те же, что в Rust Browser на компьютере. Обмен идёт через зашифрованный файл в OneDrive: без пароля его не прочитает никто, даже Microsoft.",
+                color = p.muted, fontSize = 13.sp)
+            Action("Войти в аккаунт с компьютера", p) { login = true }
+        } else {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(42.dp).clip(CircleShape).background(Brush.linearGradient(listOf(p.accent, Color(0xFFE04A9A)))), contentAlignment = Alignment.Center) {
+                    Text(acc.name.take(1).uppercase(), color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                }
+                Spacer(Modifier.width(12.dp))
+                Column {
+                    Text(acc.name, color = p.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                    Text(if (sync.busy) "Синхронизация…" else "Синхронизировано: " + ago(acc.synced), color = p.muted, fontSize = 12.sp)
+                }
+            }
+            sync.error?.let { Text(it, color = Color(0xFFE5484D), fontSize = 13.sp, modifier = Modifier.padding(top = 10.dp)) }
+            Action(if (sync.busy) "Синхронизация…" else "Синхронизировать сейчас", p) { sync.syncNow(manual = true) }
+            Action("Выйти из аккаунта", p) { sync.logout() }
+        }
+    }
+    if (login && acc == null) LoginDialog(activity, p) { login = false }
+}
+
+private fun ago(seconds: Long): String {
+    if (seconds <= 0) return "ещё нет"
+    val diff = System.currentTimeMillis() / 1000 - seconds
+    return when {
+        diff < 60 -> "только что"
+        diff < 3600 -> "${diff / 60} мин назад"
+        else -> SimpleDateFormat("d MMMM, HH:mm", Locale("ru")).format(Date(seconds * 1000))
+    }
+}
+
+@Composable
+private fun LoginDialog(activity: MainActivity, p: Palette, onClose: () -> Unit) {
+    val sync = activity.sync
+    var name by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var file by remember { mutableStateOf<android.net.Uri?>(null) }
+    var fileName by remember { mutableStateOf("") }
+    val expected = if (name.isNotBlank()) dev.rustbrowser.SyncCrypto.fileName(name) else ""
+    val fieldColors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+        focusedTextColor = p.text, unfocusedTextColor = p.text, focusedBorderColor = p.accent, unfocusedBorderColor = p.border,
+        focusedLabelColor = p.accent, unfocusedLabelColor = p.muted, cursorColor = p.accent,
+    )
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = { if (!sync.busy) onClose() },
+        containerColor = p.surface,
+        title = { Text("Вход в аккаунт", color = p.text) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Имя и пароль — как в Rust Browser на компьютере (Параметры → Аккаунт).", color = p.muted, fontSize = 13.sp)
+                androidx.compose.material3.OutlinedTextField(name, { name = it }, label = { Text("Имя аккаунта") }, singleLine = true, colors = fieldColors)
+                androidx.compose.material3.OutlinedTextField(password, { password = it }, label = { Text("Пароль") }, singleLine = true, colors = fieldColors,
+                    visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password))
+                Column(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(p.surface2)
+                        .clickable { activity.pickSyncFile { uri -> file = uri; fileName = activity.fileName(uri) } }.padding(12.dp),
+                ) {
+                    Text(if (file == null) "Выбрать файл синхронизации" else fileName, color = if (file == null) p.accent else p.text, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    Text(
+                        when {
+                            file != null && expected.isNotEmpty() && fileName != expected -> "Для этого имени ожидается $expected — проверьте, тот ли это файл"
+                            file != null -> "Файл выбран"
+                            else -> "OneDrive → Rust Browser → " + (expected.ifEmpty { "RustBrowser-….rbsync" })
+                        },
+                        color = p.muted, fontSize = 12.sp,
+                    )
+                }
+                if (sync.busy) Text("Проверяю пароль… это займёт пару секунд", color = p.muted, fontSize = 13.sp)
+                sync.error?.let { Text(it, color = Color(0xFFE5484D), fontSize = 13.sp) }
+            }
+        },
+        confirmButton = {
+            androidx.compose.material3.TextButton(
+                onClick = { file?.let { sync.login(name, password, it) } },
+                enabled = !sync.busy && name.isNotBlank() && password.isNotEmpty() && file != null,
+            ) { Text("Войти", color = if (!sync.busy && name.isNotBlank() && password.isNotEmpty() && file != null) p.accent else p.muted) }
+        },
+        dismissButton = { androidx.compose.material3.TextButton(onClick = onClose, enabled = !sync.busy) { Text("Отмена", color = p.muted) } },
+    )
 }

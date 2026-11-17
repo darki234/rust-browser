@@ -28,6 +28,7 @@ import dev.rustbrowser.ui.BrowserApp
 class MainActivity : ComponentActivity() {
     lateinit var store: Store
     lateinit var browser: Browser
+    lateinit var sync: SyncManager
 
     /** Тёмный ли сейчас интерфейс — по настройке или по теме системы. */
     val darkUi: Boolean
@@ -48,6 +49,7 @@ class MainActivity : ComponentActivity() {
         store = Store(filesDir)
         AdBlock.load(this)
         browser = Browser(this, store)
+        sync = SyncManager(this, store)
         applySystemBars()
         browser.restoreSession()
         handleIntent(intent)
@@ -105,11 +107,13 @@ class MainActivity : ComponentActivity() {
         browser.saveSession()
         store.saveSettings()
         if (!isInPictureInPictureMode) browser.pauseAll()
+        sync.syncIfStale(60_000) // изменения с телефона — в облако, пока не забыли
     }
 
     override fun onResume() {
         super.onResume()
         browser.resumeActive()
+        sync.syncIfStale(5 * 60_000) // свежее с компьютера
     }
 
     @Suppress("DEPRECATION")
@@ -157,6 +161,29 @@ class MainActivity : ComponentActivity() {
         fileCallback = callback
         return runCatching { filePicker.launch(params.createIntent()); true }.getOrElse { fileCallback = null; false }
     }
+
+    // ---------- файл синхронизации в OneDrive ----------
+
+    private var syncPicked: ((Uri) -> Unit)? = null
+    private val syncPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri ?: return@registerForActivityResult
+        // постоянный доступ: после перезапуска телефона файл открывается без выбора
+        runCatching { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
+            .onFailure { runCatching { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) } }
+        syncPicked?.invoke(uri)
+        syncPicked = null
+    }
+
+    fun pickSyncFile(done: (Uri) -> Unit) {
+        syncPicked = done
+        syncPicker.launch(arrayOf("*/*"))
+    }
+
+    fun fileName(uri: Uri): String = runCatching {
+        contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+            if (c.moveToFirst()) c.getString(0) else null
+        }
+    }.getOrNull() ?: uri.lastPathSegment.orEmpty()
 
     // ---------- браузер по умолчанию ----------
 

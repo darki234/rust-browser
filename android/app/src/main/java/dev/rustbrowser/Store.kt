@@ -13,6 +13,13 @@ data class Bookmark(val url: String, val title: String)
 data class Visit(val url: String, val title: String, val time: Long)
 data class SavedTab(val url: String, val title: String)
 
+val DEFAULT_BOOKMARKS = listOf(
+    Bookmark("https://www.youtube.com/", "YouTube"),
+    Bookmark("https://ya.ru/", "Яндекс"),
+    Bookmark("https://ru.wikipedia.org/", "Википедия"),
+    Bookmark("https://github.com/", "GitHub"),
+)
+
 /** Поисковые системы — те же, что у настольной версии. */
 val ENGINES = listOf(
     Triple("google", "Google", "https://www.google.com/search?q="),
@@ -35,6 +42,8 @@ class Store(private val dir: File) {
     var darkSites by mutableStateOf(true)        // тёмная тема для сайтов силами движка
     var accent by mutableStateOf(0)
     var blockedTotal by mutableStateOf(0L)
+    /** Когда историю очистили (секунды Unix) — как history_cleared у компьютера: старое не вернётся из облака. */
+    var historyCleared = 0L
 
     val bookmarks = mutableStateListOf<Bookmark>()
     val history = mutableStateListOf<Visit>()
@@ -47,19 +56,12 @@ class Store(private val dir: File) {
             darkSites = s.optBoolean("darkSites", darkSites)
             accent = s.optInt("accent", accent)
             blockedTotal = s.optLong("blockedTotal", 0)
+            historyCleared = s.optLong("historyCleared", 0)
         }
         readArray("bookmarks.json")?.let { a ->
             for (i in 0 until a.length()) a.optJSONObject(i)?.let { bookmarks += Bookmark(it.optString("url"), it.optString("title")) }
         }
-        if (!File(dir, "bookmarks.json").exists()) {
-            // первые плитки на стартовой странице
-            bookmarks += listOf(
-                Bookmark("https://www.youtube.com/", "YouTube"),
-                Bookmark("https://ya.ru/", "Яндекс"),
-                Bookmark("https://ru.wikipedia.org/", "Википедия"),
-                Bookmark("https://github.com/", "GitHub"),
-            )
-        }
+        if (!File(dir, "bookmarks.json").exists()) bookmarks += DEFAULT_BOOKMARKS
         readArray("history.json")?.let { a ->
             for (i in 0 until a.length()) a.optJSONObject(i)?.let { history += Visit(it.optString("url"), it.optString("title"), it.optLong("time")) }
         }
@@ -74,7 +76,21 @@ class Store(private val dir: File) {
         val json = JSONObject()
             .put("theme", theme).put("engine", engine).put("adblock", adblock)
             .put("darkSites", darkSites).put("accent", accent).put("blockedTotal", blockedTotal)
+            .put("historyCleared", historyCleared)
         write("settings.json", json.toString())
+    }
+
+    /** Плитки остались те, что телефон поставил сам, — пользователь их не трогал. */
+    fun bookmarksAreDefaults() = bookmarks.toList() == DEFAULT_BOOKMARKS
+
+    fun replaceBookmarks(list: List<Bookmark>) {
+        bookmarks.clear(); bookmarks.addAll(list); saveBookmarks()
+    }
+
+    fun replaceHistory(list: List<Visit>, cleared: Long) {
+        history.clear(); history.addAll(list.take(5000))
+        historyCleared = maxOf(historyCleared, cleared)
+        saveSettings(); saveHistorySoon()
     }
 
     fun isBookmarked(url: String) = bookmarks.any { it.url == url }
@@ -106,7 +122,11 @@ class Store(private val dir: File) {
         saveHistorySoon()
     }
 
-    fun clearHistory() { history.clear(); write("history.json", "[]") }
+    fun clearHistory() {
+        history.clear(); write("history.json", "[]")
+        historyCleared = System.currentTimeMillis() / 1000 // на компьютерах она тоже очистится
+        saveSettings()
+    }
 
     private val main = android.os.Handler(android.os.Looper.getMainLooper())
     private var historyQueued = false
