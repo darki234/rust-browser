@@ -349,6 +349,8 @@ struct App {
     ext_popup_spare: Option<WebView>,
     /// Карточка предпросмотра вкладки (x, y, ширина, высота) — окно интерфейса её не обрежет.
     peek: Option<[f64; 4]>,
+    /// Высота видимой части окна интерфейса (для проверок).
+    shape_height: std::cell::Cell<f64>,
     /// Исправление опечаток и раскладки — в своём потоке.
     spell: spell::Worker,
     /// Версии снимков вкладок: интерфейс по ним понимает, что картинка обновилась.
@@ -559,6 +561,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ext_popup: None,
         ext_popup_spare: None,
         peek: None,
+        shape_height: std::cell::Cell::new(-1.0),
         spell,
         shot_versions: HashMap::new(),
         ext_browsers: Vec::new(),
@@ -1099,8 +1102,11 @@ impl App {
             matches!(self.overlay, Overlay::None | Overlay::Sheet(_)) && !on_start_page && !self.splash && !self.is_fullscreen()
         });
         let peek = self.peek.filter(|_| matches!(self.overlay, Overlay::None) && !on_start_page && !self.splash && !self.is_fullscreen());
-        let ui_rect = if toast.is_some() || peek.is_some() { rect(0.0, 0.0, width, height) } else { rect(bx, by, bw, bh) };
-        let _ = self.ui.set_bounds(ui_rect);
+        // Окно интерфейса всегда на всё окно, а видимое — вырез (SetWindowRgn). Раньше оно
+        // меняло размер: при открытии меню движок на кадр показывал новую область пустой —
+        // страница мигала чёрным. Вырез меняется мгновенно и рисовать ничего не заставляет.
+        let _ = self.ui.set_bounds(rect(0.0, 0.0, width, height));
+        let whole = (bx, by, bw, bh) == (0.0, 0.0, width, height);
         // «Остров» поверх страницы: окно интерфейса обрезается по полосе вкладок и острову.
         // Меню, подсказки, стартовая страница и полный экран — снова целиком.
         let floating = matches!(self.overlay, Overlay::None | Overlay::Sheet(_))
@@ -1110,7 +1116,8 @@ impl App {
             && side == 0.0;
         let mut parts: Option<Vec<[f64; 5]>> = match (&self.chrome_float, floating) {
             (Some((_, parts)), true) => Some(parts.clone()),
-            _ => None,
+            _ if whole => None,
+            _ => Some(vec![[bx, by, bw, bh, 0.0]]),
         };
         if let Some((w, h)) = toast {
             let mut list = parts.take().unwrap_or_else(|| vec![[bx, by, bw, bh, 0.0]]);
@@ -1122,6 +1129,12 @@ impl App {
             list.push([x, y, w, h, 14.0]);
             parts = Some(list);
         }
+        // высота видимой части — для проверок (e2e): само окно интерфейса всегда во весь рост
+        let shown = parts.as_ref().map_or(height, |p| p.iter().map(|r| r[1] + r[3]).fold(0.0, f64::max));
+        if (shown - self.shape_height.get()).abs() > 0.5 {
+            self.shape_height.set(shown);
+            let _ = self.ui.evaluate_script(&format!("window.__rbShape = {}", shown.round()));
+        }
         match parts {
             Some(parts) => {
                 let scale = self.window.scale_factor();
@@ -1132,7 +1145,10 @@ impl App {
                 platform::set_shape(&self.ui, Some(&shape));
                 platform::raise(&self.ui);
             }
-            None => platform::set_shape(&self.ui, None),
+            None => {
+                platform::set_shape(&self.ui, None);
+                platform::raise(&self.ui); // окно интерфейса теперь всегда над страницей
+            }
         }
 
         // Сначала показываем новую вкладку и только потом прячем остальные: иначе
@@ -2340,8 +2356,8 @@ impl App {
             _ => "null".to_string(),
         };
         let _ = self.ui.evaluate_script(&format!("ui.setBackdrop({backdrop})"));
+        // Вырез раскроется по сигналу overlay_shown — когда слой уже нарисован.
         self.overlay = Overlay::Full;
-        self.layout();
         let _ = self.ui.focus();
         let _ = self.ui.evaluate_script("ui.overlayReady()");
     }
@@ -3109,6 +3125,11 @@ impl App {
             "splash_done" => {
                 self.splash = false;
                 self.layout();
+            }
+            "overlay_shown" => {
+                if self.overlay == Overlay::Full {
+                    self.layout();
+                }
             }
             "overlay" => match message["mode"].as_str() {
                 Some("full") => self.request_full_overlay(),

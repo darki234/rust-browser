@@ -1307,6 +1307,8 @@ function setBackdrop(url) {
 async function overlayReady() {
   await backdropReady;
   el.layer.classList.add('open');
+  // слой нарисован (пока под вырезом) — теперь Rust раскрывает окно, без пустого кадра
+  requestAnimationFrame(() => requestAnimationFrame(() => { if (layerKind) send('overlay_shown'); }));
   const resolve = readyResolve;
   readyResolve = null;
   if (resolve) resolve();
@@ -1317,10 +1319,15 @@ function releaseLayer(delay, refocus = true) {
   layerKind = null;
   setTimeout(() => {
     if (layerKind) return; // за это время открыли что-то новое
-    el.layer.classList.remove('open', 'hub', 'closing');
-    setBackdrop(null);
+    // сначала вырез сжимается до панели, и только потом слой убирается: иначе на кадр
+    // под вырезом мелькнул бы пустой фон интерфейса
     send('overlay', { mode: 'none' });
     if (refocus) send('focus_content');
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (layerKind) return;
+      el.layer.classList.remove('open', 'hub', 'closing');
+      setBackdrop(null);
+    }));
   }, delay);
 }
 

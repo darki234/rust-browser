@@ -82,7 +82,7 @@ await check('открывается страница во вкладке', async
 });
 
 await check('заставка запуска отыграла и освободила окно', async () => {
-  await waitFor(() => ui.evaluate("!document.getElementById('splash').className && innerHeight < 300"));
+  await waitFor(() => ui.evaluate("!document.getElementById('splash').className && window.__rbShape < 300"));
 });
 
 await check('новая вкладка открывается и закрывается', async () => {
@@ -95,16 +95,16 @@ await check('новая вкладка открывается и закрыва�
 
 await check('меню «⋯» открывается поверх страницы', async () => {
   await ui.evaluate('openMainMenu()');
-  await waitFor(() => ui.evaluate("menuKind === 'main' && el.layer.classList.contains('open') && innerHeight > 200"));
+  await waitFor(() => ui.evaluate("menuKind === 'main' && el.layer.classList.contains('open') && window.__rbShape > 200"));
   await ui.evaluate('closeMenu()');
-  await waitFor(() => ui.evaluate('innerHeight < 200'), 3000);
+  await waitFor(() => ui.evaluate('window.__rbShape < 200'), 3000);
 });
 
 await check('параметры открываются', async () => {
   await ui.evaluate("openHub('settings')");
   await waitFor(() => ui.evaluate("el.hub.offsetHeight > 200 && document.querySelectorAll('.card').length >= 1 && document.querySelectorAll('.setcat.on').length === 1"));
   await ui.evaluate('closeHub()');
-  await waitFor(() => ui.evaluate('innerHeight < 200'), 3000);
+  await waitFor(() => ui.evaluate('window.__rbShape < 200'), 3000);
 });
 
 await check('поиск по странице находит текст', async () => {
@@ -182,7 +182,7 @@ await check('параметры по разделам и поиск по ним'
   await ui.evaluate("el.hubq.value = 'прозрачн'; el.hubq.dispatchEvent(new Event('input'))");
   await waitFor(() => ui.evaluate("document.querySelectorAll('.card .set').length === 1 && el.hublist.textContent.includes('Прозрачность панелей')"));
   await ui.evaluate("el.hubq.value = ''; closeHub()");
-  await waitFor(() => ui.evaluate('innerHeight < 300'), 3000);
+  await waitFor(() => ui.evaluate('window.__rbShape < 300'), 3000);
 });
 
 await check('поиск по параметрам находит сочетания клавиш', async () => {
@@ -192,7 +192,7 @@ await check('поиск по параметрам находит сочетан�
   // в редакторе клавиш остаётся только строка с этим сочетанием
   await waitFor(() => ui.evaluate("[...document.querySelectorAll('.keyrow kbd')].map((k) => k.textContent).join() === 'Ctrl+F'"));
   await ui.evaluate("el.hubq.value = ''; closeHub()");
-  await waitFor(() => ui.evaluate('innerHeight < 300'), 3000);
+  await waitFor(() => ui.evaluate('window.__rbShape < 300'), 3000);
 });
 
 await check('меню целиком внутри окна', async () => {
@@ -202,7 +202,7 @@ await check('меню целиком внутри окна', async () => {
   const box = await ui.evaluate('(() => { const r = el.menu.getBoundingClientRect(); return [r.right, r.bottom, innerWidth, innerHeight]; })()');
   if (box[0] > box[2] || box[1] > box[3]) throw new Error(`меню вылезло за окно: ${box}`);
   await ui.evaluate('closeMenu()');
-  await waitFor(() => ui.evaluate('innerHeight < 200'), 3000);
+  await waitFor(() => ui.evaluate('window.__rbShape < 200'), 3000);
 });
 
 await check('дата на новой вкладке: месяц со строчной', async () => {
@@ -221,7 +221,7 @@ await check('заставки в параметрах не обрывают др
   if (cls !== 'show s-aurora') throw new Error(`вторая заставка оборвалась: ${cls}`);
   await waitFor(() => ui.evaluate("!document.getElementById('splash').className"), 3000);
   await ui.evaluate('closeHub()');
-  await waitFor(() => ui.evaluate('innerHeight < 300'), 3000);
+  await waitFor(() => ui.evaluate('window.__rbShape < 300'), 3000);
 });
 
 await check('остров и свои кнопки на панели', async () => {
@@ -309,9 +309,9 @@ await check('готовые раскладки, адрес во вкладке �
     await waitFor(() => ui.evaluate("!document.body.classList.contains('url-in-tab') && getComputedStyle(urlbox).display !== 'none'")).catch((e) => { throw new Error('шаг 8: ' + e.message); });
     // «только сайт»: панели — невидимая полоска, сайт с самого верха
     await ui.evaluate("send('site_only')");
-    await waitFor(() => ui.evaluate("S.siteOnly && document.body.classList.contains('site-only') && innerHeight <= 6")).catch(async (e) => { throw new Error('шаг 9: ' + e.message); });
+    await waitFor(() => ui.evaluate("S.siteOnly && document.body.classList.contains('site-only') && window.__rbShape <= 6")).catch(async (e) => { throw new Error('шаг 9: ' + e.message); });
     await ui.evaluate("send('site_only')");
-    await waitFor(() => ui.evaluate("!S.siteOnly && innerHeight > 60")).catch((e) => { throw new Error('шаг 10: ' + e.message); });
+    await waitFor(() => ui.evaluate("!S.siteOnly && window.__rbShape > 60")).catch((e) => { throw new Error('шаг 10: ' + e.message); });
   } finally {
     server.close();
   }
