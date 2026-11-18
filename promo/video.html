@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><title>Rust Browser — промо</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1920px; height: 1080px; overflow: hidden; background: #07060d; }
+  body { font-family: "Segoe UI Variable Display", "Segoe UI", sans-serif; color: #fff; -webkit-font-smoothing: antialiased; }
+  #stage { position: absolute; inset: 0; overflow: hidden; perspective: 1800px; }
+  .blob { position: absolute; border-radius: 50%; filter: blur(120px); will-change: transform; }
+  #grain { position: absolute; inset: 0; background: radial-gradient(ellipse at center, transparent 40%, rgba(0,0,0,.55) 100%); pointer-events: none; }
+  .scene { position: absolute; inset: 0; display: none; transform-style: preserve-3d; }
+  .center { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); }
+  .frame { position: absolute; border-radius: 18px; overflow: hidden; background: #111;
+    box-shadow: 0 50px 120px rgba(0,0,0,.6), 0 0 0 1px rgba(255,255,255,.12); transform-origin: 50% 50%; }
+  .frame img { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  .title { position: absolute; z-index: 5; left: 0; right: 0; text-align: center; font-weight: 700; letter-spacing: -1.5px; }
+  .h1 { font-size: 76px; top: 70px; }
+  .sub { font-size: 32px; font-weight: 400; color: rgba(255,255,255,.72); letter-spacing: 0; }
+  .grad { background: linear-gradient(100deg, #ffb347 0%, #ff5f8f 45%, #a46bff 100%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .pill { position: absolute; padding: 14px 30px; border-radius: 999px; background: rgba(20,18,32,.78); backdrop-filter: blur(20px);
+    border: 1px solid rgba(255,255,255,.16); font-size: 30px; font-weight: 600; white-space: nowrap; }
+  .pill small { font-weight: 400; color: rgba(255,255,255,.65); font-size: 24px; margin-left: 12px; }
+  .card { position: absolute; width: 640px; padding: 30px 34px; border-radius: 26px; background: rgba(28,24,44,.72);
+    border: 1px solid rgba(255,255,255,.13); backdrop-filter: blur(24px); display: flex; gap: 26px; align-items: center; }
+  .card .ic { flex: none; width: 76px; height: 76px; border-radius: 20px; display: grid; place-items: center;
+    background: linear-gradient(135deg, #ff7a45, #e23a8c 55%, #7c3aed); }
+  .card .ic svg { width: 40px; height: 40px; }
+  .card b { display: block; font-size: 34px; font-weight: 650; letter-spacing: -.5px; }
+  .card span { display: block; font-size: 24px; color: rgba(255,255,255,.66); margin-top: 4px; }
+  .chip { position: absolute; width: 520px; height: 150px; border-radius: 28px; background: rgba(28,24,44,.7);
+    border: 1px solid rgba(255,255,255,.13); display: flex; align-items: center; gap: 22px; padding: 0 30px; font-size: 32px; font-weight: 600; letter-spacing: -.3px; }
+  .chip i { flex: none; width: 58px; height: 58px; border-radius: 16px; display: grid; place-items: center; font-style: normal;
+    background: rgba(255,255,255,.08); }
+  .chip i svg { width: 32px; height: 32px; }
+  .dot { position: absolute; width: 74px; height: 74px; border-radius: 50%; box-shadow: 0 10px 30px rgba(0,0,0,.4), inset 0 0 0 3px rgba(255,255,255,.25); }
+  .preset { position: absolute; width: 130px; height: 80px; }
+  .preset svg { width: 100%; height: 100%; }
+  .preset .w { fill: rgba(255,255,255,.05); stroke: rgba(255,255,255,.35); stroke-width: 1; }
+  .preset .a { fill: #ff6f91; } .preset .b { fill: rgba(255,255,255,.55); } .preset .c { fill: rgba(255,255,255,.3); }
+  .letter { display: inline-block; }
+  #wipe { position: absolute; top: 0; bottom: 0; width: 4px; background: #fff; box-shadow: 0 0 30px 8px rgba(164,107,255,.9), 0 0 6px 2px #fff; }
+  #flash { position: absolute; inset: 0; background: #fff; opacity: 0; pointer-events: none; }
+  #fade { position: absolute; inset: 0; background: #000; opacity: 1; pointer-events: none; }
+</style></head>
+<body><div id="stage">
+  <div class="blob" id="b1" style="width:900px;height:900px;background:#e23a8c"></div>
+  <div class="blob" id="b2" style="width:1000px;height:1000px;background:#7c3aed"></div>
+  <div class="blob" id="b3" style="width:800px;height:800px;background:#ff7a45"></div>
+  <div class="blob" id="b4" style="width:900px;height:900px;background:#1fb5a6"></div>
+  <div id="grain"></div>
+  <div id="scenes"></div>
+  <div id="flash"></div>
+  <div id="fade"></div>
+</div>
+<script>
+// ---------- утилиты ----------
+const $ = (s) => document.querySelector(s);
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, p) => a + (b - a) * p;
+const prog = (t, a, b) => clamp((t - a) / (b - a));
+const eo = (p) => 1 - Math.pow(1 - p, 3);                  // ease out cubic
+const eio = (p) => p < .5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
+const eexp = (p) => p === 1 ? 1 : 1 - Math.pow(2, -10 * p);
+const back = (p) => { const c = 1.6; return 1 + (c + 1) * Math.pow(p - 1, 3) + c * Math.pow(p - 1, 2); };
+function h(tag, attrs = {}, html = '') { const n = document.createElement(tag); for (const k in attrs) n.setAttribute(k, attrs[k]); n.innerHTML = html; return n; }
+const css = (n, o) => { for (const k in o) n.style[k] = o[k]; };
+const T = (n, s) => { n.style.transform = s; };
+const O = (n, o) => { n.style.opacity = o; };
+const W = 1920, H = 1080, SW = 1582, SH = 891;
+
+// иконки
+const ICONS = {
+  shield: '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/></svg>',
+  lock: '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>',
+  search: '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/></svg>',
+  card: '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M7 15h3"/></svg>',
+  split: '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/></svg>',
+  pip: '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><rect x="12" y="12" width="7" height="6" rx="1" fill="#fff"/></svg>',
+  translate: '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h9M8.5 3v2M6 5c1 4 4 7 7 8M11 5c-1 4-4 7-7 8"/><path d="M13 21l4-9 4 9M14.5 18h5"/></svg>',
+  keys: '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></svg>',
+  sparkle: '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linejoin="round"><path d="M12 3l2.2 5.8L20 11l-5.8 2.2L12 19l-2.2-5.8L4 11l5.8-2.2z"/></svg>',
+  sync: '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 0 0-14.6-4.5L4 8M4 13a8 8 0 0 0 14.6 4.5L20 16"/><path d="M4 4v4h4M20 20v-4h-4"/></svg>',
+  update: '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>',
+  gauge: '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><path d="M4 18a8 8 0 1 1 16 0"/><path d="M12 18l4-6"/></svg>',
+  focus: '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><path d="M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4"/></svg>',
+};
+
+// ---------- построение сцен ----------
+const scenesEl = $('#scenes');
+const SC = [];
+function scene(a, b, build, draw, fade = { in: .45, out: .4 }) {
+  const root = h('div', { class: 'scene' }); scenesEl.appendChild(root);
+  const ctx = build(root) || {};
+  SC.push({ a, b, root, ctx, draw, fade });
+}
+function frame(parent, src, w) {
+  const f = h('div', { class: 'frame' });
+  css(f, { width: w + 'px', height: Math.round(w * SH / SW) + 'px' });
+  const imgs = (Array.isArray(src) ? src : [src]).map((s) => { const i = h('img', { src: 'img/' + s + '.jpg' }); f.appendChild(i); return i; });
+  parent.appendChild(f); f.imgs = imgs; return f;
+}
+const placeCenter = (n, w, hh, dx = 0, dy = 0) => css(n, { left: (W - w) / 2 + dx + 'px', top: (H - hh) / 2 + dy + 'px' });
+function titles(root, top, sub) {
+  const t = h('div', { class: 'title h1' }, top); root.appendChild(t);
+  const s = sub ? h('div', { class: 'title sub' }, sub) : null; if (s) { css(s, { top: '168px' }); root.appendChild(s); }
+  return { t, s };
+}
+function drawTitles(o, lt, d = 0) {
+  const p = eo(prog(lt, .1 + d, .8 + d));
+  O(o.t, p); T(o.t, `translateY(${(1 - p) * 30}px)`);
+  if (o.s) { const q = eo(prog(lt, .35 + d, 1.05 + d)); O(o.s, q); T(o.s, `translateY(${(1 - q) * 24}px)`); }
+}
+function swapTitle(o, lt, at, text, sub) {
+  // смена подписи: старая уходит вверх, новая приходит снизу
+  if (lt >= at && o.t.dataset.v !== text) { o.t.innerHTML = text; o.t.dataset.v = text; if (o.s && sub) o.s.innerHTML = sub; }
+  if (lt < at && o.t.dataset.v !== o.t0) { o.t.innerHTML = o.t0; o.t.dataset.v = o.t0; if (o.s) o.s.innerHTML = o.s0; }
+  const out = prog(lt, at - .3, at), inn = eo(prog(lt, at, at + .5));
+  if (lt < at && lt > at - .3) { O(o.t, 1 - out); if (o.s) O(o.s, 1 - out); T(o.t, `translateY(${-out * 20}px)`); }
+  else if (lt >= at && lt < at + .5) { O(o.t, inn); if (o.s) O(o.s, inn); T(o.t, `translateY(${(1 - inn) * 24}px)`); }
+}
+
+// 1. Вступление: значок и название (0–6)
+scene(0, 6, (r) => {
+  const glow = h('div'); css(glow, { position: 'absolute', width: '700px', height: '700px', borderRadius: '50%',
+    background: 'radial-gradient(circle, rgba(255,95,143,.55), rgba(124,58,237,.25) 40%, transparent 70%)' }); placeCenter(glow, 700, 700, 0, -60); r.appendChild(glow);
+  const ring = h('div'); css(ring, { position: 'absolute', width: '300px', height: '300px', borderRadius: '50%', border: '3px solid rgba(255,255,255,.6)' }); placeCenter(ring, 300, 300, 0, -60); r.appendChild(ring);
+  const icon = h('img', { src: 'img/icon.png' }); css(icon, { position: 'absolute', width: '260px', height: '260px', filter: 'drop-shadow(0 30px 60px rgba(226,58,140,.5))' }); placeCenter(icon, 260, 260, 0, -60); r.appendChild(icon);
+  const name = h('div', { class: 'title' }); css(name, { top: '660px', fontSize: '130px', letterSpacing: '-4px', fontWeight: 700 });
+  const letters = [...'Rust Browser'].map((c) => { const s = h('span', { class: 'letter' }, c === ' ' ? '&nbsp;' : c); name.appendChild(s); return s; });
+  r.appendChild(name);
+  const tag = h('div', { class: 'title sub' }, 'Лёгкий браузер для Windows и Android'); css(tag, { top: '840px', fontSize: '38px' }); r.appendChild(tag);
+  return { glow, ring, icon, letters, tag };
+}, (c, lt) => {
+  const p = back(prog(lt, .4, 1.5)), pin = prog(lt, .4, 1.0);
+  const up = eio(prog(lt, 2.0, 2.9));
+  T(c.icon, `translateY(${-up * 150}px) scale(${lerp(.3, 1, p) * lerp(1, .78, up)}) rotate(${(1 - eo(prog(lt, .4, 1.6))) * -25}deg)`); O(c.icon, pin);
+  T(c.glow, `translateY(${-up * 150}px) scale(${.6 + eo(prog(lt, .4, 2)) * .6 + Math.sin(lt * 2) * .04})`); O(c.glow, eo(prog(lt, .3, 1.4)));
+  const rp = prog(lt, 1.0, 2.2); T(c.ring, `translateY(${-up * 150}px) scale(${1 + eo(rp) * 1.6})`); O(c.ring, rp > 0 && rp < 1 ? (1 - rp) * .9 : 0);
+  c.letters.forEach((s, i) => { const q = eo(prog(lt, 2.4 + i * .05, 3.1 + i * .05)); O(s, q); T(s, `translateY(${(1 - q) * 60}px)`); s.style.filter = `blur(${(1 - q) * 12}px)`; });
+  const q = eo(prog(lt, 3.3, 4.0)); O(c.tag, q); T(c.tag, `translateY(${(1 - q) * 20}px)`);
+}, { in: 0, out: .5 });
+
+// 2. Слова в ритм (6–10)
+scene(6, 10, (r) => {
+  const words = ['Быстрый.', 'Лёгкий.', 'Красивый.'].map((w) => { const n = h('div', { class: 'title' }, w); css(n, { top: '420px', fontSize: '190px', letterSpacing: '-6px', fontWeight: 800 }); r.appendChild(n); return n; });
+  const fin = h('div', { class: 'title' }, '<span class="grad">Написан на Rust.</span>'); css(fin, { top: '420px', fontSize: '170px', letterSpacing: '-6px', fontWeight: 800 }); r.appendChild(fin);
+  return { words, fin };
+}, (c, lt) => {
+  c.words.forEach((n, i) => {
+    const a = i, on = lt >= a && lt < a + 1;
+    const p = eexp(prog(lt, a, a + .35)), out = prog(lt, a + .82, a + 1);
+    O(n, on ? p * (1 - out) : 0); T(n, `scale(${lerp(1.35, 1, p) - out * .1})`); n.style.filter = `blur(${(1 - p) * 16 + out * 10}px)`;
+  });
+  const p = eexp(prog(lt, 3, 3.4)); O(c.fin, lt >= 3 ? p : 0); T(c.fin, `scale(${lerp(.75, 1, p)})`); c.fin.style.filter = `blur(${(1 - p) * 20}px)`;
+}, { in: 0, out: .25 });
+
+// 3. Новая вкладка (10–18)
+scene(10, 18, (r) => {
+  const o = titles(r, 'Новая вкладка, на которую <span class="grad">приятно смотреть</span>', 'Часы, поиск и живые обои — звёзды, частицы, переливы');
+  o.t0 = o.t.innerHTML; o.s0 = o.s.innerHTML;
+  const f = frame(r, ['wall_stars', 'wall_aurora'], 1380); placeCenter(f, 1380, 777, 0, 90);
+  return { o, f };
+}, (c, lt) => {
+  drawTitles(c.o, lt);
+  if (lt >= 4) swapTitle(c.o, lt, 4, 'Десятки фонов <span class="grad">на любой вкус</span>', 'Или своя картинка и видео');
+  const p = eo(prog(lt, 0, 1.4));
+  T(c.f, `translateY(${(1 - p) * 500}px) rotateX(${(1 - p) * 35}deg) scale(${lerp(.8, 1, p) * (1 + prog(lt, 1.4, 8) * .05)})`);
+  O(c.f, prog(lt, 0, .4));
+  O(c.f.imgs[1], eio(prog(lt, 3.7, 4.4)));
+}, { in: .3, out: .45 });
+
+// 4. Пять раскладок (18–28)
+const PRESETS = [
+  ['layout_classic', 'Классика', 'вкладки и адрес в две строки', '<rect x="2" y="2" width="56" height="5" rx="1.5" class="a"/><rect x="2" y="9" width="56" height="5" rx="1.5" class="b"/><rect x="2" y="16" width="56" height="2" rx="1" class="c"/>'],
+  ['layout_island', 'Остров', 'всё в плавающем островке', '<rect x="10" y="3" width="40" height="7" rx="3.5" class="a"/>'],
+  ['layout_vertical', 'Вертикальная', 'вкладки списком слева', '<rect x="2" y="2" width="14" height="32" rx="2" class="a"/><rect x="4" y="5" width="10" height="2" rx="1" class="b"/><rect x="4" y="9" width="10" height="2" rx="1" class="b"/><rect x="4" y="13" width="10" height="2" rx="1" class="b"/>'],
+  ['layout_floating', 'Плавающая', 'парящая панель над сайтом', '<rect x="2" y="2" width="56" height="5" rx="1.5" class="b"/><rect x="5" y="9" width="50" height="6" rx="3" class="a"/>'],
+  ['layout_min', 'Минимум', 'одна строка, прячется сама', '<rect x="2" y="2" width="56" height="2" rx="1" class="a"/>'],
+];
+scene(18, 28, (r) => {
+  const o = titles(r, 'Пять раскладок. <span class="grad">Один щелчок.</span>');
+  const f = frame(r, PRESETS.map((p) => p[0]), 1140); placeCenter(f, 1140, 642, 0, 10);
+  const pill = h('div', { class: 'pill' }); r.appendChild(pill);
+  const icons = PRESETS.map((p, i) => { const n = h('div', { class: 'preset' }, `<svg viewBox="0 0 60 36"><rect x=".5" y=".5" width="59" height="35" rx="4" class="w"/>${p[3]}</svg>`); css(n, { left: (W - 5 * 130 - 4 * 40) / 2 + i * 170 + 'px', top: '920px' }); r.appendChild(n); return n; });
+  return { o, f, pill, icons };
+}, (c, lt) => {
+  drawTitles(c.o, lt);
+  const p = eo(prog(lt, 0, 1)); T(c.f, `scale(${lerp(.9, 1, p)})`); O(c.f, p);
+  const idx = Math.min(4, Math.floor(lt / 2));
+  c.f.imgs.forEach((img, i) => { const a = i * 2; O(img, i === 0 ? 1 : eio(prog(lt, a - .25, a + .15))); });
+  const label = PRESETS[idx]; const key = label[1];
+  if (c.pill.dataset.k !== key) { c.pill.dataset.k = key; c.pill.innerHTML = `${label[1]}<small>${label[2]}</small>`; }
+  const pp = eo(prog(lt % 2, 0, .35)); const pw = c.pill.offsetWidth;
+  css(c.pill, { left: (W - pw) / 2 + 'px', top: '770px' }); O(c.pill, lt < .4 ? eo(prog(lt, .2, .6)) : pp); T(c.pill, `translateY(${(1 - pp) * 16}px)`);
+  c.icons.forEach((n, i) => {
+    const q = eo(prog(lt, .4 + i * .08, .9 + i * .08)); const on = i === idx;
+    O(n, q * (on ? 1 : .45)); T(n, `translateY(${(1 - q) * 30}px) scale(${on ? 1.12 : 1})`);
+  });
+  // на «Острове» камера приближается к панели
+  const z = eio(prog(lt, 2.3, 3.0)) * (1 - eio(prog(lt, 3.6, 4.0)));
+  c.f.style.transformOrigin = '50% 4%';
+  if (z > 0) { T(c.f, `scale(${1 + z * .55}) translateY(${z * 30}px)`); O(c.pill, 1 - z); c.icons.forEach((n) => O(n, (1 - z) * Number(n.style.opacity))); O(c.o.t, 1 - z); }
+}, { in: .3, out: .4 });
+
+// 5. Тёмная тема (28–34)
+scene(28, 34, (r) => {
+  const o = titles(r, 'Тёмная тема <span class="grad">для любого сайта</span>', 'Уже тёмные сайты остаются как есть');
+  const f = frame(r, ['wiki_light', 'wiki_dark'], 1340); placeCenter(f, 1340, 755, 0, 80);
+  const wipe = h('div', { id: 'wipe' }); f.appendChild(wipe);
+  return { o, f, wipe };
+}, (c, lt) => {
+  drawTitles(c.o, lt);
+  const p = eo(prog(lt, 0, 1)); T(c.f, `scale(${lerp(.92, 1, p) * (1 + prog(lt, 1, 6) * .03)})`); O(c.f, p);
+  const w = eio(prog(lt, 1.6, 3.2));
+  c.f.imgs[1].style.clipPath = `inset(0 ${100 - w * 100}% 0 0)`;
+  css(c.wipe, { left: w * 100 + '%' }); O(c.wipe, w > 0 && w < 1 ? 1 : 0);
+}, { in: .3, out: .4 });
+
+// 6. Разделённый экран (34–40)
+scene(34, 40, (r) => {
+  const o = titles(r, 'Два сайта <span class="grad">на одном экране</span>', 'Разделённый экран прямо из меню вкладки');
+  const f = frame(r, 'split', 1340); placeCenter(f, 1340, 755, 0, 80);
+  return { o, f };
+}, (c, lt) => {
+  drawTitles(c.o, lt);
+  const p = eo(prog(lt, 0, 1.1));
+  T(c.f, `rotateY(${(1 - p) * -28}deg) translateX(${(1 - p) * 300}px) scale(${lerp(.85, 1, p) * (1 + eio(prog(lt, 1.6, 5.5)) * .07)})`); O(c.f, prog(lt, 0, .4));
+}, { in: .3, out: .4 });
+
+// 7. Группы и вертикальные вкладки (40–46)
+scene(40, 46, (r) => {
+  const o = titles(r, 'Группы вкладок <span class="grad">с цветами</span>', 'Вертикальная панель, закрепление, диспетчер вкладок');
+  const f = frame(r, 'groups_vertical', 1340); placeCenter(f, 1340, 755, 0, 80);
+  return { o, f };
+}, (c, lt) => {
+  drawTitles(c.o, lt);
+  const p = eo(prog(lt, 0, 1)); const z = eio(prog(lt, 1.6, 2.8));
+  c.f.style.transformOrigin = '8% 22%';
+  T(c.f, `scale(${lerp(.9, 1, p) + z * .7})`); O(c.f, p);
+  const z2 = eio(prog(lt, 1.3, 1.8)); O(c.o.t, 1 - z2); O(c.o.s, 1 - z2);
+}, { in: .3, out: .4 });
+
+// 8. Приватность (46–54)
+scene(46, 54, (r) => {
+  const o = titles(r, 'Приватность <span class="grad">по умолчанию</span>');
+  const f = frame(r, 'settings_privacy', 1000); css(f, { left: '110px', top: '290px' });
+  const items = [
+    ['shield', 'uBlock Origin Lite', 'Реклама и трекеры режутся сразу'],
+    ['lock', 'Пароли под замком', 'Шифрование средствами Windows'],
+    ['search', 'Проверка на утечки', 'Узнаете, если пароль засветился'],
+    ['card', 'Адреса и карты', 'Автозаполнение без лишних глаз'],
+  ].map(([ic, b, s], i) => { const n = h('div', { class: 'card' }, `<div class="ic">${ICONS[ic]}</div><div><b>${b}</b><span>${s}</span></div>`); css(n, { left: '1170px', top: 270 + i * 175 + 'px' }); r.appendChild(n); return n; });
+  return { o, f, items };
+}, (c, lt) => {
+  drawTitles(c.o, lt);
+  const p = eo(prog(lt, .1, 1.2));
+  c.f.style.transformOrigin = '0% 50%';
+  T(c.f, `rotateY(${lerp(30, 12, p)}deg) translateX(${(1 - p) * -200}px)`); O(c.f, p);
+  c.items.forEach((n, i) => { const q = back(prog(lt, 1 + i * .5, 1.7 + i * .5)); O(n, clamp(q)); T(n, `translateX(${(1 - q) * 160}px) scale(${lerp(.9, 1, clamp(q))})`); });
+}, { in: .3, out: .4 });
+
+// 9. Свой стиль (54–62)
+const COLORS = ['#5b6cff', '#2f80ed', '#14b8a6', '#22c55e', '#84cc16', '#eab308', '#f97316', '#ef4444', '#ec4899', '#a855f7', '#64748b'];
+scene(54, 62, (r) => {
+  const o = titles(r, 'Сделайте его <span class="grad">своим</span>', 'Темы, цвет, прозрачность панелей, обои — и «бусты» для каждого сайта');
+  const f2 = frame(r, 'settings_walls', 1060); css(f2, { left: '760px', top: '305px' });
+  const f1 = frame(r, 'settings_look', 1060); css(f1, { left: '100px', top: '265px' });
+  const dots = COLORS.map((col, i) => { const d = h('div', { class: 'dot' }); css(d, { background: col, left: (W - 11 * 74 - 10 * 26) / 2 + i * 100 + 'px', top: '935px' }); r.appendChild(d); return d; });
+  return { o, f1, f2, dots };
+}, (c, lt) => {
+  drawTitles(c.o, lt);
+  const p1 = eo(prog(lt, .1, 1.1)), p2 = eo(prog(lt, 2, 3.1));
+  T(c.f1, `translateX(${(1 - p1) * -300}px) rotate(${(1 - p1) * -4}deg) scale(${lerp(1, .92, p2)})`); O(c.f1, p1); c.f1.style.filter = `brightness(${lerp(1, .6, p2)})`;
+  T(c.f2, `translateX(${(1 - p2) * 400}px) rotate(${(1 - p2) * 4}deg)`); O(c.f2, p2); c.f2.style.zIndex = lt > 2 ? 2 : 0;
+  const sel = Math.floor(prog(lt, 4, 8) * 11) % 11;
+  c.dots.forEach((d, i) => { const q = back(prog(lt, 3.2 + i * .06, 3.8 + i * .06)); O(d, clamp(q * 1.5)); T(d, `scale(${q * (lt > 4 && i === sel ? 1.25 : 1)}) translateY(${lt > 4 && i === sel ? -10 : 0}px)`); });
+  // фон подхватывает выбранный цвет
+  if (lt > 4) $('#b2').style.background = COLORS[sel];
+}, { in: .3, out: .4 });
+
+// 10. И ещё (62–68)
+scene(62, 68, (r) => {
+  const o = titles(r, 'И это <span class="grad">ещё не всё</span>');
+  const list = [['split', 'Разделённый экран'], ['pip', 'Картинка в картинке'], ['translate', 'Перевод страниц'],
+    ['keys', 'Свои горячие клавиши'], ['sparkle', 'Бусты для сайтов'], ['sync', 'Синхронизация с Android'],
+    ['focus', 'Режим «только сайт»'], ['gauge', 'Экономия памяти'], ['update', 'Автообновление']];
+  const chips = list.map(([ic, t], i) => { const n = h('div', { class: 'chip' }, `<i>${ICONS[ic]}</i>${t}`); css(n, { left: (W - 3 * 520 - 2 * 40) / 2 + (i % 3) * 560 + 'px', top: 280 + Math.floor(i / 3) * 190 + 'px' }); r.appendChild(n); return n; });
+  return { o, chips };
+}, (c, lt) => {
+  drawTitles(c.o, lt);
+  c.chips.forEach((n, i) => { const q = back(prog(lt, .4 + i * .14, 1.0 + i * .14)); O(n, clamp(q)); T(n, `translateY(${(1 - q) * 60}px) scale(${lerp(.85, 1, clamp(q))}) rotateX(${(1 - clamp(q)) * 40}deg)`); });
+}, { in: .3, out: .5 });
+
+// 11. Финал (68–76)
+scene(68, 76, (r) => {
+  const icon = h('img', { src: 'img/icon.png' }); css(icon, { position: 'absolute', width: '200px', height: '200px', filter: 'drop-shadow(0 30px 60px rgba(226,58,140,.5))' }); placeCenter(icon, 200, 200, 0, -170); r.appendChild(icon);
+  const name = h('div', { class: 'title' }, 'Rust Browser'); css(name, { top: '560px', fontSize: '120px', letterSpacing: '-4px' }); r.appendChild(name);
+  const line = h('div', { class: 'title sub' }, 'Rust · WebView2 · Windows и Android · открытый код'); css(line, { top: '720px', fontSize: '34px' }); r.appendChild(line);
+  const url = h('div', { class: 'title' }, '<span class="grad">github.com/darki234/rust-browser</span>'); css(url, { top: '800px', fontSize: '44px', fontWeight: 600, letterSpacing: '0' }); r.appendChild(url);
+  return { icon, name, line, url };
+}, (c, lt) => {
+  const p = back(prog(lt, .1, 1.1)); T(c.icon, `scale(${p}) rotate(${(1 - eo(prog(lt, .1, 1.2))) * 30}deg)`); O(c.icon, clamp(p));
+  const q = eo(prog(lt, .5, 1.3)); O(c.name, q); T(c.name, `translateY(${(1 - q) * 40}px)`); c.name.style.filter = `blur(${(1 - q) * 10}px)`;
+  const s = eo(prog(lt, 1.1, 1.8)); O(c.line, s); T(c.line, `translateY(${(1 - s) * 20}px)`);
+  const u = eo(prog(lt, 1.6, 2.4)); O(c.url, u); T(c.url, `translateY(${(1 - u) * 20}px)`);
+}, { in: .3, out: 0 });
+
+// ---------- кадр ----------
+const DUR = 76;
+function render(t) {
+  // фон: медленно плывущие пятна
+  const blobs = [['#b1', -200, -250, .11], ['#b2', 1200, 300, .08], ['#b3', 200, 600, .13], ['#b4', 1300, -300, .07]];
+  const glowIn = eo(prog(t, .2, 2.5));
+  blobs.forEach(([id, x, y, sp], i) => {
+    const n = $(id); T(n, `translate(${x + Math.sin(t * sp + i) * 220}px, ${y + Math.cos(t * sp * 1.3 + i * 2) * 160}px) scale(${1 + Math.sin(t * .2 + i) * .12})`);
+    O(n, glowIn * (i === 3 ? .22 : .38));
+  });
+  for (const s of SC) {
+    const lt = t - s.a, on = t >= s.a && t < s.b;
+    s.root.style.display = on ? 'block' : 'none';
+    if (!on) continue;
+    const fi = s.fade.in ? eo(prog(lt, 0, s.fade.in)) : 1;
+    const fo = s.fade.out ? prog(t, s.b - s.fade.out, s.b) : 0;
+    O(s.root, fi * (1 - fo));
+    s.root.style.transform = `scale(${1 + fo * .06})`;
+    s.root.style.filter = fo > 0 ? `blur(${fo * 14}px)` : '';
+    s.draw(s.ctx, lt);
+  }
+  // вспышка на «дропе» в 10 c
+  O($('#flash'), t >= 10 ? (1 - eo(prog(t, 10, 10.6))) * .55 : 0);
+  // затемнение в начале и в конце
+  O($('#fade'), Math.max(1 - prog(t, 0, .6), prog(t, DUR - 1.6, DUR - .1)));
+}
+window.render = render; window.DUR = DUR;
+window.ready = Promise.all([...document.images].map((i) => i.complete ? 0 : new Promise((r) => { i.onload = r; i.onerror = r; }))).then(() => document.fonts.ready);
+// предпросмотр в обычном браузере: ?play
+if (location.search.includes('play')) { const s = performance.now(); const loop = () => { render(((performance.now() - s) / 1000) % DUR); requestAnimationFrame(loop); }; loop(); }
+else render(Number(new URLSearchParams(location.search).get('t') || 0));
+</script></body></html>

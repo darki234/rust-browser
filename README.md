@@ -14,6 +14,11 @@
 </div>
 
 <p align="center">
+  <a href="promo/rust-browser-promo.mp4"><img src="promo/preview.jpg" width="720" alt="Промо-ролик Rust Browser"></a><br>
+  <sub>▶ <a href="promo/rust-browser-promo.mp4">Промо-ролик</a> · 1:16</sub>
+</p>
+
+<p align="center">
   <img src="docs/start.png" width="49%" alt="Новая вкладка">
   <img src="docs/site.png" width="49%" alt="Сайт во вкладке">
 </p>
