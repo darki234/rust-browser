@@ -3130,6 +3130,8 @@ impl App {
                 if self.overlay == Overlay::Full {
                     self.layout();
                 }
+                // окно раскрыто — теперь можно плавно затемнять фон: анимацию видно с начала
+                let _ = self.ui.evaluate_script("ui.overlayVisible()");
             }
             "overlay" => match message["mode"].as_str() {
                 Some("full") => self.request_full_overlay(),

@@ -1307,8 +1307,15 @@ function setBackdrop(url) {
 async function overlayReady() {
   await backdropReady;
   el.layer.classList.add('open');
-  // слой нарисован (пока под вырезом) — теперь Rust раскрывает окно, без пустого кадра
-  requestAnimationFrame(() => requestAnimationFrame(() => { if (layerKind) send('overlay_shown'); }));
+  // слой нарисован (пока под вырезом) — теперь Rust раскрывает окно, без пустого кадра;
+  // ждущий слоя продолжит, когда окно уже на экране (overlayVisible)
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    if (layerKind) send('overlay_shown');
+    else overlayVisible();
+  }));
+}
+
+function overlayVisible() {
   const resolve = readyResolve;
   readyResolve = null;
   if (resolve) resolve();
@@ -1629,7 +1636,8 @@ function closeHub(instant = false) {
     return;
   }
   el.layer.classList.add('closing');
-  releaseLayer(170);
+  // затемнение гаснет 0,2 с — слой убираем, когда оно погасло, а не на середине
+  releaseLayer(210);
 }
 
 function setHistory(items) {
@@ -2301,6 +2309,7 @@ window.ui = {
   setHistory,
   setBackdrop,
   overlayReady,
+  overlayVisible,
   closeOverlays,
   focusUrl,
   openHub,
