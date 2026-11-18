@@ -317,6 +317,16 @@ await check('готовые раскладки, адрес во вкладке �
   }
 });
 
+await check('адресная строка исправляет раскладку и опечатки', async () => {
+  await ui.evaluate("ui.focusUrl(); el.url.value = 'ghbdtn'; el.url.dispatchEvent(new Event('input', { bubbles: true }))");
+  await waitFor(() => ui.evaluate("suggestRows[0]?.fix && suggestRows[0].url === 'привет' && selected === 0"));
+  await ui.evaluate("el.url.value = 'пртвет'; el.url.dispatchEvent(new Event('input', { bubbles: true }))");
+  await waitFor(() => ui.evaluate("suggestRows[0]?.fix && suggestRows[0].url === 'привет'"));
+  await ui.evaluate("el.url.value = 'привет'; el.url.dispatchEvent(new Event('input', { bubbles: true }))");
+  await waitFor(() => ui.evaluate("suggestRows.length > 0 && !suggestRows[0].fix"));
+  await ui.evaluate("el.url.value = ''; el.url.blur(); closeSheet()");
+});
+
 await check('тема AMOLED и прозрачные панели', async () => {
   await ui.evaluate("send('set', { key: 'theme', value: 'amoled' }); send('set', { key: 'glass', value: 40 })");
   await waitFor(() => ui.evaluate("document.body.classList.contains('amoled') && document.body.classList.contains('glass') && getComputedStyle(document.body).getPropertyValue('--bg').trim() === '#000000'"));

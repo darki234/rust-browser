@@ -1017,13 +1017,30 @@ body.inprivate #privatenote { display: flex; }
   display: none;
 }
 #backdrop.show { display: block; }
+/* Размытый снимок под библиотекой. Раньше размывал backdrop-filter у затемнения, и
+   при его проявлении движок пересчитывал размытие всего окна на каждом кадре — рывок.
+   Теперь размытая копия рисуется один раз, а проявляется только прозрачность. */
+#backdropsoft {
+  position: absolute;
+  inset: -24px;
+  width: calc(100% + 48px);
+  height: calc(100% + 48px);
+  object-fit: fill;
+  display: none;
+  opacity: 0;
+  filter: blur(18px) saturate(1.3);
+  transition: opacity .28s var(--ease);
+  will-change: opacity;
+}
+#backdropsoft.show { display: block; }
+#layer.hub #backdropsoft { opacity: 1; }
 #scrim {
   position: absolute;
   inset: 0;
   opacity: 0;
   background: var(--scrim);
-  backdrop-filter: blur(18px) saturate(1.3);
   transition: opacity .28s var(--ease);
+  will-change: opacity;
 }
 #layer.hub #scrim { opacity: 1; }
 
@@ -2142,3 +2159,24 @@ body.url-collapsed #urlbox.expanded {
   from { clip-path: inset(0 var(--from-r, 0) 0 var(--from-l, 0) round 17px); }
   to { clip-path: inset(0 0 0 0 round 17px); }
 }
+
+/* ---------- предпросмотр вкладки ---------- */
+#peek {
+  position: fixed; z-index: 40; display: none; overflow: hidden;
+  border-radius: 14px; background: var(--surface); border: 1px solid var(--border);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, .28), 0 2px 8px rgba(0, 0, 0, .12);
+  pointer-events: none;
+}
+#peek.show { display: block; animation: peek-in .16s var(--ease); }
+@keyframes peek-in { from { opacity: 0; transform: translateY(-4px) scale(.98); } }
+#peek .shot { aspect-ratio: 16 / 10; overflow: hidden; background: var(--surface-2); border-bottom: 1px solid var(--border); }
+#peek .shot img { width: 100%; height: 100%; object-fit: cover; object-position: top center; display: block; }
+#peek .info { padding: 10px 12px 11px; }
+#peek .title { font-weight: 600; font-size: 13px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+#peek .host { display: flex; align-items: center; gap: 6px; margin-top: 5px; color: var(--muted); font-size: 12px; }
+#peek .host .fav { width: 14px; height: 14px; }
+#peek .state { margin-top: 5px; color: var(--muted); font-size: 11.5px; }
+
+/* исправленный запрос в подсказках */
+.sug.fix .t { font-weight: 600; }
+.sug.fix .kind { color: var(--accent); }

@@ -204,7 +204,7 @@ const el = {
   favbar: $('#favbar'), findq: $('#findq'), findcount: $('#findcount'),
   sheet: $('#sheet'), suggestions: $('#suggestions'),
   clock: $('#clock'), date: $('#date'), startq: $('#startq'), tiles: $('#tiles'), stat: $('#stat'),
-  layer: $('#layer'), backdrop: $('#backdrop'),
+  layer: $('#layer'), backdrop: $('#backdrop'), backdropSoft: $('#backdropsoft'),
   hub: $('#hub'), hubh1: $('#hubh1'), hubq: $('#hubq'), hubaction: $('#hubaction'),
   hublist: $('#hublist'), hubind: $('#hubind'), menu: $('#menu'), catcher: $('#menucatcher'),
 };
@@ -520,7 +520,10 @@ function makeTab(id) {
     h('i', { class: 'bg' }), h('i', { class: 'foot l' }), h('i', { class: 'foot r' }),
     h('span', { class: 'fav' }), h('span', { class: 'title' }), audio, close);
   node.dataset.id = id;
-  node.addEventListener('pointerdown', (event) => startTabDrag(event, id, node));
+  node.addEventListener('pointerdown', (event) => { hidePeek(true); startTabDrag(event, id, node); });
+  // наведение на вкладку — через мгновение карточка со снимком страницы
+  node.addEventListener('mouseenter', () => schedulePeek(id, node));
+  node.addEventListener('mouseleave', () => hidePeek());
   node.addEventListener('auxclick', (event) => {
     if (event.button === 1) send('close_tab', { id });
   });
@@ -893,13 +896,25 @@ function go(text) {
   send('navigate', { text });
 }
 
+// Исправление опечатки или раскладки приходит из фонового потока чуть позже подсказок.
+let lastSuggest = { seq: -1, list: [] };
+let lastFix = { seq: -1, fix: null };
+function setFix(seq, fix) {
+  lastFix = { seq, fix };
+  if (fix && lastSuggest.seq === seq) setSuggestions(seq, lastSuggest.list);
+}
+
 function setSuggestions(seq, list) {
   const text = el.url.value.trim();
   if (seq !== suggestSeq || document.activeElement !== el.url || !text) return;
+  lastSuggest = { seq, list };
+  const fix = lastFix.seq === seq ? lastFix.fix : null;
 
   // Первая строка — то, что произойдёт по Enter с набранным текстом.
   const looksLikeUrl = !text.includes(' ') && (text.includes('.') || text.includes('://'));
   const rows = [
+    // «ghbdtn» → «привет», «пртвет» → «привет»: исправленный запрос сверху и уже выбран
+    ...(fix ? [{ url: fix.text, title: fix.kind === 'layout' ? 'другая раскладка' : 'исправлена опечатка', kind: 'search', fix: true }] : []),
     { url: text, title: looksLikeUrl ? 'Открыть адрес' : `Искать в ${engineName()}`, kind: looksLikeUrl ? 'globe' : 'search', typed: true },
     ...list.map((item) => ({ ...item, kind: item.kind === 'bookmark' ? 'star' : 'clock' })),
   ];
@@ -908,14 +923,14 @@ function setSuggestions(seq, list) {
   const firstShow = !sheetOpen;
   const known = new Set(suggestRows.map((row) => row.url));
   suggestRows = rows;
-  selected = -1;
+  selected = fix ? 0 : -1;
 
   el.suggestions.replaceChildren(...rows.map((row, index) => {
     const motion = firstShow ? '' : row.typed || known.has(row.url) ? ' still' : ' appear';
-    const node = h('div', { class: 'sug' + motion, style: `--i:${index}` },
+    const node = h('div', { class: 'sug' + motion + (row.fix ? ' fix sel' : ''), style: `--i:${index}` },
       h('span', { class: row.kind === 'star' ? 'kind bookmark' : 'kind' }, icon(row.kind, 15)),
-      h('span', { class: 't' }, row.typed ? text : row.title || prettyUrl(row.url)),
-      h('span', { class: 'u' }, row.typed ? `— ${row.title}` : prettyUrl(row.url)),
+      h('span', { class: 't' }, row.typed ? text : row.fix ? row.url : row.title || prettyUrl(row.url)),
+      h('span', { class: 'u' }, row.typed || row.fix ? `— ${row.title}` : prettyUrl(row.url)),
     );
     // mousedown, а не click: иначе поле потеряет фокус раньше, чем сработает нажатие.
     node.addEventListener('mousedown', (event) => {
@@ -1276,13 +1291,21 @@ function requestLayer(kind) {
   });
 }
 
+// снимок раскодирован — слой можно показывать без пустой вспышки
+let backdropReady = Promise.resolve();
 function setBackdrop(url) {
-  el.backdrop.classList.toggle('show', !!url);
-  if (url) el.backdrop.src = url;
-  else el.backdrop.removeAttribute('src');
+  for (const img of [el.backdrop, el.backdropSoft]) {
+    img.classList.toggle('show', !!url);
+    if (url) img.src = url;
+    else img.removeAttribute('src');
+  }
+  backdropReady = url
+    ? Promise.race([el.backdrop.decode().catch(() => {}), new Promise((r) => setTimeout(r, 150))])
+    : Promise.resolve();
 }
 
-function overlayReady() {
+async function overlayReady() {
+  await backdropReady;
   el.layer.classList.add('open');
   const resolve = readyResolve;
   readyResolve = null;
@@ -1998,6 +2021,8 @@ const SETTINGS_CATS = [
         toggle(() => S.settings.urlInTab, (value) => set('url_in_tab', value))),
       setting('Панель избранного', 'Сайты из избранного под адресной строкой · Ctrl+Shift+B',
         toggle(() => S.settings.favbar, (value) => set('favbar', value))),
+      setting('Ссылки в новой вкладке — в фоне', 'Ссылка, которую сайт открывает в новой вкладке, не уводит со страницы: вкладка появляется рядом',
+        toggle(() => S.settings.linksBackground, (value) => set('links_background', value))),
       setting('Боковая панель', 'Заметки, калькулятор и мессенджеры справа · Ctrl+Shift+E',
         toggle(() => S.panelOpen, () => send('toggle_panel')))),
     myButtonsCard(),
@@ -2265,6 +2290,7 @@ window.addEventListener('contextmenu', (event) => {
 window.ui = {
   setState,
   setSuggestions,
+  setFix,
   setHistory,
   setBackdrop,
   overlayReady,
@@ -3143,6 +3169,65 @@ function renderCompact() {
   }
 }
 
+
+// ---------- предпросмотр вкладки при наведении ----------
+// Снимок делается, когда с вкладки уходят; карточка висит поверх страницы, а окно
+// интерфейса на это время пропускает её (как уведомления).
+
+const peekEl = $('#peek');
+let peekTimer = 0, peekHideTimer = 0, peekId = null;
+
+function schedulePeek(id, node) {
+  clearTimeout(peekHideTimer);
+  clearTimeout(peekTimer);
+  // карточка уже открыта у соседней вкладки — переключаемся сразу
+  peekTimer = setTimeout(() => showPeek(id, node), peekId !== null ? 60 : 420);
+}
+
+function showPeek(id, node) {
+  const tab = S.tabs.find((t) => t.id === id);
+  if (!tab || tab.start || layerKind || menuKind || !node.isConnected) return hidePeek(true);
+  peekId = id;
+  const host = hostOf(tab.url) || tab.url;
+  const shot = tab.shot && tab.id !== S.active ? `http://rb.localhost/tabshot/${tab.id}?v=${tab.shot}` : '';
+  const state = tab.id === S.active ? '' : tab.sleeping ? 'Вкладка спит — не тратит ресурсы' : '';
+  peekEl.replaceChildren(
+    ...(shot ? [h('div', { class: 'shot' }, h('img', { src: shot, alt: '' }))] : []),
+    h('div', { class: 'info' },
+      h('div', { class: 'title' }, tab.title || prettyUrl(tab.url)),
+      h('div', { class: 'host' }, favicon(tab.url, false, tab.favicon), h('span', {}, host)),
+      ...(state ? [h('div', { class: 'state' }, state)] : [])),
+  );
+  // под вкладкой; у вертикальных вкладок — справа от колонки
+  const r = node.getBoundingClientRect();
+  const width = 300;
+  peekEl.style.width = width + 'px';
+  if (vertical()) {
+    peekEl.style.left = Math.round(r.right + 10) + 'px';
+    peekEl.style.top = Math.round(Math.min(r.top, innerHeight - 260)) + 'px';
+  } else {
+    peekEl.style.left = Math.round(Math.max(8, Math.min(r.left, innerWidth - width - 8))) + 'px';
+    peekEl.style.top = Math.round(r.bottom + 8) + 'px';
+  }
+  peekEl.classList.add('show');
+  requestAnimationFrame(() => {
+    const b = peekEl.getBoundingClientRect();
+    // вырез точно по карточке: за её краем окно интерфейса показало бы свой фон
+    send('peek', { x: Math.round(b.left), y: Math.round(b.top), w: Math.round(b.width), h: Math.round(b.height) });
+  });
+}
+
+function hidePeek(now = false) {
+  clearTimeout(peekTimer);
+  clearTimeout(peekHideTimer);
+  const hide = () => {
+    if (peekId === null) return;
+    peekId = null;
+    peekEl.classList.remove('show');
+    setTimeout(() => { if (peekId === null) send('peek', {}); }, 160);
+  };
+  if (now) hide(); else peekHideTimer = setTimeout(hide, 120);
+}
 
 // ---------- адресная строка-кнопка ----------
 // Если места мало (узкий остров, окно), строка сворачивается в круглую кнопку-лупу

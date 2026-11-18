@@ -9,6 +9,7 @@ mod platform;
 mod pages;
 mod passwords;
 mod webstore;
+mod spell;
 mod sync;
 mod icons;
 mod autofill;
@@ -76,6 +77,13 @@ fn backdrop_color(dark: bool) -> (u8, u8, u8, u8) {
 
 /// Тема AMOLED: под страницами чистый чёрный, а не тёмно-серый.
 static AMOLED: AtomicBool = AtomicBool::new(false);
+/// Последний снимок страницы под меню и библиотекой (JPEG) — его отдаёт rb.localhost.
+static BACKDROP: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+static BACKDROP_VERSION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// Снимки вкладок для предпросмотра при наведении: номер вкладки → JPEG.
+static TAB_SHOTS: std::sync::LazyLock<Mutex<HashMap<u32, Vec<u8>>>> = std::sync::LazyLock::new(Default::default);
+/// Ссылки сайтов «в новой вкладке» — в фоне (настройка; читается из обработчика WebView2).
+static LINKS_BACKGROUND: AtomicBool = AtomicBool::new(true);
 
 /// Щель между половинами разделённого экрана — за неё тянут разделитель.
 const SPLIT_GAP: f64 = 6.0;
@@ -143,6 +151,13 @@ pub enum UserEvent {
     ExtList(Vec<platform::ProfileExtension>),
     /// Расширение удалено или включено — перечитать список.
     ExtChanged,
+    ExtPopupShow,
+    /// Снимок вкладки, с которой ушли, — для предпросмотра при наведении.
+    TabShot(u32, Option<Vec<u8>>),
+    /// Снять вкладку, если она всё ещё на экране.
+    ShotActive(u32),
+    /// Исправленный запрос адресной строки (номер запроса, исправление).
+    SpellFix(u64, Option<(String, spell::Fix)>),
     ExtPopupMeasure,
     ExtPopupSize(f64, f64),
     /// Итог проверки паролей на утечки, повторы и простоту.
@@ -329,6 +344,15 @@ struct App {
     ext_busy: std::collections::HashSet<String>,
     /// Открытое окошко расширения: webview, правый край и верх кнопки.
     ext_popup: Option<(WebView, f64, f64)>,
+    /// Закрытое окошко расширения не уничтожается: создание WebView подвешивает окно
+    /// на полсекунды, а готовое открывается мгновенно.
+    ext_popup_spare: Option<WebView>,
+    /// Карточка предпросмотра вкладки (x, y, ширина, высота) — окно интерфейса её не обрежет.
+    peek: Option<[f64; 4]>,
+    /// Исправление опечаток и раскладки — в своём потоке.
+    spell: spell::Worker,
+    /// Версии снимков вкладок: интерфейс по ним понимает, что картинка обновилась.
+    shot_versions: HashMap<u32, u32>,
     /// Найденные браузеры с расширениями: (название, сколько можно перенести).
     ext_browsers: Vec<(String, usize)>,
     /// Расширения, которые ставит синхронизация: об ошибках не сообщаем.
@@ -500,6 +524,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     // Заставка — только при первом запуске браузера, не для каждого нового окна.
     let splash = if primary { store.settings.splash.clone() } else { "off".to_string() };
+    let spell = {
+        let proxy = proxy.clone();
+        spell::Worker::start(move |seq, fix| {
+            let _ = proxy.send_event(UserEvent::SpellFix(seq, fix));
+        })
+    };
     let ui = build_ui(&window, proxy.clone(), &mut web_context, keys.clone(), inprivate, dark, &splash, network.clone())?;
     let vault: passwords::Vault = store.read_named("passwords.json");
 
@@ -527,6 +557,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ext_installing: false,
         ext_busy: Default::default(),
         ext_popup: None,
+        ext_popup_spare: None,
+        peek: None,
+        spell,
+        shot_versions: HashMap::new(),
         ext_browsers: Vec::new(),
         ext_quiet: Default::default(),
         prewarm: None,
@@ -688,6 +722,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn window_dark_hint() -> bool {
     let settings: store::Settings = Store::load(data_dir()).settings;
     AMOLED.store(settings.theme == "amoled", Ordering::Relaxed);
+    LINKS_BACKGROUND.store(settings.links_background, Ordering::Relaxed);
     match settings.theme.as_str() {
         "dark" | "amoled" => true,
         "light" => false,
@@ -736,11 +771,11 @@ fn load_tab_icons() -> HashMap<String, (u32, usize)> {
 
 /// Где на окне стоит уведомление: по центру снизу (как в style.css: bottom 28px),
 /// с запасом под тень и анимацию появления.
+/// Вырез точно по уведомлению: вокруг него окно интерфейса показало бы свой фон, а не страницу.
 fn toast_part(width: f64, height: f64, w: f64, h: f64) -> [f64; 5] {
-    const PAD: f64 = 16.0;
-    let x = ((width - w) / 2.0 - PAD).max(0.0);
-    let y = (height - 28.0 - h - PAD).max(0.0);
-    [x, y, (w + PAD * 2.0).min(width), h + PAD * 2.0 + 12.0, 0.0]
+    let x = ((width - w) / 2.0).max(0.0);
+    let y = (height - 28.0 - h).max(0.0);
+    [x, y, w.min(width), h, 12.0]
 }
 
 fn rect(x: f64, y: f64, width: f64, height: f64) -> Rect {
@@ -802,6 +837,28 @@ fn build_ui(
                         responder.respond(response);
                     }
                 });
+                return;
+            }
+            if let Some(id) = path.strip_prefix("/tabshot/").and_then(|s| s.parse::<u32>().ok()) {
+                let bytes = TAB_SHOTS.lock().ok().and_then(|s| s.get(&id).cloned());
+                let response = match bytes {
+                    Some(bytes) => wry::http::Response::builder().header("Content-Type", "image/jpeg").header("Cache-Control", "max-age=600").body(std::borrow::Cow::Owned(bytes)),
+                    None => wry::http::Response::builder().status(404).body(std::borrow::Cow::Owned(Vec::new())),
+                };
+                if let Ok(response) = response {
+                    responder.respond(response);
+                }
+                return;
+            }
+            if path == "/backdrop.jpg" {
+                let bytes = BACKDROP.lock().map(|b| b.clone()).unwrap_or_default();
+                if let Ok(response) = wry::http::Response::builder()
+                    .header("Content-Type", "image/jpeg")
+                    .header("Cache-Control", "no-store")
+                    .body(std::borrow::Cow::Owned(bytes))
+                {
+                    responder.respond(response);
+                }
                 return;
             }
             // значок вкладки с диска — сохранён из движка, сеть не нужна
@@ -927,6 +984,7 @@ fn build_tab(app: &mut App, id: u32, bounds: Rect) -> wry::Result<WebView> {
         // Ссылки «в новом окне» открываем новой вкладкой.
         .with_new_window_req_handler(move |url, _| {
             let background = platform::background_click();
+            let background = background || LINKS_BACKGROUND.load(Ordering::Relaxed);
             let _ = popup.send_event(UserEvent::NewTabRequested(url, background));
             NewWindowResponse::Deny
         })
@@ -1040,7 +1098,8 @@ impl App {
         let toast = self.toast.filter(|_| {
             matches!(self.overlay, Overlay::None | Overlay::Sheet(_)) && !on_start_page && !self.splash && !self.is_fullscreen()
         });
-        let ui_rect = if toast.is_some() { rect(0.0, 0.0, width, height) } else { rect(bx, by, bw, bh) };
+        let peek = self.peek.filter(|_| matches!(self.overlay, Overlay::None) && !on_start_page && !self.splash && !self.is_fullscreen());
+        let ui_rect = if toast.is_some() || peek.is_some() { rect(0.0, 0.0, width, height) } else { rect(bx, by, bw, bh) };
         let _ = self.ui.set_bounds(ui_rect);
         // «Остров» поверх страницы: окно интерфейса обрезается по полосе вкладок и острову.
         // Меню, подсказки, стартовая страница и полный экран — снова целиком.
@@ -1056,6 +1115,11 @@ impl App {
         if let Some((w, h)) = toast {
             let mut list = parts.take().unwrap_or_else(|| vec![[bx, by, bw, bh, 0.0]]);
             list.push(toast_part(width, height, w, h));
+            parts = Some(list);
+        }
+        if let Some([x, y, w, h]) = peek {
+            let mut list = parts.take().unwrap_or_else(|| vec![[bx, by, bw, bh, 0.0]]);
+            list.push([x, y, w, h, 14.0]);
             parts = Some(list);
         }
         match parts {
@@ -1263,6 +1327,7 @@ impl App {
     }
 
     fn apply_theme(&mut self) {
+        self.ext_popup_spare = None; // запасное окошко расширения было в старой теме
         self.push_panel_state();
         let dark = self.dark();
         platform::style_window(self.window.hwnd(), dark);
@@ -1362,6 +1427,10 @@ impl App {
     fn close_tab(&mut self, id: u32) {
         let Some(index) = self.index_of(id) else { return };
         let tab = self.tabs.remove(index);
+        if let Ok(mut shots) = TAB_SHOTS.lock() {
+            shots.remove(&id);
+        }
+        self.shot_versions.remove(&id);
         if !tab.url.is_empty() {
             self.closed.push(tab.snapshot());
         }
@@ -1468,6 +1537,15 @@ impl App {
     }
 
     fn activate(&mut self, id: u32) {
+        // уходим с вкладки — её снимок для предпросмотра при наведении
+        if self.active != id {
+            if let Some(webview) = self.active_webview() {
+                let (proxy, old) = (self.proxy.clone(), self.active);
+                platform::capture(webview, move |bytes| {
+                    let _ = proxy.send_event(UserEvent::TabShot(old, bytes));
+                });
+            }
+        }
         let Some(tab) = self.tab(id) else { return };
         let lazy_url = (tab.webview.is_none() && !tab.url.is_empty()).then(|| tab.url.clone());
         self.set_active(id);
@@ -1484,6 +1562,19 @@ impl App {
             self.focus_content();
         } else {
             self.focus_url(); // на стартовой странице курсор сразу в поиске
+        }
+    }
+
+    /// Снимок вкладки на экране для предпросмотра при наведении.
+    fn shot_active(&self, id: u32) {
+        if id != self.active || self.overlay != Overlay::None {
+            return;
+        }
+        if let Some(webview) = self.active_webview() {
+            let proxy = self.proxy.clone();
+            platform::capture(webview, move |bytes| {
+                let _ = proxy.send_event(UserEvent::TabShot(id, bytes));
+            });
         }
     }
 
@@ -1651,10 +1742,24 @@ impl App {
                     }
                     self.collect_site_icon(id);
                     self.detect_language(id);
+                    // снимок для предпросмотра — пока вкладка на экране (скрытую WebView2 не снимет)
+                    let proxy = self.proxy.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_millis(1500));
+                        let _ = proxy.send_event(UserEvent::ShotActive(id));
+                    });
                 }
             }
+            UserEvent::ShotActive(id) => self.shot_active(id),
+            UserEvent::SpellFix(seq, fix) => {
+                let fix = fix.map_or(Value::Null, |(text, kind)| json!({ "text": text, "kind": kind.as_str() }));
+                let _ = self.ui.evaluate_script(&format!("ui.setFix({seq}, {fix})"));
+            }
             UserEvent::HistoryChanged(id) => self.sync_location(id),
-            UserEvent::NewTabRequested(url, true) => self.new_background_tab(&url),
+            UserEvent::NewTabRequested(url, true) => {
+                self.new_background_tab(&url);
+                let _ = self.ui.evaluate_script("ui.toast('Ссылка открыта в новой вкладке')");
+            }
             UserEvent::NewTabRequested(url, false) => self.new_tab(Some(url)),
             UserEvent::Blocked(id) => {
                 if let Some(tab) = self.tab_mut(id) {
@@ -1775,6 +1880,21 @@ impl App {
             }
             UserEvent::ExtChanged => self.refresh_extensions(),
             UserEvent::ExtPopupMeasure => self.measure_ext_popup(),
+            UserEvent::TabShot(id, bytes) => {
+                if let (Some(bytes), true) = (bytes, self.tab(id).is_some()) {
+                    if let Ok(mut shots) = TAB_SHOTS.lock() {
+                        shots.insert(id, bytes);
+                    }
+                    *self.shot_versions.entry(id).or_insert(0) += 1;
+                    self.dirty = true;
+                }
+            }
+            UserEvent::ExtPopupShow => {
+                // замер не пришёл — всё равно показать
+                if let Some((webview, _, _)) = &self.ext_popup {
+                    let _ = webview.set_visible(true);
+                }
+            }
             UserEvent::ExtPopupSize(w, h) => self.resize_ext_popup(w, h),
             UserEvent::Verified(index, copy, verdict) => self.password_verified(index, copy, verdict),
             UserEvent::Processes(list, report) => {
@@ -2208,8 +2328,15 @@ impl App {
             return; // меню успели закрыть, пока делался снимок
         }
         self.overlay_pending = false;
+        // снимок отдаётся картинкой по адресу rb.localhost, а не строкой base64 в сотни КБ
         let backdrop = match bytes {
-            Some(bytes) if has_page => format!("'data:image/jpeg;base64,{}'", base64(&bytes)),
+            Some(bytes) if has_page => {
+                let version = BACKDROP_VERSION.fetch_add(1, Ordering::Relaxed) + 1;
+                if let Ok(mut slot) = BACKDROP.lock() {
+                    *slot = bytes;
+                }
+                format!("'http://rb.localhost/backdrop.jpg?v={version}'")
+            }
             _ => "null".to_string(),
         };
         let _ = self.ui.evaluate_script(&format!("ui.setBackdrop({backdrop})"));
@@ -2329,6 +2456,10 @@ impl App {
                     settings.process_limit = limit as u32;
                 }
             }
+            "links_background" => {
+                settings.links_background = value.as_bool().unwrap_or(settings.links_background);
+                LINKS_BACKGROUND.store(settings.links_background, Ordering::Relaxed);
+            }
             "dark_all" => {
                 settings.dark_all = value.as_bool().unwrap_or(settings.dark_all);
                 self.store.save_settings();
@@ -2424,6 +2555,14 @@ impl App {
             "ready" => {
                 self.sent.clear(); // интерфейс перезагрузился — нужно всё состояние
                 self.dirty = true;
+            }
+            "peek" => {
+                let rect = ["x", "y", "w", "h"].map(|k| message[k].as_f64());
+                let peek = rect.iter().all(Option::is_some).then(|| rect.map(|v| v.unwrap_or(0.0)));
+                if peek != self.peek {
+                    self.peek = peek;
+                    self.layout();
+                }
             }
             "toast" => {
                 let size = message["w"].as_f64().zip(message["h"].as_f64());
@@ -2986,8 +3125,11 @@ impl App {
 
             // адресная строка
             "suggest" => {
-                let list = self.store.suggest(&text("text"), 6);
+                let query = text("text");
+                let list = self.store.suggest(&query, 6);
                 let json = serde_json::to_string(&list).unwrap_or_else(|_| "[]".into());
+                // опечатка или не та раскладка — исправление досчитает фоновый поток
+                self.spell.ask(number("seq") as u64, &query);
                 let script = format!("ui.setSuggestions({}, {json})", number("seq"));
                 let _ = self.ui.evaluate_script(&script);
             }
@@ -3292,7 +3434,7 @@ impl App {
         if self.dirty && self.last_push.elapsed() >= PUSH_INTERVAL {
             self.push_state();
         }
-        if self.overlay_pending && self.overlay_requested.elapsed() > Duration::from_millis(600) {
+        if self.overlay_pending && self.overlay_requested.elapsed() > Duration::from_millis(250) {
             self.finish_overlay(None);
         }
         let since_save = self.last_save.elapsed();
@@ -3393,6 +3535,7 @@ impl App {
                     "zoom": tab.zoom,
                     "audio": tab.audio,
                     "video": tab.video,
+                    "shot": self.shot_versions.get(&tab.id).copied().unwrap_or(0),
                     "muted": tab.muted,
                     "sleeping": tab.sleeping || (tab.webview.is_none() && !tab.url.is_empty()),
                     "lang": tab.lang,
@@ -3435,6 +3578,7 @@ impl App {
                 "islandRadius": settings.island_radius,
                 "islandTabs": settings.island_tabs,
                 "darkAll": settings.dark_all,
+                "linksBackground": settings.links_background,
                 "autoUpdate": settings.auto_update,
                 "processLimit": settings.process_limit,
                 "compact": settings.compact,
@@ -4182,28 +4326,45 @@ impl App {
         let url = format!("chrome-extension://{id}/{}", info.popup);
         let (width, height) = (360.0, 120.0);
         let bounds = rect((right - width).max(8.0), top, width, height);
-        let network = proxy_config(&self.store.settings);
-        let popup = self.proxy.clone();
-        let (dark, inprivate, theme) = (self.dark(), self.inprivate, self.page_theme());
-        let built = WebViewBuilder::new_with_web_context(&mut self.web_context)
-            .with_bounds(bounds)
-            .with_url(url)
-            .with_background_color(if dark { (32, 33, 40, 255) } else { (255, 255, 255, 255) })
-            .with_incognito(inprivate)
-            .with_browser_extensions_enabled(true)
-            .with_network(network)
-            .with_theme(theme)
-            .with_new_window_req_handler(move |url, _| {
-                let _ = popup.send_event(UserEvent::NewTabRequested(url, false));
-                NewWindowResponse::Deny
-            })
-            .build_as_child(&self.window);
-        let Ok(webview) = built else { return };
-        platform::hook_hotkeys(&webview, self.keys.clone(), self.proxy.clone());
-        let _ = webview.focus();
+        let webview = match self.ext_popup_spare.take() {
+            Some(webview) => {
+                let _ = webview.set_bounds(bounds);
+                let _ = webview.load_url(&url);
+                webview
+            }
+            None => {
+                let network = proxy_config(&self.store.settings);
+                let popup = self.proxy.clone();
+                let (dark, inprivate, theme) = (self.dark(), self.inprivate, self.page_theme());
+                let built = WebViewBuilder::new_with_web_context(&mut self.web_context)
+                    .with_bounds(bounds)
+                    .with_url(url)
+                    .with_visible(false)
+                    .with_background_color(if dark { (32, 33, 40, 255) } else { (255, 255, 255, 255) })
+                    .with_incognito(inprivate)
+                    .with_browser_extensions_enabled(true)
+                    .with_network(network)
+                    .with_theme(theme)
+                    .with_new_window_req_handler(move |url, _| {
+                        let _ = popup.send_event(UserEvent::NewTabRequested(url, false));
+                        NewWindowResponse::Deny
+                    })
+                    .build_as_child(&self.window);
+                let Ok(webview) = built else { return };
+                platform::hook_hotkeys(&webview, self.keys.clone(), self.proxy.clone());
+                webview
+            }
+        };
+        // показывается после первого замера — уже нужного размера, без прыжков
+        let _ = webview.set_visible(false);
         self.ext_popup = Some((webview, right, top));
         // окошко само подстраивается под содержимое, как в Chrome: меряем несколько раз, пока оно рисуется
-        for delay in [150u64, 450, 1000, 2000] {
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(400));
+            let _ = proxy.send_event(UserEvent::ExtPopupShow);
+        });
+        for delay in [40u64, 120, 300, 700, 1500] {
             let proxy = self.proxy.clone();
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(delay));
@@ -4227,12 +4388,18 @@ impl App {
         let height = height.clamp(80.0, 600.0).min(window_height - top - 8.0);
         let left = (right - width).max(8.0);
         let _ = webview.set_bounds(rect(left, *top, width, height));
+        let _ = webview.set_visible(true);
+        let _ = webview.focus();
         let box_rect = json!({ "left": left, "top": top, "width": width, "height": height });
         let _ = self.ui.evaluate_script(&format!("ui.extPopupBox({box_rect})"));
     }
 
     fn close_ext_popup(&mut self) {
-        self.ext_popup = None;
+        if let Some((webview, _, _)) = self.ext_popup.take() {
+            let _ = webview.set_visible(false);
+            let _ = webview.load_url("about:blank"); // скрипты расширения останавливаются
+            self.ext_popup_spare = Some(webview);
+        }
     }
 }
 
@@ -4484,6 +4651,7 @@ impl App {
                     self.store.settings = settings;
                     self.store.save_settings();
                     AMOLED.store(self.store.settings.theme == "amoled", Ordering::Relaxed);
+                    LINKS_BACKGROUND.store(self.store.settings.links_background, Ordering::Relaxed);
                     self.apply_theme();
                     self.sent.clear();
                 }
