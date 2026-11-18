@@ -13,6 +13,11 @@
 
 </div>
 
+<p align="center">
+  <img src="docs/start.png" width="49%" alt="Новая вкладка">
+  <img src="docs/site.png" width="49%" alt="Сайт во вкладке">
+</p>
+
 ---
 
 ## ✨ Возможности
