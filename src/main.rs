@@ -4690,25 +4690,34 @@ const SELECTION_SCRIPT: &str = r#"(() => {
     root.querySelector('.t').textContent = r.error || r.text;
     place(card, anchor, true);
   };
-  addEventListener('mouseup', (e) => {
-    if (host && e.composedPath().includes(host)) return;
-    setTimeout(() => {
-      const sel = getSelection();
-      const text = sel && !sel.isCollapsed ? sel.toString().trim() : '';
-      const active = document.activeElement;
-      const editable = active && (active.isContentEditable || /^(INPUT|TEXTAREA)$/.test(active.tagName));
-      if (!text || text.length > 2000 || editable || !/\p{L}/u.test(text)) {
-        if (!card || card.style.display !== 'block') hideAll();
-        return;
-      }
-      ensure();
-      lastText = text;
-      anchor = sel.getRangeAt(0).getBoundingClientRect();
-      card.style.display = 'none';
-      button.style.display = 'flex';
-      place(button, anchor, false);
-    }, 10);
-  }, true);
+  // Что выделено: обычный текст страницы или кусок в поле ввода (там getSelection пуст).
+  const selected = () => {
+    const active = document.activeElement;
+    if (active && /^(INPUT|TEXTAREA)$/.test(active.tagName) && active.type !== 'password' && typeof active.selectionStart === 'number') {
+      const text = active.value.slice(active.selectionStart, active.selectionEnd).trim();
+      return text ? { text, rect: active.getBoundingClientRect() } : null;
+    }
+    const sel = getSelection();
+    const text = sel && !sel.isCollapsed ? sel.toString().trim() : '';
+    return text ? { text, rect: sel.getRangeAt(0).getBoundingClientRect() } : null;
+  };
+  const check = () => setTimeout(() => {
+    const found = selected();
+    if (!found || found.text.length > 2000 || !/\p{L}/u.test(found.text)) {
+      if (!card || card.style.display !== 'block') hideAll();
+      return;
+    }
+    if (button && button.style.display === 'flex' && found.text === lastText) return;
+    ensure();
+    lastText = found.text;
+    anchor = found.rect;
+    card.style.display = 'none';
+    button.style.display = 'flex';
+    place(button, anchor, false);
+  }, 10);
+  addEventListener('mouseup', (e) => { if (!(host && e.composedPath().includes(host))) check(); }, true);
+  // выделение с клавиатуры: Shift+стрелки, Ctrl+A
+  addEventListener('keyup', (e) => { if (e.shiftKey || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') || e.key === 'Shift') check(); }, true);
   addEventListener('mousedown', (e) => { if (host && !e.composedPath().includes(host)) hideAll(); }, true);
   addEventListener('scroll', () => { if (button && button.style.display === 'flex') hideAll(); }, { capture: true, passive: true });
   addEventListener('keydown', (e) => { if (e.key === 'Escape') hideAll(); }, true);
