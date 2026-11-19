@@ -1504,9 +1504,6 @@ function openInputMenu(input, x, y) {
     document.execCommand(command);
   };
   const nodes = keepFocus([
-    item({ icon: 'smile', label: 'Эмодзи', kb: 'Win+Точка', onClick: () => { input.focus(); send('system_keys', { keys: 'emoji' }); } }),
-    item({ icon: 'mic', label: 'Голосовой ввод', kb: 'Win+H', onClick: () => { input.focus(); send('system_keys', { keys: 'voice' }); } }),
-    sep(),
     item({ icon: 'undo', label: 'Отменить', kb: 'Ctrl+Z', onClick: run('undo') }),
     item({ icon: 'redo', label: 'Вернуть', kb: 'Ctrl+Y', onClick: run('redo') }),
     sep(),

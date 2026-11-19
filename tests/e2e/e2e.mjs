@@ -81,6 +81,17 @@ await check('открывается страница во вкладке', async
   await waitFor(() => ui.evaluate('activeTab().url.startsWith("file:") && !activeTab().loading'));
 });
 
+await check('выделенный текст — появляется кнопка «Перевести»', async () => {
+  const page = await connect((t) => t.url === FIXTURE);
+  try {
+    await page.evaluate("(() => { const p = document.querySelector('main p') || document.querySelector('p'); const r = document.createRange(); r.selectNodeContents(p); getSelection().removeAllRanges(); getSelection().addRange(r); document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })); })()");
+    await waitFor(() => page.evaluate("!!document.querySelector('rb-translate')"));
+    await page.evaluate("getSelection().removeAllRanges(); document.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))");
+  } finally {
+    page.close();
+  }
+});
+
 await check('заставка запуска отыграла и освободила окно', async () => {
   await waitFor(() => ui.evaluate("!document.getElementById('splash').className && window.__rbShape < 300"));
 });
@@ -125,7 +136,7 @@ await check('у адресной строки есть своё меню', async
   for (const type of ['mousePressed', 'mouseReleased']) {
     await ui.call('Input.dispatchMouseEvent', { type, x, y, button: 'right', buttons: type === 'mousePressed' ? 2 : 0, clickCount: 1 });
   }
-  await waitFor(() => ui.evaluate("menuKind === 'input' && el.menu.querySelectorAll('.mi').length >= 9"));
+  await waitFor(() => ui.evaluate("menuKind === 'input' && el.menu.querySelectorAll('.mi').length >= 7"));
   await ui.evaluate('closeMenu()');
 });
 
@@ -236,7 +247,7 @@ await check('остров и свои кнопки на панели', async () 
 });
 
 await check('разделённый экран и группы вкладок', async () => {
-  await waitFor(() => ui.evaluate('S.tabs.length === 1'));
+  await waitFor(() => ui.evaluate('S.tabs.length === 1')).catch((e) => { throw new Error('шаг 1: ' + e.message); });
   const first = await ui.evaluate('S.active');
   const visible = async (hash) => {
     const target = (await targets()).find((t) => t.url === FIXTURE + hash);
@@ -245,34 +256,34 @@ await check('разделённый экран и группы вкладок', 
     try { return await page.evaluate('document.visibilityState') === 'visible'; } finally { page.close(); }
   };
   await ui.evaluate(`send('open', { url: ${JSON.stringify(FIXTURE + '#b')}, newTab: true })`);
-  await waitFor(async () => (await targets()).some((t) => t.url === FIXTURE + '#b'));
+  await waitFor(async () => (await targets()).some((t) => t.url === FIXTURE + '#b')).catch((e) => { throw new Error('шаг 2: ' + e.message); });
   const second = await ui.evaluate('S.active');
   await ui.evaluate("send('split')");
-  await waitFor(async () => (await ui.evaluate(`S.split?.left === ${second} && S.split?.right === ${first}`)) && (await visible('')) && (await visible('#b')), 15000);
+  await waitFor(async () => (await ui.evaluate(`S.split?.left === ${second} && S.split?.right === ${first}`)) && (await visible('')) && (await visible('#b')), 15000).catch((e) => { throw new Error('шаг 3: ' + e.message); });
   // закрыли активную половину — на экране остаётся вторая
   await ui.evaluate(`send('close_tab', { id: ${second} })`);
-  await waitFor(() => ui.evaluate(`!S.split && S.active === ${first}`));
+  await waitFor(() => ui.evaluate(`!S.split && S.active === ${first}`)).catch((e) => { throw new Error('шаг 4: ' + e.message); });
   // группы: вкладка, брошенная внутрь группы, вступает в неё
   for (const hash of ['#g1', '#g2']) {
     await ui.evaluate(`send('open', { url: ${JSON.stringify(FIXTURE + hash)}, newTab: true })`);
-    await waitFor(async () => (await targets()).some((t) => t.url === FIXTURE + hash));
+    await waitFor(async () => (await targets()).some((t) => t.url === FIXTURE + hash)).catch((e) => { throw new Error('шаг 5: ' + e.message); });
   }
-  await waitFor(() => ui.evaluate('S.tabs.length === 3'));
+  await waitFor(() => ui.evaluate('S.tabs.length === 3')).catch((e) => { throw new Error('шаг 6: ' + e.message); });
   const [, g1, g2] = await ui.evaluate('S.tabs.map((t) => t.id)');
   await ui.evaluate(`send('group_new', { id: ${g1} })`);
-  await waitFor(() => ui.evaluate('S.groups.length === 1'));
+  await waitFor(() => ui.evaluate('S.groups.length === 1')).catch((e) => { throw new Error('шаг 7: ' + e.message); });
   await ui.evaluate('closeMenu()');
   await ui.evaluate(`send('group_add', { id: ${g2}, group: S.groups[0].id })`);
-  await waitFor(() => ui.evaluate(`S.tabs.every((t) => (t.group !== 0) === (t.id !== ${first}))`));
+  await waitFor(() => ui.evaluate(`S.tabs.every((t) => (t.group !== 0) === (t.id !== ${first}))`)).catch((e) => { throw new Error('шаг 8: ' + e.message); });
   await ui.evaluate(`send('move_tab', { id: ${first}, index: 1 })`);
-  await waitFor(() => ui.evaluate(`S.tabs[1].id === ${first} && S.tabs[1].group === S.groups[0].id`));
+  await waitFor(() => ui.evaluate(`S.tabs[1].id === ${first} && S.tabs[1].group === S.groups[0].id`)).catch((e) => { throw new Error('шаг 9: ' + e.message); });
   await ui.evaluate(`send('group_remove', { id: ${first} })`);
-  await waitFor(() => ui.evaluate(`S.tabs[1].group === 0`));
+  await waitFor(() => ui.evaluate(`S.tabs[1].group === 0`)).catch((e) => { throw new Error('шаг 10: ' + e.message); });
   // свернули группу с активной вкладкой — активна вкладка вне группы
   await ui.evaluate(`send('activate', { id: ${g2} }); send('group_edit', { group: S.groups[0].id, collapsed: true })`);
-  await waitFor(() => ui.evaluate(`S.active === ${first}`));
+  await waitFor(() => ui.evaluate(`S.active === ${first}`)).catch((e) => { throw new Error('шаг 11: ' + e.message); });
   await ui.evaluate(`send('group_close', { group: S.groups[0].id })`);
-  await waitFor(() => ui.evaluate(`S.tabs.length === 1 && !S.groups.length && S.active === ${first}`));
+  await waitFor(() => ui.evaluate(`S.tabs.length === 1 && !S.groups.length && S.active === ${first}`)).catch((e) => { throw new Error('шаг 12: ' + e.message); });
 });
 
 await check('узкий остров: адресная строка-кнопка раскрывается', async () => {
