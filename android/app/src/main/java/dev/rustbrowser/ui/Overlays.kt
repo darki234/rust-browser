@@ -109,12 +109,13 @@ fun BoxScope.Overlays(b: Browser, p: Palette, activity: MainActivity) {
         b.screen == Screen.Menu, modifier = Modifier.align(Alignment.BottomCenter),
         enter = slideInVertically(tween(260)) { it } + fadeIn(tween(160)), exit = slideOutVertically(tween(200)) { it } + fadeOut(tween(160)),
     ) { MenuSheet(b, p) }
-    for ((screen, title) in listOf(Screen.Bookmarks to "Закладки", Screen.History to "История", Screen.Settings to "Настройки")) {
+    for ((screen, title) in listOf(Screen.Bookmarks to "Закладки", Screen.History to "История", Screen.Settings to "Настройки", Screen.Passwords to "Пароли")) {
         AnimatedVisibility(b.screen == screen, enter = slideInHorizontally(tween(240)) { it }, exit = slideOutHorizontally(tween(200)) { it }) {
             Panel(title, p, onBack = { b.screen = Screen.None }) {
                 when (screen) {
                     Screen.Bookmarks -> BookmarksList(b, p)
                     Screen.History -> HistoryList(b, p)
+                    Screen.Passwords -> PasswordsList(activity, p)
                     else -> SettingsList(b, p, activity)
                 }
             }
@@ -346,9 +347,14 @@ private fun MenuSheet(b: Browser, p: Palette) {
             MenuAction(RbIcons.moon, "Тёмные сайты", on = b.store.darkSites) { b.store.darkSites = !b.store.darkSites; b.applyDarkSites(); b.store.saveSettings() },
             MenuAction(RbIcons.shield, "Реклама", on = b.store.adblock) { b.store.adblock = !b.store.adblock; b.store.saveSettings() },
             MenuAction(RbIcons.gear, "Настройки") { b.screen = Screen.Settings },
+            MenuAction(RbIcons.forward, "На ПК", page) { b.screen = Screen.None; b.sendToPc() },
+            MenuAction(RbIcons.lock, "Пароли") { b.screen = Screen.Passwords },
         )
         items.chunked(4).forEach { row ->
-            Row(Modifier.fillMaxWidth()) { row.forEach { MenuTile(it, p, Modifier.weight(1f)) } }
+            Row(Modifier.fillMaxWidth()) {
+                row.forEach { MenuTile(it, p, Modifier.weight(1f)) }
+                repeat(4 - row.size) { Spacer(Modifier.weight(1f)) } // неполный ряд — по сетке, а не вразнос
+            }
         }
     }
 }
@@ -424,6 +430,12 @@ private fun SettingsList(b: Browser, p: Palette, activity: MainActivity) {
     val s = b.store
     LazyColumn(contentPadding = PaddingValues(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { AccountCard(activity, p) }
+        item {
+            Card(p, "Пароли") {
+                Text("Сохранено: ${activity.passwords.logins.size}. Пароли синхронизируются с компьютером и хранятся зашифрованными.", color = p.muted, fontSize = 13.sp)
+                Action("Открыть пароли", p) { b.screen = Screen.Passwords }
+            }
+        }
         item {
             Card(p, "Оформление") {
                 Label("Тема", p)
@@ -559,7 +571,10 @@ private fun AccountCard(activity: MainActivity, p: Palette) {
                     Text(if (sync.busy) "Синхронизация…" else "Синхронизировано: " + ago(acc.synced), color = p.muted, fontSize = 12.sp)
                 }
             }
-            sync.error?.let { Text(it, color = Color(0xFFE5484D), fontSize = 13.sp, modifier = Modifier.padding(top = 10.dp)) }
+            sync.error?.let {
+                Text(it, color = Color(0xFFE5484D), fontSize = 13.sp, modifier = Modifier.padding(top = 10.dp))
+                Action("Выбрать файл заново", p) { activity.pickSyncFile { uri -> sync.relink(uri) } }
+            }
             Action(if (sync.busy) "Синхронизация…" else "Синхронизировать сейчас", p) { sync.syncNow(manual = true) }
             Action("Выйти из аккаунта", p) { sync.logout() }
         }
@@ -626,4 +641,58 @@ private fun LoginDialog(activity: MainActivity, p: Palette, onClose: () -> Unit)
         },
         dismissButton = { androidx.compose.material3.TextButton(onClick = onClose, enabled = !sync.busy) { Text("Отмена", color = p.muted) } },
     )
+}
+
+// ---------- список паролей ----------
+
+@Composable
+private fun PasswordsList(activity: MainActivity, p: Palette) {
+    val vault = activity.passwords
+    var query by remember { mutableStateOf("") }
+    var shown by remember { mutableStateOf(setOf<dev.rustbrowser.Login>()) }
+    if (vault.logins.isEmpty()) return Empty("Паролей пока нет. Войдите на сайт — браузер предложит сохранить, а с компьютера они придут через синхронизацию.", p)
+    val list = vault.logins.filter { query.isBlank() || it.origin.contains(query, true) || it.username.contains(query, true) }
+        .sortedBy { it.origin.substringAfter("://") }
+    LazyColumn(contentPadding = PaddingValues(12.dp)) {
+        item {
+            Row(
+                Modifier.fillMaxWidth().padding(bottom = 8.dp).height(46.dp).clip(RoundedCornerShape(23.dp)).background(p.surface)
+                    .border(1.dp, p.border, RoundedCornerShape(23.dp)).padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(RbIcons.search, null, Modifier.size(16.dp), tint = p.muted)
+                Spacer(Modifier.width(10.dp))
+                Box(Modifier.weight(1f)) {
+                    if (query.isEmpty()) Text("Поиск по сайтам и логинам", color = p.muted, fontSize = 15.sp)
+                    BasicTextField(query, { query = it }, singleLine = true, textStyle = TextStyle(color = p.text, fontSize = 15.sp), cursorBrush = SolidColor(p.accent), modifier = Modifier.fillMaxWidth())
+                }
+            }
+        }
+        items(list, key = { it.origin + "|" + it.username }) { login ->
+            val open = login in shown
+            Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).clickable {
+                if (open) shown = shown - login else activity.authenticate { shown = shown + login }
+            }.padding(horizontal = 10.dp, vertical = 10.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    SiteIcon(login.origin, p, 28.dp)
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(login.origin.substringAfter("://"), color = p.text, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(login.username.ifEmpty { "без логина" }, color = p.muted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    IconBtn(RbIcons.trash, "Удалить", p.muted, size = 38.dp) { activity.authenticate { vault.remove(login); activity.sync.syncNow(manual = false) } }
+                }
+                if (open) {
+                    Row(Modifier.padding(start = 40.dp, top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(login.password, color = p.text, fontSize = 15.sp, modifier = Modifier.weight(1f))
+                        Text("Копировать", color = p.accent, fontSize = 14.sp, modifier = Modifier.clip(RoundedCornerShape(10.dp)).clickable {
+                            val cm = activity.getSystemService(android.content.ClipboardManager::class.java)
+                            cm.setPrimaryClip(android.content.ClipData.newPlainText("password", login.password))
+                            android.widget.Toast.makeText(activity, "Пароль скопирован", android.widget.Toast.LENGTH_SHORT).show()
+                        }.padding(8.dp))
+                    }
+                }
+            }
+        }
+    }
 }

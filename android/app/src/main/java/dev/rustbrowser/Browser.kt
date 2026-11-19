@@ -40,7 +40,10 @@ import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 
-enum class Screen { None, Search, Tabs, Menu, Bookmarks, History, Settings, Find }
+enum class Screen { None, Search, Tabs, Menu, Bookmarks, History, Settings, Find, Passwords }
+
+/** Предложение сохранить пароль после входа на сайт. */
+data class PwOffer(val origin: String, val username: String, val password: String)
 
 /** Вкладка. WebView создаётся только когда вкладку впервые открыли — запуск мгновенный. */
 class Tab(val id: Int, url: String, title: String, val incognito: Boolean = false) {
@@ -71,6 +74,10 @@ class Browser(private val activity: MainActivity, val store: Store) {
     var islandShown by mutableStateOf(true)
     var showingIncognito by mutableStateOf(false)
     var findCount by mutableStateOf(0 to 0)
+    /** На странице форма входа, и для сайта есть сохранённые логины. */
+    var pwFill by mutableStateOf<Pair<String, List<Login>>?>(null)
+    /** Только что вошли на сайт с новым паролем — предложить сохранить. */
+    var pwSave by mutableStateOf<PwOffer?>(null)
     /** Сюда вставляется WebView активной вкладки. */
     val host = FrameLayout(activity)
     private var nextId = 1
@@ -93,6 +100,7 @@ class Browser(private val activity: MainActivity, val store: Store) {
         active?.let { if (it.id != tab.id) capture(it) }
         activeId = tab.id
         islandShown = true
+        pwFill = null
         saveSessionSoon()
         attach(tab)
     }
@@ -319,10 +327,62 @@ class Browser(private val activity: MainActivity, val store: Store) {
         CookieManager.getInstance().setAcceptThirdPartyCookies(wv, !tab.incognito)
         wv.webViewClient = PageClient(tab)
         wv.webChromeClient = ChromeClient(tab)
+        // менеджер паролей: скрипт с начала каждой страницы и канал сообщений с проверкой адреса
+        if (!tab.incognito && WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)
+            && WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+            WebViewCompat.addWebMessageListener(wv, "rbPw", setOf("*")) { _, message, origin, isMainFrame, _ ->
+                val data = message.data
+                if (isMainFrame && data != null) onPasswordMessage(tab, origin.toString(), data)
+            }
+            WebViewCompat.addDocumentStartJavaScript(wv, PASSWORD_SCRIPT, setOf("*"))
+        }
         wv.setDownloadListener { url, userAgent, disposition, mime, _ -> download(url, userAgent, disposition, mime, tab) }
         wv.setFindListener { active, total, done -> if (done) findCount = (if (total == 0) 0 else active + 1) to total }
         wv.setOnScrollChangeListener { _, _, y, _, oldY -> onScroll(tab, y, oldY) }
         return wv
+    }
+
+    private fun onPasswordMessage(tab: Tab, source: String, data: String) {
+        val origin = Passwords.originOf(source) ?: return
+        val message = runCatching { org.json.JSONObject(data) }.getOrNull() ?: return
+        val vault = activity.passwords
+        when (message.optString("cmd")) {
+            "form" -> if (tab.id == activeId) {
+                val list = vault.forOrigin(origin)
+                if (list.isNotEmpty()) pwFill = origin to list
+            }
+            "submit" -> {
+                val username = message.optString("username").take(200)
+                val password = message.optString("password").take(500)
+                if (password.isEmpty() || origin in vault.never) return
+                if (vault.logins.any { it.origin == origin && it.username == username && it.password == password }) return
+                pwSave = PwOffer(origin, username, password)
+                pwFill = null
+            }
+        }
+    }
+
+    fun fillLogin(login: Login) {
+        val js = "window.__rbFill && __rbFill(${org.json.JSONObject.quote(login.username)}, ${org.json.JSONObject.quote(login.password)})"
+        active?.webView?.evaluateJavascript(js, null)
+        pwFill = null
+    }
+
+    fun savePassword(never: Boolean = false) {
+        val offer = pwSave ?: return
+        pwSave = null
+        if (never) { activity.passwords.neverFor(offer.origin); return }
+        if (activity.passwords.upsert(offer.origin, offer.username, offer.password)) {
+            Toast.makeText(activity, "Пароль сохранён", Toast.LENGTH_SHORT).show()
+            activity.sync.syncNow(manual = false) // и на компьютер
+        }
+    }
+
+    /** «На компьютер»: вкладка уйдёт через синхронизацию и откроется там. */
+    fun sendToPc() {
+        val tab = active?.takeIf { it.url.startsWith("http") } ?: return
+        val sent = activity.sync.sendToPc(tab.url, tab.title)
+        Toast.makeText(activity, if (sent) "Отправлено — вкладка откроется на компьютере" else "Сначала войдите в аккаунт: Настройки → Аккаунт", Toast.LENGTH_SHORT).show()
     }
 
     private fun dropIncognito() {
@@ -385,6 +445,7 @@ class Browser(private val activity: MainActivity, val store: Store) {
         }
 
         override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
+            if (tab.id == activeId) pwFill = null
             tab.loading = true
             tab.url = url
             tab.blocked = 0

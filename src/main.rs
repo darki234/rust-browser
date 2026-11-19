@@ -156,6 +156,8 @@ pub enum UserEvent {
     TabShot(u32, Option<Vec<u8>>),
     /// Снять вкладку, если она всё ещё на экране.
     ShotActive(u32),
+    /// Перевод выделенного текста готов: (вкладка, номер запроса, итог).
+    SelTranslated(u32, u64, Result<(String, String, String), String>),
     /// Исправленный запрос адресной строки (номер запроса, исправление).
     SpellFix(u64, Option<(String, spell::Fix)>),
     ExtPopupMeasure,
@@ -386,6 +388,12 @@ struct App {
     account_folder: Option<String>,
     sync_error: Option<String>,
     last_sync: Instant,
+    /// Вкладки, отправленные между компьютером и телефоном (раздел синхронизации sent_tabs).
+    sent_tabs: Vec<Value>,
+    /// Какие из пришедших сюда уже открыты — второй раз не откроются.
+    sent_handled: std::collections::HashSet<String>,
+    /// Когда файл синхронизации менялся в последний раз — изменился в облаке, синхронизируемся сразу.
+    sync_mtime: Option<std::time::SystemTime>,
     /// Сохранённые пароли (зашифрованы) и сайты «никогда не сохранять».
     vault: passwords::Vault,
     /// Пароль, который только что ввели на сайте: ждёт ответа «Сохранить?».
@@ -582,6 +590,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         account_folder: None,
         sync_error: None,
         last_sync: Instant::now(),
+        sent_tabs: Vec::new(),
+        sent_handled: Default::default(),
+        sync_mtime: None,
         vault,
         pw_offer: None,
         pw_verified: None,
@@ -650,6 +661,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // аккаунт: первая синхронизация — сразу после запуска, когда окно уже на экране
     if !app.inprivate {
         let account: sync::Account = app.store.read_named("account.json");
+        app.sent_tabs = app.store.read_named("sent_tabs.json");
+        app.sent_handled = app.store.read_named("sent_handled.json");
         if !account.name.is_empty() {
             app.account = Some(account);
             app.last_sync = Instant::now() - SYNC_EVERY + Duration::from_secs(4);
@@ -749,6 +762,12 @@ fn default_download_dir() -> String {
     std::env::var_os("USERPROFILE")
         .map(|home| PathBuf::from(home).join("Downloads").to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+/// Отправленные вкладки живут в облаке неделю, а дальше удаляются при слиянии.
+fn fresh_sent_tabs(list: &[Value]) -> Vec<Value> {
+    let week_ago = unix_now().saturating_sub(7 * 24 * 3600);
+    list.iter().filter(|t| t["time"].as_u64().unwrap_or(0) > week_ago).take(200).cloned().collect()
 }
 
 /// Хост для файла значка вкладки (без www., только безопасные символы).
@@ -971,6 +990,7 @@ fn build_tab(app: &mut App, id: u32, bounds: Rect) -> wry::Result<WebView> {
         .with_initialization_script(passwords::PAGE_SCRIPT)
         .with_initialization_script(webstore::STORE_SCRIPT)
         .with_initialization_script(SCROLL_SCRIPT)
+        .with_initialization_script(SELECTION_SCRIPT)
         .with_initialization_script(PREFETCH_SCRIPT)
         .with_initialization_script(autofill::DETECT_SCRIPT)
         .with_navigation_handler(move |url| {
@@ -1767,6 +1787,15 @@ impl App {
                 }
             }
             UserEvent::ShotActive(id) => self.shot_active(id),
+            UserEvent::SelTranslated(id, seq, result) => {
+                let reply = match result {
+                    Ok((text, from, to)) => json!({ "seq": seq, "text": text, "from": from, "to": to }),
+                    Err(error) => json!({ "seq": seq, "error": error }),
+                };
+                if let Some(webview) = self.tab(id).and_then(|t| t.webview.as_ref()) {
+                    let _ = webview.evaluate_script(&format!("window.__rbTranslated && __rbTranslated({reply})"));
+                }
+            }
             UserEvent::SpellFix(seq, fix) => {
                 let fix = fix.map_or(Value::Null, |(text, kind)| json!({ "text": text, "kind": kind.as_str() }));
                 let _ = self.ui.evaluate_script(&format!("ui.setFix({seq}, {fix})"));
@@ -3126,6 +3155,10 @@ impl App {
                 self.splash = false;
                 self.layout();
             }
+            "send_to_phone" => {
+                let id = message["id"].as_u64().map_or(self.active, |v| v as u32);
+                self.send_tab_to_phone(id);
+            }
             "overlay_shown" => {
                 if self.overlay == Overlay::Full {
                     self.layout();
@@ -3994,6 +4027,18 @@ impl App {
                     self.dirty = true;
                 }
             }
+            "translate_sel" => {
+                // выделенный текст — переводим в фоне, ответ вернётся в эту вкладку
+                let text: String = message["text"].as_str().unwrap_or("").chars().take(2000).collect();
+                let seq = message["seq"].as_u64().unwrap_or(0);
+                if text.trim().is_empty() {
+                    return;
+                }
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let _ = proxy.send_event(UserEvent::SelTranslated(id, seq, translate_text(&text)));
+                });
+            }
             "has_video" => {
                 if let Some(tab) = self.tab_mut(id).filter(|t| !t.video) {
                     tab.video = true;
@@ -4569,6 +4614,131 @@ fn untranslate_url(url: &str) -> Option<String> {
 
 /// Сообщает браузеру, куда листают страницу: «Остров» прячется при прокрутке вниз.
 /// Ловим прокрутку и самой страницы, и вложенных блоков (у многих сайтов листается div).
+/// Перевод выделенного текста: рядом с выделением — кнопка «Перевести», по нажатию —
+/// карточка с переводом. Всё в теневом DOM: стили сайта её не ломают.
+const SELECTION_SCRIPT: &str = r#"(() => {
+  if (window.top !== window || window.__rbSel) return;
+  window.__rbSel = true;
+  let host, root, button, card, seq = 0, lastText = '', anchor = null;
+  const LANGS = { en: 'Английский', ru: 'Русский', de: 'Немецкий', fr: 'Французский', es: 'Испанский', it: 'Итальянский',
+    uk: 'Украинский', pl: 'Польский', tr: 'Турецкий', pt: 'Португальский', zh: 'Китайский', 'zh-CN': 'Китайский',
+    ja: 'Японский', ko: 'Корейский', ar: 'Арабский', nl: 'Нидерландский', kk: 'Казахский', be: 'Белорусский' };
+  const lang = (c) => LANGS[c] || c;
+  const ensure = () => {
+    if (host) return;
+    host = document.createElement('rb-translate');
+    host.style.cssText = 'all:initial;position:fixed;inset:0;pointer-events:none;z-index:2147483647';
+    root = host.attachShadow({ mode: 'closed' });
+    root.innerHTML = `<style>
+      .b, .c { position: fixed; pointer-events: auto; font: 13px/1.45 "Segoe UI Variable Text", "Segoe UI", sans-serif;
+        --bg: #fff; --fg: #1b1c22; --mu: #697084; --bd: rgba(20,24,48,.12); --ac: #4f5bf5; }
+      @media (prefers-color-scheme: dark) { .b, .c { --bg: #23242c; --fg: #eceef5; --mu: #9a9fb1; --bd: rgba(255,255,255,.12); --ac: #8288ff; } }
+      .b { display: none; align-items: center; gap: 6px; height: 30px; padding: 0 12px 0 10px; border-radius: 15px; border: 1px solid var(--bd);
+        background: var(--bg); color: var(--fg); box-shadow: 0 6px 20px rgba(0,0,0,.18); cursor: pointer; animation: in .14s ease-out; }
+      .b:hover { color: var(--ac); }
+      .b svg { width: 15px; height: 15px; }
+      .c { display: none; width: min(380px, calc(100vw - 24px)); max-height: min(360px, 60vh); overflow: auto; padding: 12px 14px 10px;
+        border-radius: 14px; border: 1px solid var(--bd); background: var(--bg); color: var(--fg);
+        box-shadow: 0 14px 40px rgba(0,0,0,.25); animation: in .16s ease-out; }
+      .h { display: flex; align-items: center; justify-content: space-between; color: var(--mu); font-size: 12px; margin-bottom: 6px; }
+      .t { font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+      .f { display: flex; gap: 6px; justify-content: flex-end; margin-top: 10px; }
+      button { font: inherit; border: 0; background: none; color: var(--ac); cursor: pointer; padding: 4px 8px; border-radius: 8px; }
+      button:hover { background: rgba(127,127,127,.12); }
+      .x { color: var(--mu); font-size: 16px; line-height: 1; padding: 2px 6px; }
+      @keyframes in { from { opacity: 0; transform: translateY(4px); } }
+    </style>
+    <div class="b"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h9M8.5 3v2M11 5c-.8 4-3.5 7-7 9"/><path d="M6.5 9c1 2 3 4 5.5 5"/><path d="m13 21 4-9 4 9M14.4 18h5.2"/></svg>Перевести</div>
+    <div class="c"><div class="h"><span class="l">Перевожу…</span><button class="x" title="Закрыть">×</button></div><div class="t"></div>
+      <div class="f"><button class="cp">Копировать</button></div></div>`;
+    button = root.querySelector('.b');
+    card = root.querySelector('.c');
+    (document.body || document.documentElement).append(host);
+    button.addEventListener('mousedown', (e) => { e.preventDefault(); e.stopPropagation(); });
+    button.addEventListener('click', (e) => { e.stopPropagation(); translate(); });
+    card.addEventListener('mousedown', (e) => e.stopPropagation());
+    root.querySelector('.x').addEventListener('click', hideAll);
+    root.querySelector('.cp').addEventListener('click', () => {
+      const text = root.querySelector('.t').textContent;
+      if (navigator.clipboard) navigator.clipboard.writeText(text).then(() => { root.querySelector('.cp').textContent = 'Скопировано'; });
+    });
+  };
+  const hideAll = () => { if (!host) return; button.style.display = 'none'; card.style.display = 'none'; };
+  const place = (el, rect, below) => {
+    const w = el.offsetWidth || 120, h = el.offsetHeight || 30;
+    const x = Math.min(Math.max(8, rect.left + rect.width / 2 - w / 2), innerWidth - w - 8);
+    let y = below ? rect.bottom + 8 : rect.top - h - 8;
+    if (y < 8) y = rect.bottom + 8;
+    if (y + h > innerHeight - 8) y = Math.max(8, rect.top - h - 8);
+    el.style.left = x + 'px';
+    el.style.top = y + 'px';
+  };
+  const translate = () => {
+    if (!lastText) return;
+    seq++;
+    button.style.display = 'none';
+    root.querySelector('.l').textContent = 'Перевожу…';
+    root.querySelector('.t').textContent = '';
+    root.querySelector('.cp').textContent = 'Копировать';
+    card.style.display = 'block';
+    place(card, anchor, true);
+    try { window.chrome.webview.postMessage(JSON.stringify({ cmd: 'translate_sel', text: lastText, seq })); } catch (e) {}
+  };
+  window.__rbTranslated = (r) => {
+    if (!host || r.seq !== seq) return;
+    root.querySelector('.l').textContent = r.error ? 'Не удалось перевести' : lang(r.from) + ' → ' + lang(r.to);
+    root.querySelector('.t').textContent = r.error || r.text;
+    place(card, anchor, true);
+  };
+  addEventListener('mouseup', (e) => {
+    if (host && e.composedPath().includes(host)) return;
+    setTimeout(() => {
+      const sel = getSelection();
+      const text = sel && !sel.isCollapsed ? sel.toString().trim() : '';
+      const active = document.activeElement;
+      const editable = active && (active.isContentEditable || /^(INPUT|TEXTAREA)$/.test(active.tagName));
+      if (!text || text.length > 2000 || editable || !/\p{L}/u.test(text)) {
+        if (!card || card.style.display !== 'block') hideAll();
+        return;
+      }
+      ensure();
+      lastText = text;
+      anchor = sel.getRangeAt(0).getBoundingClientRect();
+      card.style.display = 'none';
+      button.style.display = 'flex';
+      place(button, anchor, false);
+    }, 10);
+  }, true);
+  addEventListener('mousedown', (e) => { if (host && !e.composedPath().includes(host)) hideAll(); }, true);
+  addEventListener('scroll', () => { if (button && button.style.display === 'flex') hideAll(); }, { capture: true, passive: true });
+  addEventListener('keydown', (e) => { if (e.key === 'Escape') hideAll(); }, true);
+})();"#;
+
+/// Перевод фрагмента через Google Переводчик (тот же, что для страниц): на русский,
+/// а русский текст — на английский. Возвращает (перевод, язык оригинала, язык перевода).
+fn translate_text(text: &str) -> Result<(String, String, String), String> {
+    let request = |to: &str| -> Result<(String, String), String> {
+        let url = format!(
+            "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl={to}&dt=t&q={}",
+            percent_encode(text)
+        );
+        let (body, _) = icons::curl(&url, 2_000_000, 15).ok_or("нет связи с переводчиком")?;
+        let value: Value = serde_json::from_slice(&body).map_err(|_| "переводчик ответил непонятно")?;
+        let translated: String = value[0].as_array().into_iter().flatten().filter_map(|part| part[0].as_str()).collect();
+        let from = value[2].as_str().unwrap_or("auto").to_string();
+        if translated.trim().is_empty() {
+            return Err("переводчик ничего не вернул".into());
+        }
+        Ok((translated, from))
+    };
+    let (translated, from) = request("ru")?;
+    if from == "ru" {
+        let (english, _) = request("en")?;
+        return Ok((english, from, "en".into()));
+    }
+    Ok((translated, from, "ru".into()))
+}
+
 const SCROLL_SCRIPT: &str = r#"(() => {
   if (window.top !== window || window.__rbScroll) return;
   window.__rbScroll = true;
@@ -4655,12 +4825,17 @@ impl App {
         let notes: String = self.store.read_named("notes.json");
         sections.insert("notes".into(), json!(notes));
         sections.insert("autofill".into(), json!(self.autofill));
+        sections.insert("sent_tabs".into(), json!(fresh_sent_tabs(&self.sent_tabs)));
         sections
     }
 
     /// Применяет раздел из облака (или объединённый) к браузеру.
     fn apply_section(&mut self, name: &str, value: Value) {
         match name {
+            "sent_tabs" => {
+                self.sent_tabs = value.as_array().cloned().unwrap_or_default();
+                self.store.write_named("sent_tabs.json", &self.sent_tabs);
+            }
             "settings" => {
                 let mut merged = serde_json::to_value(&self.store.settings).unwrap_or_default();
                 if let (Value::Object(local), Value::Object(remote)) = (&mut merged, value) {
@@ -4781,6 +4956,7 @@ impl App {
                 "never": sync::union_by(&remote["never"], &local["never"], |o| o.to_string()),
             }),
             "extensions" => sync::union_by(remote, local, |e| e["id"].to_string()),
+            "sent_tabs" => json!(fresh_sent_tabs(sync::union_by(remote, local, |t| t["id"].to_string()).as_array().unwrap_or(&Vec::new()))),
             "autofill" => json!({
                 "addresses": sync::union_by(&remote["addresses"], &local["addresses"], |a| a.to_string()),
                 "cards": sync::union_by(&remote["cards"], &local["cards"], |c| c["number"].to_string()),
@@ -4863,6 +5039,9 @@ impl App {
             account.synced = unix_now();
         }
         self.sync_error = None;
+        // своя запись не должна запускать синхронизацию снова
+        self.sync_mtime = std::fs::metadata(&file).and_then(|m| m.modified()).ok();
+        self.open_received_tabs();
         self.save_account();
         self.dirty = true;
         if manual {
@@ -4873,10 +5052,65 @@ impl App {
 
     /// Раз в 5 минут — если что-то поменялось здесь или файл в облаке обновился.
     fn sync_tick(&mut self) {
-        if self.account.is_none() || self.last_sync.elapsed() < SYNC_EVERY {
+        let Some(account) = &self.account else { return };
+        // файл в облаке поменялся (например, с телефона отправили вкладку) — сразу, не ждём 5 минут
+        let mtime = std::fs::metadata(sync::file_for(&account.folder, &account.name)).and_then(|m| m.modified()).ok();
+        if self.last_sync.elapsed() < SYNC_EVERY && (mtime.is_none() || mtime == self.sync_mtime) {
             return;
         }
         self.sync_now(false);
+    }
+
+    /// Вкладки, которые отправили на этот компьютер: открываются в фоне, каждая один раз.
+    fn open_received_tabs(&mut self) {
+        let incoming: Vec<(String, String, String, String)> = self
+            .sent_tabs
+            .iter()
+            .filter(|t| t["to"] == "pc")
+            .filter_map(|t| {
+                let id = t["id"].as_str()?.to_string();
+                let url = t["url"].as_str().filter(|u| u.starts_with("http"))?.to_string();
+                Some((id, url, t["title"].as_str().unwrap_or("").to_string(), t["from"].as_str().unwrap_or("").to_string()))
+            })
+            .filter(|(id, ..)| !self.sent_handled.contains(id))
+            .collect();
+        if incoming.is_empty() {
+            return;
+        }
+        for (id, url, ..) in &incoming {
+            self.new_background_tab(url);
+            self.sent_handled.insert(id.clone());
+        }
+        self.store.write_named("sent_handled.json", &self.sent_handled);
+        let (title, from) = (&incoming[0].2, &incoming[0].3);
+        let text = if incoming.len() == 1 {
+            format!("Вкладка с телефона{}: {}", if from.is_empty() { String::new() } else { format!(" ({from})") }, if title.is_empty() { &incoming[0].1 } else { title })
+        } else {
+            format!("С телефона пришло вкладок: {}", incoming.len())
+        };
+        let _ = self.ui.evaluate_script(&format!("ui.toast({text:?})"));
+    }
+
+    /// «Отправить на телефон»: вкладка уходит в облако и откроется на телефоне при синхронизации.
+    fn send_tab_to_phone(&mut self, id: u32) {
+        let Some(tab) = self.tab(id).filter(|t| t.url.starts_with("http")) else { return };
+        if self.account.is_none() {
+            let _ = self.ui.evaluate_script("ui.toast('Чтобы отправлять вкладки, войдите в аккаунт: Параметры → Аккаунт')");
+            return;
+        }
+        let key: String = sync::random_bytes::<8>().iter().map(|b| format!("{b:02x}")).collect();
+        let entry = json!({
+            "id": key,
+            "url": tab.url,
+            "title": tab.title,
+            "from": std::env::var("COMPUTERNAME").unwrap_or_default(),
+            "to": "phone",
+            "time": unix_now(),
+        });
+        self.sent_tabs.push(entry);
+        self.store.write_named("sent_tabs.json", &self.sent_tabs);
+        self.sync_now(false);
+        let _ = self.ui.evaluate_script("ui.toast('Вкладка отправлена — откроется на телефоне')");
     }
 
     fn save_account(&self) {

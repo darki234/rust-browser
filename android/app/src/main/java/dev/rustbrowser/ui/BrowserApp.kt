@@ -100,6 +100,7 @@ fun BrowserApp(b: Browser, activity: MainActivity) {
         AndroidView(factory = { b.host }, modifier = Modifier.fillMaxSize().statusBarsPadding())
         if (tab == null || tab.isStart) StartPage(b, p)
         Island(b, p, Modifier.align(Alignment.BottomCenter))
+        PasswordBar(b, p, Modifier.align(Alignment.BottomCenter))
         Overlays(b, p, activity)
     }
 }
@@ -336,5 +337,60 @@ private fun Aurora(p: Palette) {
             center = Offset(w * (.95f - .3f * t), h * (.62f + .1f * t)), radius = w * .85f))
         drawRect(Brush.radialGradient(listOf(Color(0xFF18B6C9).copy(alpha = strength * .7f), Color.Transparent),
             center = Offset(w * (.3f + .2f * t), h * .95f), radius = w * .7f))
+    }
+}
+
+// ---------- пароли: «сохранить?» и «войти как» над островом ----------
+
+@Composable
+fun PasswordBar(b: Browser, p: Palette, modifier: Modifier = Modifier) {
+    val save = b.pwSave
+    val fill = b.pwFill
+    if (b.screen != Screen.None || (save == null && fill == null)) return
+    val shape = RoundedCornerShape(22.dp)
+    Column(
+        modifier.fillMaxWidth().navigationBarsPadding().padding(start = 12.dp, end = 12.dp, bottom = 80.dp)
+            .shadow(14.dp, shape).clip(shape).background(p.surface).border(1.dp, p.border, shape).padding(14.dp),
+    ) {
+        if (save != null) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(RbIcons.lock, null, Modifier.size(18.dp), tint = p.accent)
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("Сохранить пароль для ${save.origin.substringAfter("://")}?", color = p.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                    if (save.username.isNotEmpty()) Text(save.username, color = p.muted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Spacer(Modifier.weight(1f))
+                TextButton({ b.savePassword(never = true) }) { Text("Никогда", color = p.muted) }
+                TextButton({ b.pwSave = null }) { Text("Не сейчас", color = p.muted) }
+                TextButton({ b.savePassword() }) { Text("Сохранить", color = p.accent, fontWeight = FontWeight.SemiBold) }
+            }
+        } else if (fill != null) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(RbIcons.lock, null, Modifier.size(18.dp), tint = p.accent)
+                Spacer(Modifier.width(10.dp))
+                Text("Войти на ${fill.first.substringAfter("://")}", color = p.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                IconBtn(RbIcons.close, "Закрыть", p.muted, size = 34.dp) { b.pwFill = null }
+            }
+            Spacer(Modifier.height(6.dp))
+            fill.second.take(4).forEach { login ->
+                Row(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).clickable { b.fillLogin(login) }.padding(horizontal = 6.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(Modifier.size(30.dp).clip(RoundedCornerShape(15.dp)).background(p.accent.copy(alpha = .15f)), contentAlignment = Alignment.Center) {
+                        Text(login.username.take(1).uppercase().ifEmpty { "•" }, color = p.accent, fontWeight = FontWeight.Bold)
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    Column {
+                        Text(login.username.ifEmpty { "без логина" }, color = p.text, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text("••••••••", color = p.muted, fontSize = 12.sp)
+                    }
+                }
+            }
+        }
     }
 }

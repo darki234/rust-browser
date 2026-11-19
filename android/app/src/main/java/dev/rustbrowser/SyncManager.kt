@@ -16,7 +16,9 @@ import java.util.concurrent.Executors
  * Вход в аккаунт и синхронизация. Тяжёлое (ключ из пароля, шифр, чтение облака) — в
  * фоновом потоке; на главном только снимок данных и применение результата.
  */
-class SyncManager(private val context: Context, private val store: Store) {
+class SyncManager(private val context: Context, private val store: Store, private val passwords: Passwords) {
+    /** Пришли вкладки с компьютера: (адрес, заголовок). Открывает их браузер. */
+    var onReceived: (List<Pair<String, String>>) -> Unit = {}
     private val dir: File = context.filesDir
     private val engine = SyncEngine(context, store)
     private val worker = Executors.newSingleThreadExecutor()
@@ -52,6 +54,15 @@ class SyncManager(private val context: Context, private val store: Store) {
         }
     }
 
+    /** Файл в облаке переехал (OneDrive пересоздал его) — указать заново, пароль не нужен. */
+    fun relink(uri: Uri) {
+        val acc = account ?: return
+        account = SyncAccount(acc.name, uri, acc.salt, acc.sealedKey, acc.keyIv, acc.hashes, acc.synced)
+        save()
+        error = null
+        syncNow(manual = true)
+    }
+
     fun logout() {
         account = null
         File(dir, "account.json").delete()
@@ -69,7 +80,7 @@ class SyncManager(private val context: Context, private val store: Store) {
         if (busy) return
         busy = true
         // снимок своих данных — здесь, на главном потоке
-        val local = engine.localSections(store.bookmarks.toList(), store.history.toList(), store.historyCleared)
+        val local = engine.localSections(store.bookmarks.toList(), store.history.toList(), store.historyCleared, passwords.toJson(), store.sentTabs)
         val defaultsOnly = store.bookmarksAreDefaults()
         val hashes = acc.hashes.toMap()
         worker.execute {
@@ -144,7 +155,45 @@ class SyncManager(private val context: Context, private val store: Store) {
                 changed++
             }
         }
+        results["passwords"]?.let { v ->
+            if (!Json.same(v, local["passwords"])) {
+                passwords.replace(v as JSONObject)
+                passwords.save()
+                changed++
+            }
+        }
+        results["sent_tabs"]?.let { v ->
+            val list = v as JSONArray
+            if (!Json.same(list, local["sent_tabs"])) store.replaceSentTabs(list)
+            openReceived()
+        }
         return changed
+    }
+
+    /** Вкладки, отправленные на телефон и ещё не открытые. */
+    private fun openReceived() {
+        val incoming = ArrayList<Pair<String, String>>()
+        val ids = ArrayList<String>()
+        val list = store.sentTabs
+        for (i in 0 until list.length()) {
+            val t = list.optJSONObject(i) ?: continue
+            val id = t.optString("id")
+            val url = t.optString("url")
+            if (t.optString("to") != "phone" || id.isEmpty() || id in store.sentHandled || !url.startsWith("http")) continue
+            incoming += url to t.optString("title")
+            ids += id
+        }
+        if (ids.isEmpty()) return
+        store.markHandled(ids)
+        onReceived(incoming)
+    }
+
+    /** «На компьютер»: записать и сразу синхронизировать. */
+    fun sendToPc(url: String, title: String): Boolean {
+        if (account == null) return false
+        store.addSentTab(url, title, engine.device())
+        syncNow(manual = false)
+        return true
     }
 
     private fun save() {

@@ -29,6 +29,7 @@ class MainActivity : ComponentActivity() {
     lateinit var store: Store
     lateinit var browser: Browser
     lateinit var sync: SyncManager
+    lateinit var passwords: Passwords
 
     /** Тёмный ли сейчас интерфейс — по настройке или по теме системы. */
     val darkUi: Boolean
@@ -48,8 +49,15 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         store = Store(filesDir)
         AdBlock.load(this)
+        passwords = Passwords(filesDir)
         browser = Browser(this, store)
-        sync = SyncManager(this, store)
+        sync = SyncManager(this, store, passwords)
+        // вкладки, отправленные с компьютера, — открываются рядом, в фоне
+        sync.onReceived = { list ->
+            list.forEach { (url, title) -> browser.newTab(url, activate = false, title = title) }
+            val text = if (list.size == 1) "Вкладка с компьютера: ${list[0].second.ifBlank { list[0].first }}" else "С компьютера пришло вкладок: ${list.size}"
+            android.widget.Toast.makeText(this, text, android.widget.Toast.LENGTH_LONG).show()
+        }
         applySystemBars()
         browser.restoreSession()
         handleIntent(intent)
@@ -184,6 +192,25 @@ class MainActivity : ComponentActivity() {
             if (c.moveToFirst()) c.getString(0) else null
         }
     }.getOrNull() ?: uri.lastPathSegment.orEmpty()
+
+    // ---------- подтверждение личности (показ паролей) ----------
+
+    private var authed = 0L
+    private var afterAuth: (() -> Unit)? = null
+    private val authLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == RESULT_OK) { authed = System.currentTimeMillis(); afterAuth?.invoke() }
+        afterAuth = null
+    }
+
+    /** Пароли показываются только после экрана блокировки телефона (на минуту). */
+    fun authenticate(then: () -> Unit) {
+        val keyguard = getSystemService(android.app.KeyguardManager::class.java)
+        if (!keyguard.isDeviceSecure || System.currentTimeMillis() - authed < 60_000) return then()
+        @Suppress("DEPRECATION")
+        val intent = keyguard.createConfirmDeviceCredentialIntent("Пароли Rust Browser", "Подтвердите, что это вы") ?: return then()
+        afterAuth = then
+        authLauncher.launch(intent)
+    }
 
     // ---------- браузер по умолчанию ----------
 

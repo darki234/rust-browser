@@ -46,6 +46,10 @@ class Store(private val dir: File) {
     var historyCleared = 0L
 
     val bookmarks = mutableStateListOf<Bookmark>()
+    /** Вкладки, отправленные между телефоном и компьютером (раздел синхронизации sent_tabs). */
+    var sentTabs = JSONArray()
+    /** Пришедшие сюда и уже открытые — второй раз не откроются. */
+    val sentHandled = HashSet<String>()
     val history = mutableStateListOf<Visit>()
 
     init {
@@ -62,6 +66,8 @@ class Store(private val dir: File) {
             for (i in 0 until a.length()) a.optJSONObject(i)?.let { bookmarks += Bookmark(it.optString("url"), it.optString("title")) }
         }
         if (!File(dir, "bookmarks.json").exists()) bookmarks += DEFAULT_BOOKMARKS
+        readArray("sent_tabs.json")?.let { sentTabs = it }
+        readArray("sent_handled.json")?.let { a -> for (i in 0 until a.length()) sentHandled += a.optString(i) }
         readArray("history.json")?.let { a ->
             for (i in 0 until a.length()) a.optJSONObject(i)?.let { history += Visit(it.optString("url"), it.optString("title"), it.optLong("time")) }
         }
@@ -91,6 +97,24 @@ class Store(private val dir: File) {
         history.clear(); history.addAll(list.take(5000))
         historyCleared = maxOf(historyCleared, cleared)
         saveSettings(); saveHistorySoon()
+    }
+
+    fun replaceSentTabs(list: JSONArray) {
+        sentTabs = list
+        write("sent_tabs.json", list.toString())
+    }
+
+    fun markHandled(ids: Collection<String>) {
+        sentHandled += ids
+        write("sent_handled.json", JSONArray(sentHandled.toList()).toString())
+    }
+
+    /** «На компьютер»: запись в sent_tabs, при синхронизации вкладка откроется на компьютере. */
+    fun addSentTab(url: String, title: String, device: String) {
+        val id = ByteArray(8).also { java.security.SecureRandom().nextBytes(it) }.joinToString("") { "%02x".format(it) }
+        sentTabs.put(JSONObject().put("id", id).put("url", url).put("title", title).put("from", device)
+            .put("to", "pc").put("time", System.currentTimeMillis() / 1000))
+        write("sent_tabs.json", sentTabs.toString())
     }
 
     fun isBookmarked(url: String) = bookmarks.any { it.url == url }

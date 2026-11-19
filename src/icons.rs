@@ -112,7 +112,7 @@ fn fetch(host: &str) -> Option<(Vec<u8>, &'static str)> {
 }
 
 /// curl.exe есть в каждой Windows 10/11; окна консоли не будет.
-fn curl(url: &str, limit: u64, seconds: u32) -> Option<(Vec<u8>, String)> {
+pub fn curl(url: &str, limit: u64, seconds: u32) -> Option<(Vec<u8>, String)> {
     use std::os::windows::process::CommandExt;
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return None;

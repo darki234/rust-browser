@@ -206,13 +206,27 @@ object Keystore {
 /** Разделы этого телефона и их применение. Работает в фоновом потоке, кроме [apply]. */
 class SyncEngine(private val context: Context, private val store: Store) {
 
-    /** То, что телефон отдаёт в облако: закладки и история (время — в секундах, как у компьютера). */
-    fun localSections(bookmarks: List<Bookmark>, history: List<Visit>, cleared: Long): Map<String, Any> {
+    /** То, что телефон отдаёт в облако: закладки, история (время — в секундах, как у компьютера),
+     *  пароли и отправленные вкладки. */
+    fun localSections(bookmarks: List<Bookmark>, history: List<Visit>, cleared: Long, passwords: JSONObject, sent: JSONArray): Map<String, Any> {
         val b = JSONArray()
         bookmarks.forEach { b.put(JSONObject().put("title", it.title).put("url", it.url)) }
         val v = JSONArray()
         history.forEach { v.put(JSONObject().put("url", it.url).put("title", it.title).put("time", it.time / 1000)) }
-        return mapOf("bookmarks" to b, "history" to JSONObject().put("cleared", cleared).put("visits", v))
+        return mapOf(
+            "bookmarks" to b,
+            "history" to JSONObject().put("cleared", cleared).put("visits", v),
+            "passwords" to passwords,
+            "sent_tabs" to fresh(sent),
+        )
+    }
+
+    /** Отправленные вкладки живут неделю (как у компьютера). */
+    fun fresh(list: JSONArray): JSONArray {
+        val weekAgo = System.currentTimeMillis() / 1000 - 7 * 24 * 3600
+        val out = JSONArray()
+        for (i in 0 until list.length()) list.optJSONObject(i)?.takeIf { it.optLong("time") > weekAgo }?.let { if (out.length() < 200) out.put(it) }
+        return out
     }
 
     fun merge(name: String, local: Any, remote: Any): Any = when (name) {
@@ -226,6 +240,20 @@ class SyncEngine(private val context: Context, private val store: Store) {
             for (i in 0 until visits.length()) visits.getJSONObject(i).takeIf { it.optLong("time") > cleared }?.let { kept.put(it) }
             JSONObject().put("cleared", cleared).put("visits", kept)
         }
+        "passwords" -> {
+            val r = remote as? JSONObject ?: JSONObject()
+            val l = local as JSONObject
+            val never = JSONArray()
+            val seen = HashSet<String>()
+            for (list in listOf(r.optJSONArray("never"), l.optJSONArray("never"))) {
+                list ?: continue
+                for (i in 0 until list.length()) list.optString(i).takeIf { it.isNotEmpty() && seen.add(it) }?.let { never.put(it) }
+            }
+            JSONObject()
+                .put("logins", Json.unionBy(r.optJSONArray("logins"), l.optJSONArray("logins")) { it.optString("origin") + "|" + it.optString("username") })
+                .put("never", never)
+        }
+        "sent_tabs" -> fresh(Json.unionBy(remote, local) { it.optString("id") })
         else -> remote
     }
 
