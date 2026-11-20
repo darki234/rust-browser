@@ -176,8 +176,16 @@ pub enum UserEvent {
     PageLang(u32, String),
     /// Появился новый значок сайта — перерисовать плитки.
     IconSaved,
-    /// Ключ аккаунта посчитан и проверен (или ошибка).
-    AccountReady(Result<sync::Account, String>),
+    /// Телефон пришёл по Wi‑Fi со своим пакетом — ответ уходит обратно в канал.
+    LanSync(Vec<u8>, std::sync::mpsc::Sender<Option<Vec<u8>>>),
+    /// С диска WebDAV скачан файл связки (или его там ещё нет, или ошибка); bool — по кнопке.
+    DavFetched(Result<(Option<sync::Bundle>, String), String>, bool),
+    /// Файл записан на диск: новая метка версии; отпечатки, ручная ли, сколько разделов поменялось.
+    DavStored(Result<String, String>, std::collections::BTreeMap<String, String>, bool, usize),
+    /// Метка версии файла на диске — поменялась ли.
+    DavEtag(Option<String>),
+    /// Проверка диска при подключении.
+    DavChecked(Result<(), String>, sync::WebDav),
     /// Процессы WebView2; true — показать их в диспетчере вкладок.
     Processes(Vec<efficiency::ProcessInfo>, bool),
     /// Страница не загрузилась: (вкладка, вид ошибки для своей страницы ошибки).
@@ -381,19 +389,23 @@ struct App {
     /// autofill.json есть, но не расшифровывается — не перезаписываем его.
     autofill_locked: bool,
     pw_checking: bool,
-    /// Аккаунт для синхронизации (None — не вошли).
+    /// Синхронизация (None — выключена).
     account: Option<sync::Account>,
-    account_busy: bool,
-    /// Папка, выбранная в форме входа.
-    account_folder: Option<String>,
     sync_error: Option<String>,
     last_sync: Instant,
+    /// Порт сервера в домашней сети (None — ещё не запущен).
+    lan_port: Option<u16>,
+    lan_group: Arc<Mutex<String>>,
+    lan_rev: Arc<std::sync::atomic::AtomicU64>,
+    /// Отпечаток того, что нужно телефону, — вырос, значит телефону пора прийти.
+    lan_fp: String,
+    /// Идёт обмен с диском WebDAV / проверка метки.
+    dav_busy: bool,
+    dav_checked: Instant,
     /// Вкладки, отправленные между компьютером и телефоном (раздел синхронизации sent_tabs).
     sent_tabs: Vec<Value>,
     /// Какие из пришедших сюда уже открыты — второй раз не откроются.
     sent_handled: std::collections::HashSet<String>,
-    /// Когда файл синхронизации менялся в последний раз — изменился в облаке, синхронизируемся сразу.
-    sync_mtime: Option<std::time::SystemTime>,
     /// Сохранённые пароли (зашифрованы) и сайты «никогда не сохранять».
     vault: passwords::Vault,
     /// Пароль, который только что ввели на сайте: ждёт ответа «Сохранить?».
@@ -588,13 +600,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         autofill_locked: false,
         pw_checking: false,
         account: None,
-        account_busy: false,
-        account_folder: None,
         sync_error: None,
         last_sync: Instant::now(),
+        lan_port: None,
+        lan_group: Default::default(),
+        lan_rev: Default::default(),
+        lan_fp: String::new(),
+        dav_busy: false,
+        dav_checked: Instant::now(),
         sent_tabs: Vec::new(),
         sent_handled: Default::default(),
-        sync_mtime: None,
         vault,
         pw_offer: None,
         pw_verified: None,
@@ -666,9 +681,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let account: sync::Account = app.store.read_named("account.json");
         app.sent_tabs = app.store.read_named("sent_tabs.json");
         app.sent_handled = app.store.read_named("sent_handled.json");
-        if !account.name.is_empty() {
+        // старый аккаунт через папку OneDrive (без номера связки) больше не используется
+        if !account.group.is_empty() && !account.key.is_empty() {
             app.account = Some(account);
             app.last_sync = Instant::now() - SYNC_EVERY + Duration::from_secs(4);
+            app.start_lan();
         }
     }
     register_icons(&app.extensions, None);
@@ -1862,7 +1879,37 @@ impl App {
             UserEvent::Panel(raw) => self.handle_panel(&raw),
             UserEvent::Page(id, url, raw) => self.handle_page(id, &url, &raw),
             UserEvent::ExtReady(result, tab) => self.extension_ready(result, tab),
-            UserEvent::AccountReady(result) => self.account_ready(result),
+            UserEvent::LanSync(body, reply) => {
+                let _ = reply.send(self.lan_exchange(&body));
+            }
+            UserEvent::DavFetched(result, manual) => self.dav_fetched(result, manual),
+            UserEvent::DavStored(result, hashes, manual, changed) => self.dav_stored(result, hashes, manual, changed),
+            UserEvent::DavEtag(etag) => {
+                self.dav_busy = false;
+                let known = self.account.as_ref().and_then(|a| a.webdav.as_ref()).map(|d| d.etag.clone());
+                if etag.is_some() && etag != known {
+                    self.sync_now(false);
+                }
+            }
+            UserEvent::DavChecked(result, dav) => {
+                self.dav_busy = false;
+                self.dirty = true;
+                match result {
+                    Ok(()) => {
+                        if let Some(account) = &mut self.account {
+                            account.bases.remove("webdav");
+                            account.webdav = Some(dav);
+                        }
+                        self.save_account();
+                        self.sync_error = None;
+                        self.sync_now(true);
+                        self.send_pair();
+                    }
+                    Err(error) => {
+                        let _ = self.ui.evaluate_script(&format!("ui.accountError({error:?})"));
+                    }
+                }
+            }
             UserEvent::PwHealth(health) => {
                 self.pw_checking = false;
                 let leaked = health.iter().filter(|h| h.leaked > 0).count();
@@ -3055,20 +3102,32 @@ impl App {
                 self.open_ext_popup(&id, right, top);
             }
             "ext_popup_close" => self.close_ext_popup(),
-            "account_create" | "account_login" => {
-                let create = message["cmd"] == "account_create";
-                self.account_start(create, text("name"), text("password"), text("folder"));
-            }
-            "account_pick_folder" => {
-                if let Some(folder) = platform::pick_folder(self.window.hwnd()) {
-                    self.account_folder = Some(folder);
-                    self.dirty = true;
+            "sync_enable" => self.sync_enable(None),
+            "sync_join" => match sync::parse_pair(&text("code")) {
+                Some(pair) => self.sync_enable(Some(pair)),
+                None => {
+                    let _ = self.ui.evaluate_script("ui.accountError('Код не подходит: скопируйте его целиком, он начинается с RBSYNC1.')");
                 }
+            },
+            "sync_pair" => self.send_pair(),
+            "sync_webdav" => self.dav_connect(text("url"), text("user"), text("pass")),
+            "sync_webdav_off" => {
+                if let Some(account) = &mut self.account {
+                    account.webdav = None;
+                    account.bases.remove("webdav");
+                }
+                self.save_account();
+                self.sync_error = None;
+                self.send_pair();
+                self.dirty = true;
             }
             "account_sync" => self.sync_now(true),
             "account_logout" => {
                 self.account = None;
                 self.sync_error = None;
+                if let Ok(mut group) = self.lan_group.lock() {
+                    group.clear();
+                }
                 self.save_account();
                 self.dirty = true;
             }
@@ -5119,89 +5178,310 @@ impl App {
         }
     }
 
-    /// Синхронизация: прочитать облако, слить по разделам, записать обратно.
+    /// Слить пакет собеседника `peer` в браузер; `only` — какие разделы (у телефона их меньше).
+    /// Возвращает, сколько разделов поменялось здесь.
+    fn merge_from(&mut self, remote: &sync::Bundle, peer: &str, only: Option<&[String]>) -> usize {
+        let base = self.account.as_ref().and_then(|a| a.bases.get(peer)).cloned().unwrap_or_default();
+        let local = self.collect_sections();
+        let mut changed = 0;
+        for (name, local_value) in &local {
+            if only.is_some_and(|names| !names.contains(name)) {
+                continue;
+            }
+            let value = match sync::choose(local_value, remote.sections.get(name), base.get(name)) {
+                sync::Choice::Local => continue,
+                sync::Choice::Remote => remote.sections[name].clone(),
+                sync::Choice::Merge => Self::merge_section(name, local_value, &remote.sections[name]),
+            };
+            if value != *local_value {
+                self.apply_section(name, value);
+                changed += 1;
+            }
+        }
+        changed
+    }
+
+    fn fingerprints(sections: &std::collections::BTreeMap<String, Value>) -> std::collections::BTreeMap<String, String> {
+        sections.iter().map(|(k, v)| (k.clone(), sync::fingerprint(v))).collect()
+    }
+
+    /// Обмен с телефоном по Wi‑Fi: его пакет внутрь, в ответ — слитые разделы.
+    fn lan_exchange(&mut self, body: &[u8]) -> Option<Vec<u8>> {
+        let account = self.account.clone()?;
+        let key = self.account_key()?;
+        let remote = sync::decrypt(body, &key).ok()?;
+        if remote.id.is_empty() {
+            return None;
+        }
+        let peer = format!("peer:{}", remote.id);
+        let names: Vec<String> = remote.sections.keys().cloned().collect();
+        let changed = self.merge_from(&remote, &peer, Some(&names));
+        let sections: std::collections::BTreeMap<String, Value> =
+            self.collect_sections().into_iter().filter(|(k, _)| names.contains(k)).collect();
+        let hashes = Self::fingerprints(&sections);
+        if let Some(acc) = &mut self.account {
+            acc.bases.insert(peer, hashes);
+            let name = if remote.device.is_empty() { "Телефон".to_string() } else { remote.device.clone() };
+            acc.peers.insert(remote.id.clone(), sync::Peer { name, seen: unix_now() });
+            acc.synced = unix_now();
+        }
+        self.save_account();
+        self.open_received_tabs();
+        self.dirty = true;
+        if changed > 0 {
+            // с телефона пришло новое — скоро и на диск, для других компьютеров
+            self.last_sync = Instant::now() - SYNC_EVERY + Duration::from_secs(3);
+        }
+        let bundle = sync::Bundle {
+            sections,
+            device: std::env::var("COMPUTERNAME").unwrap_or_default(),
+            id: account.device.clone(),
+            time: unix_now(),
+        };
+        sync::encrypt(&bundle, &key, &account.group).ok()
+    }
+
+    /// Обмен с диском WebDAV. Сеть — в фоне: скачать, слить здесь, записать в фоне.
     fn sync_now(&mut self, manual: bool) {
         let Some(account) = self.account.clone() else { return };
-        let Some(key) = self.account_key() else {
-            self.sync_error = Some("ключ аккаунта не расшифровался — войдите заново".into());
+        self.last_sync = Instant::now();
+        let Some(dav) = account.webdav.clone() else {
+            if manual {
+                let text = if account.peers.is_empty() {
+                    "Подключите телефон по QR-коду или диск WebDAV"
+                } else {
+                    "Телефон синхронизируется сам, когда он в той же сети Wi‑Fi"
+                };
+                let _ = self.ui.evaluate_script(&format!("ui.toast({text:?})"));
+            }
+            return;
+        };
+        if self.dav_busy {
+            return;
+        }
+        let (Some(key), Some(pass)) = (self.account_key(), passwords::unprotect(&dav.pass)) else {
+            self.sync_error = Some("ключи не расшифровались — подключите синхронизацию заново".into());
             self.dirty = true;
             return;
         };
-        self.last_sync = Instant::now();
-        let file = sync::file_for(&account.folder, &account.name);
-        let remote = match std::fs::read(&file) {
-            Ok(bytes) => match sync::decrypt(&bytes, &key) {
-                Ok(bundle) => Some(bundle),
-                Err(error) => {
-                    self.sync_error = Some(format!("облачный файл не открылся: {error}"));
-                    self.dirty = true;
-                    return;
-                }
-            },
-            Err(_) => None,
-        };
-        let local = self.collect_sections();
-        let mut changed = 0;
-        if let Some(remote) = &remote {
-            for (name, local_value) in &local {
-                let choice = sync::choose(local_value, remote.sections.get(name), account.hashes.get(name));
-                let value = match choice {
-                    sync::Choice::Local => continue,
-                    sync::Choice::Remote => remote.sections[name].clone(),
-                    sync::Choice::Merge => Self::merge_section(name, local_value, &remote.sections[name]),
-                };
-                if value != *local_value {
-                    self.apply_section(name, value);
-                    changed += 1;
-                }
-            }
-        }
-        // в облако — то, что получилось после слияния
-        let sections = self.collect_sections();
-        let hashes: std::collections::BTreeMap<String, String> =
-            sections.iter().map(|(k, v)| (k.clone(), sync::fingerprint(v))).collect();
-        let needs_write = remote.as_ref().is_none_or(|r| {
-            r.sections.iter().map(|(k, v)| (k.clone(), sync::fingerprint(v))).collect::<std::collections::BTreeMap<_, _>>() != hashes
+        self.dav_busy = true;
+        let proxy = self.proxy.clone();
+        let file = sync::dav_file(&dav.url, &account.group);
+        std::thread::spawn(move || {
+            let result = sync::dav_get(&file, &dav.user, &pass).and_then(|found| match found {
+                Some((bytes, etag)) => sync::decrypt(&bytes, &key).map(|b| (Some(b), etag)),
+                None => Ok((None, String::new())),
+            });
+            let _ = proxy.send_event(UserEvent::DavFetched(result, manual));
         });
-        if needs_write {
-            let bundle = sync::Bundle {
-                sections,
-                device: std::env::var("COMPUTERNAME").unwrap_or_default(),
-                time: unix_now(),
-            };
-            let salt = crate::base64_decode(&account.salt).unwrap_or_default();
-            let written = sync::encrypt(&bundle, &key, &salt).and_then(|bytes| sync::write_atomic(&file, &bytes));
-            if let Err(error) = written {
-                self.sync_error = Some(format!("не удалось записать в папку: {error}"));
+    }
+
+    fn dav_fetched(&mut self, result: Result<(Option<sync::Bundle>, String), String>, manual: bool) {
+        let (remote, etag) = match result {
+            Ok(found) => found,
+            Err(error) => {
+                self.dav_busy = false;
+                self.sync_error = Some(error);
                 self.dirty = true;
                 return;
             }
+        };
+        let Some(account) = self.account.clone() else {
+            self.dav_busy = false;
+            return;
+        };
+        let changed = remote.as_ref().map_or(0, |r| self.merge_from(r, "webdav", None));
+        // на диск — всё своё; разделы, которых здесь нет (с других устройств), сохраняем
+        let mut sections = remote.as_ref().map(|r| r.sections.clone()).unwrap_or_default();
+        sections.extend(self.collect_sections());
+        let hashes = Self::fingerprints(&sections);
+        if remote.as_ref().is_some_and(|r| Self::fingerprints(&r.sections) == hashes) {
+            return self.dav_stored(Ok(etag), hashes, manual, changed);
         }
+        let (Some(key), Some(dav)) = (self.account_key(), account.webdav.clone()) else {
+            self.dav_busy = false;
+            return;
+        };
+        let pass = passwords::unprotect(&dav.pass).unwrap_or_default();
+        let bundle = sync::Bundle {
+            sections,
+            device: std::env::var("COMPUTERNAME").unwrap_or_default(),
+            id: account.device.clone(),
+            time: unix_now(),
+        };
+        let bytes = match sync::encrypt(&bundle, &key, &account.group) {
+            Ok(bytes) => bytes,
+            Err(error) => return self.dav_stored(Err(error), hashes, manual, changed),
+        };
+        let proxy = self.proxy.clone();
+        let file = sync::dav_file(&dav.url, &account.group);
+        std::thread::spawn(move || {
+            let result = sync::dav_put(&file, &dav.user, &pass, &bytes)
+                .map(|()| sync::dav_etag(&file, &dav.user, &pass).ok().flatten().unwrap_or_default());
+            let _ = proxy.send_event(UserEvent::DavStored(result, hashes, manual, changed));
+        });
+    }
+
+    fn dav_stored(&mut self, result: Result<String, String>, hashes: std::collections::BTreeMap<String, String>, manual: bool, changed: usize) {
+        self.dav_busy = false;
+        self.dirty = true;
+        let etag = match result {
+            Ok(etag) => etag,
+            Err(error) => {
+                self.sync_error = Some(format!("на диск не записалось: {error}"));
+                return;
+            }
+        };
         if let Some(account) = &mut self.account {
-            account.hashes = hashes;
+            account.bases.insert("webdav".into(), hashes);
+            if let Some(dav) = &mut account.webdav {
+                dav.etag = etag;
+                dav.synced = unix_now();
+            }
             account.synced = unix_now();
         }
         self.sync_error = None;
-        // своя запись не должна запускать синхронизацию снова
-        self.sync_mtime = std::fs::metadata(&file).and_then(|m| m.modified()).ok();
         self.open_received_tabs();
         self.save_account();
-        self.dirty = true;
         if manual {
             let text = if changed > 0 { format!("Синхронизировано: обновлено разделов — {changed}") } else { "Всё синхронизировано".to_string() };
             let _ = self.ui.evaluate_script(&format!("ui.toast({text:?})"));
         }
     }
 
-    /// Раз в 5 минут — если что-то поменялось здесь или файл в облаке обновился.
+    /// Раз в 30 секунд: телефону — знак, что есть новое; диску — раз в 5 минут,
+    /// а если файл на диске поменялся (проверка метки раз в минуту) — сразу.
     fn sync_tick(&mut self) {
         let Some(account) = &self.account else { return };
-        // файл в облаке поменялся (например, с телефона отправили вкладку) — сразу, не ждём 5 минут
-        let mtime = std::fs::metadata(sync::file_for(&account.folder, &account.name)).and_then(|m| m.modified()).ok();
-        if self.last_sync.elapsed() < SYNC_EVERY && (mtime.is_none() || mtime == self.sync_mtime) {
+        let phone_recent = account.peers.values().any(|p| unix_now().saturating_sub(p.seen) < 15 * 60);
+        let dav = account.webdav.clone();
+        let group = account.group.clone();
+        if phone_recent {
+            self.bump_lan_rev();
+        }
+        let Some(dav) = dav else { return };
+        if self.last_sync.elapsed() >= SYNC_EVERY {
+            return self.sync_now(false);
+        }
+        if self.dav_busy || self.dav_checked.elapsed() < Duration::from_secs(55) {
             return;
         }
-        self.sync_now(false);
+        let Some(pass) = passwords::unprotect(&dav.pass) else { return };
+        self.dav_checked = Instant::now();
+        self.dav_busy = true;
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let etag = sync::dav_etag(&sync::dav_file(&dav.url, &group), &dav.user, &pass).ok().flatten();
+            let _ = proxy.send_event(UserEvent::DavEtag(etag));
+        });
+    }
+
+    /// Поменялось то, что нужно телефону, — номер версии растёт, телефон придёт за данными.
+    fn bump_lan_rev(&mut self) {
+        let sections = self.collect_sections();
+        let phone: Vec<String> = ["bookmarks", "history", "passwords", "sent_tabs"]
+            .iter()
+            .map(|k| sections.get(*k).map(sync::fingerprint).unwrap_or_default())
+            .collect();
+        let fp = phone.join("|");
+        if fp != self.lan_fp {
+            self.lan_fp = fp;
+            self.lan_rev.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Сервер в домашней сети — один на всё время работы; номер связки можно менять на лету.
+    fn start_lan(&mut self) {
+        let Some(account) = &self.account else { return };
+        if let Ok(mut group) = self.lan_group.lock() {
+            *group = account.group.clone();
+        }
+        if self.lan_port.is_some() || self.inprivate {
+            return;
+        }
+        let proxy = Mutex::new(self.proxy.clone());
+        let lan = sync::Lan { group: self.lan_group.clone(), rev: self.lan_rev.clone() };
+        self.lan_port = sync::serve(sync::bind_address(), lan, move |body| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            proxy.lock().ok()?.send_event(UserEvent::LanSync(body, tx)).ok()?;
+            rx.recv_timeout(Duration::from_secs(20)).ok().flatten()
+        });
+    }
+
+    /// Включить синхронизацию: новая связка или вход в чужую по коду.
+    fn sync_enable(&mut self, pair: Option<sync::Pair>) {
+        let (group, key) = match &pair {
+            Some(pair) => (pair.g.clone(), base64_decode(&pair.k).unwrap_or_default()),
+            None => (sync::hex(&sync::random_bytes::<8>()), sync::random_bytes::<32>().to_vec()),
+        };
+        let Some(protected) = passwords::protect(&sync::hex(&key)) else {
+            let _ = self.ui.evaluate_script("ui.accountError('Windows не дала защитить ключ')");
+            return;
+        };
+        let webdav = pair.as_ref().and_then(|p| p.w.as_ref()).and_then(|w| {
+            Some(sync::WebDav { url: w.u.clone(), user: w.l.clone(), pass: passwords::protect(&w.p)?, ..Default::default() })
+        });
+        self.account = Some(sync::Account {
+            group,
+            key: protected,
+            device: sync::hex(&sync::random_bytes::<6>()),
+            webdav,
+            ..Default::default()
+        });
+        self.sync_error = None;
+        self.save_account();
+        self.start_lan();
+        self.send_pair();
+        self.dirty = true;
+        if pair.is_some() {
+            self.sync_now(true);
+        }
+    }
+
+    /// Код связки и его QR — для экрана «Подключить телефон».
+    fn send_pair(&mut self) {
+        let Some(account) = &self.account else { return };
+        let Some(key) = self.account_key() else { return };
+        let webdav = account.webdav.as_ref().and_then(|d| {
+            Some(sync::PairDav { u: d.url.clone(), l: d.user.clone(), p: passwords::unprotect(&d.pass)? })
+        });
+        let pair = sync::Pair {
+            g: account.group.clone(),
+            k: base64(&key),
+            n: std::env::var("COMPUTERNAME").unwrap_or_default(),
+            a: sync::local_ips(),
+            p: self.lan_port.unwrap_or(sync::LAN_PORT),
+            w: webdav,
+        };
+        let code = sync::pair_code(&pair);
+        let svg = sync::qr_svg(&code);
+        let _ = self.ui.evaluate_script(&format!("ui.setPair({})", json!({ "code": code, "svg": svg })));
+    }
+
+    /// Подключить диск: сначала проверить, что пускает и запись проходит.
+    fn dav_connect(&mut self, url: String, user: String, pass: String) {
+        let Some(account) = &self.account else { return };
+        let url = url.trim().to_string();
+        let fail = |app: &mut App, text: &str| {
+            let _ = app.ui.evaluate_script(&format!("ui.accountError({text:?})"));
+        };
+        if !url.starts_with("https://") && !url.starts_with("http://") {
+            return fail(self, "Адрес диска начинается с https://");
+        }
+        if user.trim().is_empty() || pass.is_empty() {
+            return fail(self, "Укажите логин и пароль приложения");
+        }
+        let Some(protected) = passwords::protect(&pass) else { return fail(self, "Windows не дала защитить пароль") };
+        let dav = sync::WebDav { url: url.clone(), user: user.trim().to_string(), pass: protected, ..Default::default() };
+        let file = sync::dav_file(&url, &account.group);
+        self.dav_busy = true;
+        self.dirty = true;
+        let proxy = self.proxy.clone();
+        let user = user.trim().to_string();
+        std::thread::spawn(move || {
+            let result = sync::dav_etag(&file, &user, &pass).map(|_| ());
+            let _ = proxy.send_event(UserEvent::DavChecked(result, dav));
+        });
     }
 
     /// Вкладки, которые отправили на этот компьютер: открываются в фоне, каждая один раз.
@@ -5234,14 +5514,15 @@ impl App {
         let _ = self.ui.evaluate_script(&format!("ui.toast({text:?})"));
     }
 
-    /// «Отправить на телефон»: вкладка уходит в облако и откроется на телефоне при синхронизации.
+    /// «Отправить на телефон»: телефон в той же сети заберёт её за несколько секунд,
+    /// не в сети — через диск.
     fn send_tab_to_phone(&mut self, id: u32) {
         let Some(tab) = self.tab(id).filter(|t| t.url.starts_with("http")) else { return };
         if self.account.is_none() {
-            let _ = self.ui.evaluate_script("ui.toast('Чтобы отправлять вкладки, войдите в аккаунт: Параметры → Аккаунт')");
+            let _ = self.ui.evaluate_script("ui.toast('Чтобы отправлять вкладки, включите синхронизацию: Параметры → Синхронизация')");
             return;
         }
-        let key: String = sync::random_bytes::<8>().iter().map(|b| format!("{b:02x}")).collect();
+        let key = sync::hex(&sync::random_bytes::<8>());
         let entry = json!({
             "id": key,
             "url": tab.url,
@@ -5252,6 +5533,7 @@ impl App {
         });
         self.sent_tabs.push(entry);
         self.store.write_named("sent_tabs.json", &self.sent_tabs);
+        self.bump_lan_rev();
         self.sync_now(false);
         let _ = self.ui.evaluate_script("ui.toast('Вкладка отправлена — откроется на телефоне')");
     }
@@ -5266,90 +5548,22 @@ impl App {
         }
     }
 
-    /// Вход или создание аккаунта. Ключ из пароля считается в фоне (это нарочно долго).
-    fn account_start(&mut self, create: bool, name: String, password: String, folder: String) {
-        let name = name.trim().to_string();
-        let folder = if folder.trim().is_empty() {
-            sync::default_folder()
-        } else {
-            Some(PathBuf::from(folder.trim()))
-        };
-        let fail = |app: &mut App, text: &str| {
-            let _ = app.ui.evaluate_script(&format!("ui.accountError({text:?})"));
-        };
-        let Some(folder) = folder else { return fail(self, "Выберите папку, которая синхронизируется: OneDrive, Яндекс Диск, Google Drive…") };
-        if name.chars().count() < 3 {
-            return fail(self, "Имя аккаунта — хотя бы 3 символа");
-        }
-        if password.chars().count() < 8 {
-            return fail(self, "Пароль — хотя бы 8 символов");
-        }
-        let file = sync::file_for(&folder, &name);
-        let existing = std::fs::read(&file).ok();
-        if create && existing.is_some() {
-            return fail(self, "Такой аккаунт в этой папке уже есть — нажмите «Войти»");
-        }
-        if !create && existing.is_none() {
-            return fail(self, "В этой папке нет такого аккаунта. Проверьте имя и папку или создайте аккаунт");
-        }
-        self.account_busy = true;
-        self.dirty = true;
-        let proxy = self.proxy.clone();
-        std::thread::spawn(move || {
-            let salt = match &existing {
-                Some(bytes) => sync::read_salt(bytes).unwrap_or_default(),
-                None => sync::random_bytes::<16>().to_vec(),
-            };
-            let key = sync::derive_key(&password, &salt);
-            let result = match &existing {
-                Some(bytes) => sync::decrypt(bytes, &key).map(|_| ()),
-                None => Ok(()),
-            };
-            let account = result.map(|()| sync::Account {
-                name,
-                folder,
-                key: key.iter().map(|b| format!("{b:02x}")).collect(),
-                salt: crate::base64(&salt),
-                synced: 0,
-                hashes: Default::default(),
-            });
-            let _ = proxy.send_event(UserEvent::AccountReady(account));
-        });
-    }
-
-    fn account_ready(&mut self, result: Result<sync::Account, String>) {
-        self.account_busy = false;
-        self.dirty = true;
-        match result {
-            Ok(mut account) => {
-                let Some(protected) = passwords::protect(&account.key) else {
-                    let _ = self.ui.evaluate_script("ui.accountError('Windows не дала защитить ключ')");
-                    return;
-                };
-                account.key = protected;
-                self.account = Some(account);
-                self.save_account();
-                self.sync_now(true);
-            }
-            Err(error) => {
-                let text = if error == "неверный пароль" { "Неверный пароль".to_string() } else { error };
-                let _ = self.ui.evaluate_script(&format!("ui.accountError({text:?})"));
-            }
-        }
-    }
-
     fn account_state(&self) -> Value {
-        let default = sync::default_folder().map(|p| p.display().to_string()).unwrap_or_default();
         match &self.account {
-            Some(a) => json!({
-                "name": a.name,
-                "folder": a.folder.display().to_string(),
-                "synced": a.synced,
-                "error": self.sync_error,
-                "busy": self.account_busy,
-                "defaultFolder": default,
-            }),
-            None => json!({ "busy": self.account_busy, "defaultFolder": default, "picked": self.account_folder }),
+            Some(a) => {
+                let peers: Vec<Value> = a.peers.values().map(|p| json!({ "name": p.name, "seen": p.seen })).collect();
+                json!({
+                    "on": true,
+                    "device": std::env::var("COMPUTERNAME").unwrap_or_default(),
+                    "synced": a.synced,
+                    "error": self.sync_error,
+                    "busy": self.dav_busy,
+                    "lan": self.lan_port,
+                    "peers": peers,
+                    "webdav": a.webdav.as_ref().map(|d| json!({ "url": d.url, "user": d.user, "synced": d.synced })),
+                })
+            }
+            None => json!({ "on": false, "busy": self.dav_busy }),
         }
     }
 }

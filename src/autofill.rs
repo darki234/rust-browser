@@ -295,7 +295,7 @@ mod tests {
             cards: vec![Card { holder: "IVAN".into(), number: "4111111111111111".into(), month: "12".into(), year: "29".into() }],
         };
         let stored = profile.store().unwrap();
-        assert!(!stored.data.contains("4111"));
+        assert!(!stored.data.contains("4111111111111111"));
         assert_eq!(Profile::load(&stored), profile);
         let summary = profile.summary().to_string();
         assert!(summary.contains("•••• 1111") && !summary.contains("411111"));

@@ -3,6 +3,7 @@
 // node e2e.mjs <порт> <file-URL тестовой страницы> <путь к exe>
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
+import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -382,23 +383,83 @@ await check('видеообои из галереи играют', async () => {
   await waitFor(async () => (await tabsCount()) === before);
 });
 
-await check('аккаунт: создание, неверный пароль, вход', async () => {
-  const cloud = mkdtempSync(join(tmpdir(), 'rb-cloud-'));
+await check('синхронизация: код связки, обмен с телефоном по сети, диск WebDAV', async () => {
+  let stage = 0;
   try {
-    const args = (password) => JSON.stringify({ name: 'e2e-user', password, folder: cloud });
-    await ui.evaluate(`send('account_create', ${args('e2e-sync-пароль')})`);
-    await waitFor(() => ui.evaluate("(S.account || {}).name === 'e2e-user' && (S.account || {}).synced > 0"), 60000, 300);
-    if (!existsSync(cloud)) throw new Error('нет папки');
-    await ui.evaluate("send('account_logout')");
-    await waitFor(() => ui.evaluate('!(S.account || {}).name'));
-    await ui.evaluate(`accountErrorText = ''; send('account_login', ${args('не тот пароль')})`);
-    await waitFor(() => ui.evaluate("accountErrorText === 'Неверный пароль'"), 60000, 300);
-    await ui.evaluate(`send('account_login', ${args('e2e-sync-пароль')})`);
-    await waitFor(() => ui.evaluate("(S.account || {}).name === 'e2e-user'"), 60000, 300);
-    await ui.evaluate("send('account_logout')");
+  await ui.evaluate("accountErrorText = ''; pairInfo = null; send('sync_enable')");
+  stage = 1; await waitFor(() => ui.evaluate("(S.account || {}).on === true"));
+  await ui.evaluate("send('sync_pair')");
+  stage = 2; const code = await waitFor(() => ui.evaluate("pairInfo && pairInfo.code"));
+  if (!code.startsWith('RBSYNC1.')) throw new Error('код связки: ' + code);
+  if (!(await ui.evaluate("pairInfo.svg.includes('<svg')"))) throw new Error('нет QR-кода');
+  const pair = JSON.parse(Buffer.from(code.slice(8).replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString());
+  const key = Buffer.from(pair.k, 'base64');
+  const seal = (bundle) => {
+    const nonce = randomBytes(12);
+    const cipher = createCipheriv('aes-256-gcm', key, nonce);
+    const data = Buffer.concat([cipher.update(JSON.stringify(bundle)), cipher.final(), cipher.getAuthTag()]);
+    return JSON.stringify({ format: 'rust-browser-sync/2', group: pair.g, nonce: nonce.toString('base64'), data: data.toString('base64') });
+  };
+  const open = (text) => {
+    const env = JSON.parse(text);
+    const raw = Buffer.from(env.data, 'base64');
+    const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(env.nonce, 'base64'));
+    decipher.setAuthTag(raw.subarray(raw.length - 16));
+    return JSON.parse(Buffer.concat([decipher.update(raw.subarray(0, raw.length - 16)), decipher.final()]).toString());
+  };
+  const base = `http://127.0.0.1:${pair.p}`;
+  // чужая связка — отказ
+  const stranger = await fetch(base + '/rb-rev', { headers: { 'X-RB-Group': 'not-our-group' } });
+  if (stranger.status !== 403) throw new Error('чужого пустили: ' + stranger.status);
+  // «телефон» приносит закладку и вкладку для компьютера
+  const before = await tabsCount();
+  const phone = {
+    sections: {
+      bookmarks: [{ url: 'https://e2e-phone.example/', title: 'С телефона' }],
+      sent_tabs: [{ id: 'e2e-tab-1', url: 'https://example.org/#from-phone', title: 'С телефона', from: 'E2E Phone', to: 'pc', time: Math.floor(Date.now() / 1000) }],
+    },
+    device: 'E2E Phone', id: 'e2ephone', time: Math.floor(Date.now() / 1000),
+  };
+  const answer = await fetch(base + '/rb-sync', { method: 'POST', headers: { 'X-RB-Group': pair.g }, body: seal(phone) });
+  if (answer.status !== 200) throw new Error('обмен: ' + answer.status);
+  const merged = open(await answer.text());
+  if (!merged.sections.bookmarks.some((b) => b.url === 'https://e2e-phone.example/')) throw new Error('закладка телефона не слилась');
+  if (merged.sections.history) throw new Error('телефону ушли лишние разделы');
+  stage = 3; await waitFor(async () => (await tabsCount()) === before + 1);
+  stage = 4; await waitFor(() => ui.evaluate("(S.account.peers || []).some((p) => p.name === 'E2E Phone')"));
+  // диск WebDAV: маленький сервер с паролем
+  const files = new Map();
+  const dav = createServer((req, res) => {
+    if (req.headers.authorization !== 'Basic ' + Buffer.from('e2e:секрет').toString('base64')) { res.writeHead(401); return res.end(); }
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      if (req.method === 'PUT') { files.set(req.url, Buffer.concat(chunks)); res.writeHead(201); return res.end(); }
+      const file = files.get(req.url);
+      if (!file) { res.writeHead(404); return res.end(); }
+      res.writeHead(200, { ETag: '"' + file.length + '"', 'Content-Length': file.length });
+      res.end(req.method === 'HEAD' ? undefined : file);
+    });
+  });
+  await new Promise((r) => dav.listen(0, '127.0.0.1', r));
+  try {
+    const url = `http://127.0.0.1:${dav.address().port}/dav`;
+    await ui.evaluate(`accountErrorText = ''; send('sync_webdav', { url: ${JSON.stringify(url)}, user: 'e2e', pass: 'неверный' })`);
+    stage = 5; await waitFor(() => ui.evaluate("accountErrorText.includes('логин')"), 15000);
+    await ui.evaluate(`send('sync_webdav', { url: ${JSON.stringify(url)}, user: 'e2e', pass: 'секрет' })`);
+    stage = 6; await waitFor(() => ui.evaluate("!!(S.account.webdav && S.account.webdav.synced)"), 20000, 300);
+    const stored = files.get(`/dav/rust-browser-${pair.g}.rbsync`);
+    if (!stored) throw new Error('на диск ничего не записалось');
+    if (stored.toString().includes('e2e-phone')) throw new Error('на диске открытый текст');
+    const onDisk = open(stored.toString());
+    if (!onDisk.sections.bookmarks.some((b) => b.url === 'https://e2e-phone.example/')) throw new Error('на диске нет закладки');
+    if (!onDisk.sections.history) throw new Error('на диске нет журнала');
   } finally {
-    rmSync(cloud, { recursive: true, force: true });
+    dav.close();
+    await ui.evaluate("send('account_logout'); send('close_tab', { id: S.tabs[S.tabs.length - 1].id })");
   }
+  await waitFor(() => ui.evaluate('!(S.account || {}).on'));
+  } catch (e) { throw new Error(`шаг ${stage}: ${e.message}`); }
 });
 
 await check('uBlock Origin Lite установлен и блокирует рекламу', async () => {

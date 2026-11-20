@@ -20,6 +20,8 @@ $data = Join-Path $env:TEMP ("rust-browser-e2e-" + [guid]::NewGuid().ToString('N
 New-Item -ItemType Directory $data | Out-Null
 '{"restore_session":false}' | Set-Content "$data\settings.json" -Encoding Ascii
 $env:RUST_BROWSER_DATA = $data
+# сервер синхронизации — только на этом компьютере (без запроса брандмауэра)
+$env:RB_LAN_BIND = '127.0.0.1'
 $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=$Port --disable-features=CalculateNativeWinOcclusion"
 
 Add-Type @'

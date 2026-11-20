@@ -1988,6 +1988,18 @@ body.glass #hubnav, body.glass .card { background: var(--glass-surface-2); }
 .acc-synced svg { color: var(--accent); }
 .acc-note { padding-bottom: 14px; line-height: 1.5; }
 .acc-intro { padding: 2px 18px 10px; line-height: 1.5; }
+.sync-pair { display: flex; gap: 22px; align-items: flex-start; padding: 6px 18px 18px; flex-wrap: wrap; }
+.sync-qr { flex: none; width: 200px; height: 200px; padding: 8px; border-radius: 14px; background: #fff; box-shadow: var(--shadow-sm); }
+.sync-qr svg { width: 100%; height: 100%; display: block; }
+.sync-steps { flex: 1; min-width: 240px; display: flex; flex-direction: column; gap: 10px; }
+.sync-steps ol { margin: 0; padding-left: 20px; line-height: 1.8; }
+.sync-codebar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.sync-code { padding: 6px 10px; border-radius: 8px; background: var(--hover); color: var(--muted); font-size: 12px; }
+.sync-peers { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+.sync-peer { display: flex; align-items: center; gap: 8px; }
+.sync-peer svg { color: var(--accent); }
+.sync-peer small, .sync-none { color: var(--muted); }
+.acc-avatar svg { color: #fff; }
 .acc-error { margin: 4px 18px; padding: 8px 12px; border-radius: 10px; background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
 
 .fav.lg img { border-radius: inherit; }

@@ -25,6 +25,8 @@ const ICONS = {
   forward: '<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>',
   reload: '<path d="M21 12a9 9 0 1 1-2.64-6.36L21 8"/><path d="M21 3v5h-5"/>',
   x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+  sync: '<path d="M21 12a9 9 0 0 1-15.5 6.2L3 16"/><path d="M3 21v-5h5"/><path d="M3 12a9 9 0 0 1 15.5-6.2L21 8"/><path d="M21 3v5h-5"/>',
+  phone: '<rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/>',
   plus: '<path d="M12 5v14"/><path d="M5 12h14"/>',
   minus: '<path d="M5 12h14"/>',
   star: '<path d="m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01z"/>',
@@ -2117,7 +2119,7 @@ function glassSetting() {
 }
 
 const SETTINGS_CATS = [
-  ['account', 'Аккаунт', () => accountCards()],
+  ['account', 'Синхронизация', () => accountCards()],
   ['look', 'Оформление', () => [
     h('div', { class: 'card' }, h('h2', {}, 'Тема и цвет'),
       setting('Тема', 'Как в Windows, светлая, тёмная или AMOLED — чистый чёрный, бережёт заряд на OLED-экранах',
@@ -2321,7 +2323,7 @@ function renderHubList(animate) {
   }
   if (hubSection === 'settings') {
     // вход и выход из аккаунта меняют сам вид раздела, а не только значения
-    const key = 'settings|' + settingsCat + '|' + el.hubq.value + '|' + ((S.account || {}).name || '');
+    const key = 'settings|' + settingsCat + '|' + el.hubq.value + '|' + ((S.account || {}).on ? 'on' : 'off');
     if (hubKey === key) {
       settingsUpdaters.forEach((update) => update());
       return;
@@ -2449,6 +2451,7 @@ window.ui = {
   pageScroll,
   iconsUpdated: () => { iconsVersion++; tilesKey = null; renderStart(); },
   accountError,
+  setPair,
   extPopupBox,
   extensionInstalled: (name) => toast(`Расширение «${name}» установлено — оно в меню «пазла» на панели`),
   passwordRevealed,
@@ -2706,13 +2709,18 @@ function extensionsCards() {
 
 // ---------- аккаунт ----------
 
-let accountMode = 'login';
 let accountErrorText = '';
+let pairInfo = null; // { code, svg } — код связки и его QR
 
 function accountError(text) {
   accountErrorText = text;
   settingsUpdaters.forEach((update) => update());
   toast(text);
+}
+
+function setPair(info) {
+  pairInfo = info;
+  settingsUpdaters.forEach((update) => update());
 }
 
 function timeAgo(seconds) {
@@ -2731,67 +2739,112 @@ const SYNCED = [
 
 function accountCards() {
   const a = S.account || {};
-  if (a.name) {
-    const status = h('small', {});
+  if (!a.on) {
+    const code = h('input', { type: 'text', class: 'field', placeholder: 'RBSYNC1.…', spellcheck: 'false', autocomplete: 'off' });
     const error = h('div', { class: 'acc-error' });
     settingsUpdaters.push(() => {
-      const acc = S.account || {};
-      status.textContent = `Синхронизация: ${timeAgo(acc.synced)} · папка ${acc.folder}`;
-      error.textContent = acc.error ? `Ошибка: ${acc.error}` : '';
-      error.style.display = acc.error ? '' : 'none';
+      error.textContent = accountErrorText;
+      error.style.display = accountErrorText ? '' : 'none';
     });
     return [
-      h('div', { class: 'card' },
-        h('div', { class: 'acc-head' },
-          h('span', { class: 'acc-avatar' }, a.name.charAt(0).toUpperCase()),
-          h('div', { class: 'acc-who' }, h('b', {}, a.name), status),
-          h('button', { class: 'text-btn primary', onclick: () => send('account_sync') }, 'Синхронизировать'),
-          confirmButton('Выйти', 'Точно выйти?', () => send('account_logout'))),
-        error,
+      h('div', { class: 'card' }, h('h2', {}, 'Синхронизация с телефоном и компьютерами'),
+        h('div', { class: 'ext-hint acc-intro' },
+          'Пароли, журнал, избранное и отправка вкладок — без аккаунтов и паролей. Телефон подключается один раз по QR-коду. Дома данные идут напрямую по Wi‑Fi за секунды, вне дома — через ваш диск WebDAV (Яндекс Диск, Nextcloud). Всё зашифровано ключом, который знают только ваши устройства'),
         h('div', { class: 'acc-synced' }, ...SYNCED.map(([name, text]) => h('span', {}, icon(name, 14), text))),
-        h('div', { class: 'ext-hint acc-note' },
-          'Данные зашифрованы вашим паролем ещё на этом компьютере (AES-256). В облачной папке лежит только шифр. Синхронизация — при запуске, раз в 5 минут и при закрытии. Чтобы войти на другом компьютере, откройте там ту же облачную папку и войдите с этим именем и паролем')),
+        h('div', { class: 'set' }, h('div', { class: 'label' }, 'Это первое устройство', h('small', {}, 'Создать связку и показать QR-код для телефона')),
+          h('div', { class: 'controls' }, h('button', { class: 'text-btn primary', onclick: () => { accountErrorText = ''; send('sync_enable'); } }, 'Включить синхронизацию'))),
+        h('div', { class: 'set' }, h('div', { class: 'label' }, 'Уже есть на другом компьютере', h('small', {}, 'Вставьте код связки: там Параметры → Синхронизация → «Скопировать код»')),
+          h('div', { class: 'controls' }, code,
+            h('button', { class: 'text-btn outline', onclick: () => { accountErrorText = ''; send('sync_join', { code: code.value }); } }, 'Подключить'))),
+        error),
     ];
   }
-  const name = h('input', { type: 'text', class: 'field', placeholder: 'например, misha', spellcheck: 'false', autocomplete: 'off' });
-  const pass = h('input', { type: 'password', class: 'field', placeholder: 'не меньше 8 символов', autocomplete: 'new-password' });
-  const pass2 = h('input', { type: 'password', class: 'field', placeholder: 'ещё раз', autocomplete: 'new-password' });
-  const folderText = h('small', {});
-  const repeatRow = setting('Пароль ещё раз', 'Пароль не восстановить: без него данные в облаке не расшифровать никому, даже нам', pass2);
-  const modeSeg = segmented([['login', 'Войти'], ['create', 'Создать аккаунт']], () => accountMode, (value) => {
-    accountMode = value; accountErrorText = ''; settingsUpdaters.forEach((u) => u());
-  });
+  // ---- синхронизация включена ----
+  if (!pairInfo) send('sync_pair');
+  const status = h('small', {});
   const error = h('div', { class: 'acc-error' });
-  const go = h('button', { class: 'text-btn primary', onclick: () => {
-    if (accountMode === 'create' && pass.value !== pass2.value) return accountError('Пароли не совпадают');
-    accountErrorText = '';
-    send(accountMode === 'create' ? 'account_create' : 'account_login',
-      { name: name.value, password: pass.value, folder: (S.account || {}).picked || '' });
-  } });
-  [name, pass, pass2].forEach((input) => input.addEventListener('keydown', (e) => { if (e.key === 'Enter') go.click(); }));
+  const peers = h('div', { class: 'sync-peers' });
+  const qr = h('div', { class: 'sync-qr' });
+  const codeText = h('code', { class: 'sync-code' });
   settingsUpdaters.push(() => {
     const acc = S.account || {};
-    const folder = acc.picked || acc.defaultFolder;
-    folderText.textContent = folder ? folder : 'Папка не выбрана';
-    repeatRow.style.display = accountMode === 'create' ? '' : 'none';
-    go.textContent = acc.busy ? 'Проверяю…' : accountMode === 'create' ? 'Создать и синхронизировать' : 'Войти';
-    go.disabled = !!acc.busy;
-    error.textContent = accountErrorText;
-    error.style.display = accountErrorText ? '' : 'none';
+    status.textContent = `${acc.device || 'Этот компьютер'} · синхронизация: ${timeAgo(acc.synced)}`;
+    const text = acc.error ? `Ошибка: ${acc.error}` : accountErrorText;
+    error.textContent = text;
+    error.style.display = text ? '' : 'none';
+    const list = acc.peers || [];
+    const key = JSON.stringify(list.map((p) => [p.name, Math.round((Date.now() / 1000 - p.seen) / 60)]));
+    if (peers.dataset.key !== key) {
+      peers.dataset.key = key;
+      peers.replaceChildren(...(list.length
+        ? list.map((p) => h('div', { class: 'sync-peer' }, icon('phone', 16),
+          h('b', {}, p.name), h('small', {}, Date.now() / 1000 - p.seen < 120 ? 'на связи по Wi‑Fi' : `по Wi‑Fi ${timeAgo(p.seen)}`)))
+        : [h('small', { class: 'sync-none' }, 'Телефон ещё не подключали')]));
+    }
+    if (pairInfo && qr.dataset.code !== pairInfo.code) {
+      qr.dataset.code = pairInfo.code;
+      qr.innerHTML = pairInfo.svg;
+      codeText.textContent = pairInfo.code.slice(0, 28) + '…';
+    }
   });
+  const copyCode = () => {
+    if (!pairInfo) return;
+    navigator.clipboard.writeText(pairInfo.code).then(() => toast('Код связки скопирован — не пересылайте его посторонним'));
+  };
   return [
-    h('div', { class: 'card' }, h('h2', {}, 'Аккаунт Rust Browser'),
-      h('div', { class: 'ext-hint acc-intro' },
-        'Пароли, журнал, избранное, расширения, параметры и темы — одинаковые на всех ваших компьютерах. Всё шифруется вашим паролем и хранится в вашей же облачной папке (OneDrive, Яндекс Диск, Google Drive): своих серверов у браузера нет, и прочитать данные не сможет никто, кроме вас'),
-      setting('', '', modeSeg),
-      setting('Имя аккаунта', 'Любое: почта или ник', name),
-      setting('Пароль', 'Шифрует данные. Используйте надёжный и нигде больше не повторяйте', pass),
-      repeatRow,
-      h('div', { class: 'set' }, h('div', { class: 'label' }, 'Облачная папка', folderText),
-        h('div', { class: 'controls' }, h('button', { class: 'text-btn outline', onclick: () => send('account_pick_folder') }, 'Выбрать'))),
+    h('div', { class: 'card' },
+      h('div', { class: 'acc-head' },
+        h('span', { class: 'acc-avatar' }, icon('sync', 22)),
+        h('div', { class: 'acc-who' }, h('b', {}, 'Синхронизация включена'), status),
+        h('button', { class: 'text-btn primary', onclick: () => send('account_sync') }, 'Синхронизировать'),
+        confirmButton('Выключить', 'Точно выключить?', () => { pairInfo = null; send('account_logout'); })),
       error,
-      h('div', { class: 'set' }, h('div', { class: 'label' }), h('div', { class: 'controls' }, go))),
+      h('div', { class: 'acc-synced' }, ...SYNCED.map(([name, text]) => h('span', {}, icon(name, 14), text)))),
+    h('div', { class: 'card' }, h('h2', {}, 'Подключить телефон'),
+      h('div', { class: 'sync-pair' }, qr,
+        h('div', { class: 'sync-steps' },
+          h('ol', {},
+            h('li', {}, 'Откройте Rust Browser на телефоне'),
+            h('li', {}, 'Меню → Синхронизация → «Сканировать QR-код»'),
+            h('li', {}, 'Наведите камеру на этот код')),
+          h('div', { class: 'ext-hint' }, 'Код — это ключ к вашим данным: не показывайте его посторонним. Другой компьютер подключается тем же кодом, вставленным в его параметры'),
+          h('div', { class: 'sync-codebar' }, codeText,
+            h('button', { class: 'text-btn outline', onclick: copyCode }, 'Скопировать код')),
+          peers))),
+    davCard(a),
   ];
+}
+
+function davCard(a) {
+  const dav = a.webdav;
+  if (dav) {
+    const status = h('small', {});
+    settingsUpdaters.push(() => {
+      const d = (S.account || {}).webdav || {};
+      status.textContent = `${d.user} · ${d.url} · ${timeAgo(d.synced)}`;
+    });
+    return h('div', { class: 'card' }, h('h2', {}, 'Через интернет: диск WebDAV'),
+      h('div', { class: 'set' }, h('div', { class: 'label' }, 'Диск подключён', status),
+        h('div', { class: 'controls' }, confirmButton('Отключить', 'Отключить диск?', () => send('sync_webdav_off')))),
+      h('div', { class: 'ext-hint acc-note' }, 'Когда телефон не в домашней сети или компьютер выключен, данные идут через зашифрованный файл на диске. Новые телефоны получают доступ к диску прямо из QR-кода'));
+  }
+  const url = h('input', { type: 'text', class: 'field', value: 'https://webdav.yandex.ru', spellcheck: 'false' });
+  const user = h('input', { type: 'text', class: 'field', placeholder: 'логин Яндекса', spellcheck: 'false', autocomplete: 'off' });
+  const pass = h('input', { type: 'password', class: 'field', placeholder: 'пароль приложения', autocomplete: 'off' });
+  const go = h('button', { class: 'text-btn primary', onclick: () => { accountErrorText = ''; send('sync_webdav', { url: url.value, user: user.value, pass: pass.value }); } }, 'Подключить');
+  settingsUpdaters.push(() => {
+    const busy = !!(S.account || {}).busy;
+    go.textContent = busy ? 'Проверяю…' : 'Подключить';
+    go.disabled = busy;
+  });
+  [url, user, pass].forEach((input) => input.addEventListener('keydown', (e) => { if (e.key === 'Enter') go.click(); }));
+  return h('div', { class: 'card' }, h('h2', {}, 'Через интернет: диск WebDAV'),
+    h('div', { class: 'ext-hint acc-intro' },
+      'Необязательно. Нужен, чтобы данные доходили, когда телефон не дома. Для Яндекс Диска создайте пароль приложения: id.yandex.ru → Безопасность → Пароли приложений → «Файлы»'),
+    setting('Адрес', 'Яндекс Диск: https://webdav.yandex.ru', url),
+    setting('Логин', '', user),
+    setting('Пароль приложения', 'Хранится зашифрованным на этом компьютере', pass),
+    h('div', { class: 'set' }, h('div', { class: 'label' }), h('div', { class: 'controls' }, go)));
 }
 
 
