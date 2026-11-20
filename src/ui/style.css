@@ -1530,13 +1530,16 @@ body:is(.bar-compact, .bar-floating, .bar-vertical, .bar-island) #chrome::after 
 /* «Компакт»: навигация и вкладки в одной строке */
 body.bar-compact #chrome {
   display: grid;
-  /* --tool-need (из app.js): кнопки + место под строку адреса — вкладки уступают ей */
-  grid-template-columns: minmax(380px, max(46%, min(var(--tool-need, 0px), 68%))) minmax(0, 1fr);
+  /* кнопки и короткая строка адреса — сколько им нужно, остальное вкладкам */
+  grid-template-columns: auto minmax(0, 1fr);
   grid-template-areas: "tool title" "fav fav" "find find";
   background: radial-gradient(120% 220% at 0% 0%, var(--frame-glow), transparent 55%), var(--frame);
   border-bottom: 1px solid var(--border);
 }
 body.bar-compact #toolbar { grid-area: tool; height: 46px; background: transparent; }
+/* строка адреса не тянется: короткая, а при вводе раскрывается */
+body.bar-compact #urlbox { flex: 0 0 auto; width: clamp(200px, 22vw, 340px); transition: width .28s var(--ease), background .15s; }
+body.bar-compact #urlbox:focus-within { width: clamp(300px, calc(100vw - 860px), 600px); }
 body.bar-compact #titlebar { grid-area: title; height: 46px; align-items: center; background: transparent; padding-left: 2px; }
 body.bar-compact #tabs { height: 34px; align-items: center; padding: 0 6px; }
 /* много вкладок в одной строке — листаются колесом, а не наезжают на кнопки окна */

@@ -3595,13 +3595,10 @@ function urlRoom() {
 
 function measureUrl() {
   if (urlbox.classList.contains('expanded')) return;
-  // в одной строке с вкладками: колонка панели растёт за счёт вкладок, пока строке не хватит ~260px
-  // (адрес во вкладке — строки нет, место под неё не держим)
-  if (document.body.classList.contains('bar-compact') && !urlInTab()) {
-    el.chrome.style.setProperty('--tool-need', Math.round(toolbarEl.clientWidth - urlRoom() + 260) + 'px');
-  }
   document.body.classList.toggle('url-in-tab', urlInTab());
-  const collapse = urlInTab() || (!vertical() && toolbarEl.clientWidth > 0 && urlRoom() < 200);
+  // в «Компакте» строка своей ширины (короткая, раскрывается при вводе) — по месту её не сворачиваем
+  const compact = document.body.classList.contains('bar-compact');
+  const collapse = urlInTab() || (!vertical() && !compact && toolbarEl.clientWidth > 0 && urlRoom() < 200);
   document.body.classList.toggle('url-collapsed', collapse);
 }
 // размер острова поменялся (ширина в параметрах, окно) — пересчитать и строку, и форму окна
