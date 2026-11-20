@@ -67,13 +67,38 @@ const ENGINES: [(&str, &str, &str); 4] = [
 /// Без него при переключении вкладок мелькает белое окно.
 fn backdrop_color(dark: bool) -> (u8, u8, u8, u8) {
     if !dark {
-        (255, 255, 255, 255)
-    } else if AMOLED.load(Ordering::Relaxed) {
-        (0, 0, 0, 255)
-    } else {
-        (18, 19, 24, 255)
+        return (255, 255, 255, 255);
+    }
+    let rgb = THEME_BACKDROP.load(Ordering::Relaxed);
+    ((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8, 255)
+}
+
+/// Темы оформления. Кроме «как в системе», светлой, тёмной и AMOLED — плоские тёмные
+/// палитры в стиле Lumi (Lumi, Ember, Moss, Steel) и Ryoku: без градиентов, с тонкими рамками.
+const THEMES: [&str; 9] = ["system", "light", "dark", "amoled", "lumi", "ember", "moss", "steel", "ryoku"];
+
+/// Тёмная ли тема: Some(true/false) или None — «как в системе».
+fn theme_dark(theme: &str) -> Option<bool> {
+    match theme {
+        "light" => Some(false),
+        "system" | "" => None,
+        _ => Some(true),
     }
 }
+
+/// Фон окна под страницами для темы (0xRRGGBB) — совпадает с фоном интерфейса.
+fn theme_backdrop(theme: &str) -> u32 {
+    match theme {
+        "amoled" | "lumi" | "ryoku" => 0x000000,
+        "ember" => 0x0e0b0a,
+        "moss" => 0x0a100e,
+        "steel" => 0x0c0e12,
+        _ => 0x121318,
+    }
+}
+
+/// Фон под страницами для текущей тёмной темы.
+static THEME_BACKDROP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x121318);
 
 /// Тема AMOLED: под страницами чистый чёрный, а не тёмно-серый.
 static AMOLED: AtomicBool = AtomicBool::new(false);
@@ -525,11 +550,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build(&event_loop)?;
 
     let store = Store::load(data_dir());
-    let dark = match store.settings.theme.as_str() {
-        "dark" | "amoled" => true,
-        "light" => false,
-        _ => window.theme() == WindowTheme::Dark,
-    };
+    let dark = theme_dark(&store.settings.theme).unwrap_or(window.theme() == WindowTheme::Dark);
     let keys = Arc::new(KeyState::default());
     apply_shortcuts(&keys, &store.settings.shortcuts);
 
@@ -762,12 +783,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn window_dark_hint() -> bool {
     let settings: store::Settings = Store::load(data_dir()).settings;
     AMOLED.store(settings.theme == "amoled", Ordering::Relaxed);
+    THEME_BACKDROP.store(theme_backdrop(&settings.theme), Ordering::Relaxed);
     LEFT_CLICK_BACKGROUND.store(settings.left_click_background, Ordering::Relaxed);
-    match settings.theme.as_str() {
-        "dark" | "amoled" => true,
-        "light" => false,
-        _ => system::system_prefers_dark(),
-    }
+    theme_dark(&settings.theme).unwrap_or_else(system::system_prefers_dark)
 }
 
 /// Папка с закладками, историей, настройками и профилем.
@@ -1377,18 +1395,14 @@ impl App {
     // ---------- оформление ----------
 
     fn dark(&self) -> bool {
-        match self.store.settings.theme.as_str() {
-            "dark" | "amoled" => true,
-            "light" => false,
-            _ => self.window.theme() == WindowTheme::Dark,
-        }
+        theme_dark(&self.store.settings.theme).unwrap_or(self.window.theme() == WindowTheme::Dark)
     }
 
     fn page_theme(&self) -> Theme {
-        match self.store.settings.theme.as_str() {
-            "dark" | "amoled" => Theme::Dark,
-            "light" => Theme::Light,
-            _ => Theme::Auto,
+        match theme_dark(&self.store.settings.theme) {
+            Some(true) => Theme::Dark,
+            Some(false) => Theme::Light,
+            None => Theme::Auto,
         }
     }
 
@@ -2454,9 +2468,16 @@ impl App {
         let settings = &mut self.store.settings;
         match key {
             "theme" => {
-                if let Some(theme @ ("system" | "light" | "dark" | "amoled")) = value.as_str() {
+                if let Some(theme) = value.as_str().filter(|t| THEMES.contains(t)) {
                     settings.theme = theme.to_string();
                     AMOLED.store(theme == "amoled", Ordering::Relaxed);
+                    THEME_BACKDROP.store(theme_backdrop(theme), Ordering::Relaxed);
+                    // плоские темы — и стартовая без цветных разводов
+                    if matches!(theme, "lumi" | "ember" | "moss" | "steel" | "ryoku")
+                        && matches!(settings.wallpaper.as_str(), "aurora" | "sunset" | "ocean" | "forest" | "night" | "flow")
+                    {
+                        settings.wallpaper = "mono".into();
+                    }
                     self.store.save_settings();
                     self.apply_theme();
                 }
@@ -5230,6 +5251,7 @@ impl App {
                     self.store.settings = settings;
                     self.store.save_settings();
                     AMOLED.store(self.store.settings.theme == "amoled", Ordering::Relaxed);
+                    THEME_BACKDROP.store(theme_backdrop(&self.store.settings.theme), Ordering::Relaxed);
                     LEFT_CLICK_BACKGROUND.store(self.store.settings.left_click_background, Ordering::Relaxed);
                     self.apply_theme();
                     self.sent.clear();

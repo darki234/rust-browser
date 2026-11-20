@@ -255,7 +255,11 @@ function applyAppearance(s) {
   if (key === appearanceKey) return;
   appearanceKey = key;
   const root = document.documentElement.style;
-  if (s.accent) {
+  // плоские темы приносят свою палитру — свой цвет браузера их не перекрашивает
+  const palette = PALETTE_THEMES.some(([id]) => id === s.theme) ? s.theme : '';
+  if (palette) document.documentElement.dataset.palette = palette;
+  else delete document.documentElement.dataset.palette;
+  if (s.accent && !palette) {
     // из одного цвета — вся палитра: оттенок для тёмной и светлой темы и два соседних для узоров
     const [h, sat, l] = hexToHsl(s.accent);
     const light = S.dark ? Math.max(l, 0.68) : Math.min(Math.max(l, 0.42), 0.56);
@@ -285,6 +289,41 @@ function applyAppearance(s) {
   // стекло: непрозрачность панелей 100 % − выбранная прозрачность
   body.toggle('glass', s.glass > 0);
   root.setProperty('--glass-a', (100 - (s.glass || 0)) + '%');
+}
+
+// Плоские тёмные темы: цвета взяты из приложения Lumi (Lumi, Ember, Moss, Steel) и из Ryoku.
+// [id, название, подпись, фон, панель, линия, текст, акцент]
+const PALETTE_THEMES = [
+  ['lumi', 'Lumi', 'Чёрная, белый акцент', '#000000', '#121212', '#2c2c2e', '#f5f5f7', '#ffffff'],
+  ['ember', 'Ember', 'Тёплая, угольная', '#0e0b0a', '#1a1412', '#3a2a24', '#f5ebe6', '#e07040'],
+  ['moss', 'Moss', 'Глубокий зелёный', '#0a100e', '#121a17', '#2a3a32', '#e6f2ec', '#1db954'],
+  ['steel', 'Steel', 'Сталь и синева', '#0c0e12', '#151820', '#2c3344', '#eef1f6', '#6b8cae'],
+  ['ryoku', 'Ryoku', 'Бумага и тушь', '#000000', '#0a0a0a', 'rgba(205,196,186,.26)', '#cdc4ba', '#e2342a'],
+];
+
+/** Настройки цвета не действуют на плоские темы (у них своя палитра) — там их прячем. */
+function paletteFree(nodes) {
+  settingsUpdaters.push(() => {
+    const palette = PALETTE_THEMES.some(([id]) => id === S.settings.theme);
+    nodes.forEach((node) => { node.style.display = palette ? 'none' : ''; });
+  });
+  return nodes;
+}
+
+function themeCards() {
+  const cards = PALETTE_THEMES.map(([id, name, note, bg, bar, line, text, accent]) => {
+    const card = h('button', {
+      class: 'theme-card', title: name,
+      style: `--tp-bg:${bg};--tp-bar:${bar};--tp-line:${line};--tp-text:${text};--tp-accent:${accent}`,
+      onclick: () => set('theme', id),
+    }, h('span', { class: 'tp' }, h('i'), h('b'), h('s'), h('u')), h('span', { class: 'tn' }, name), h('span', { class: 'td' }, note));
+    settingsUpdaters.push(() => card.classList.toggle('on', S.settings.theme === id));
+    return card;
+  });
+  return h('div', {},
+    h('div', { class: 'set' }, h('div', { class: 'label' }, 'Плоские темы',
+      h('small', {}, 'Без градиентов: ровный цвет, тонкие линии вместо теней. Четыре — как в Lumi, одна — как в Ryoku'))),
+    h('div', { class: 'themes' }, ...cards));
 }
 
 const PALETTE = [
@@ -2216,9 +2255,10 @@ const SETTINGS_CATS = [
       setting('Тема', 'Как в Windows, светлая, тёмная или AMOLED — чистый чёрный, бережёт заряд на OLED-экранах',
         segmented([['system', 'Как в системе'], ['light', 'Светлая'], ['dark', 'Тёмная'], ['amoled', 'AMOLED']],
           () => S.settings.theme, (value) => set('theme', value))),
-      colorSetting(),
-      setting('Подкрасить рамку окна', 'Полоса вкладок и панель слегка окрашиваются в цвет браузера',
-        toggle(() => S.settings.tintFrame, (value) => set('tint_frame', value))),
+      themeCards(),
+      ...paletteFree([colorSetting(),
+        setting('Подкрасить рамку окна', 'Полоса вкладок и панель слегка окрашиваются в цвет браузера',
+          toggle(() => S.settings.tintFrame, (value) => set('tint_frame', value)))]),
       glassSetting(),
       setting('Тёмная тема для всех сайтов', 'Светлые сайты становятся тёмными, картинки и видео не меняются. Для одного сайта — меню «⋯» → «Тёмная тема для этого сайта»',
         toggle(() => S.settings.darkAll, (value) => set('dark_all', value))),

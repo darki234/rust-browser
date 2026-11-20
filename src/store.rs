@@ -175,7 +175,7 @@ impl Default for Settings {
             proxy_port: 0,
             sidebar_open: false,
             sidebar_app: "notes".to_string(),
-            wallpaper: "aurora".to_string(),
+            wallpaper: "mono".to_string(),
             wallpaper_dim: 35,
             wallpaper_version: 0,
             ubol_version: String::new(),

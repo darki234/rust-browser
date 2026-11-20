@@ -156,7 +156,6 @@ body.maximized .rz { display: none; }
   padding-left: 8px;
   /* мягкий цветной отлив слева, как подсветка от значка */
   background:
-    radial-gradient(120% 220% at 0% 0%, var(--frame-glow), transparent 55%),
     var(--frame);
   transition: background .3s;
 }
@@ -653,7 +652,7 @@ body.finding #findbar { display: flex; animation: slide-down .22s var(--ease); }
   width: 38%;
   height: 100%;
   border-radius: 2px;
-  background: linear-gradient(90deg, transparent, var(--accent), var(--accent-2), transparent);
+  background: var(--accent);
   animation: slide 1.15s ease-in-out infinite;
 }
 @keyframes slide {
@@ -799,7 +798,7 @@ body[data-wall="flow"] #start { background: #0b0c12; }
 
 /* «Волны»: три слоя волн бегут с разной скоростью */
 #waves { position: absolute; inset: 0; display: none; overflow: hidden; pointer-events: none;
-  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 14%, var(--bg)), var(--bg) 70%); }
+  background: var(--bg); }
 body[data-wall="waves"] #waves { display: block; }
 #waves svg { position: absolute; left: 0; bottom: 0; width: 300%; height: 34%; will-change: transform; animation: wave 22s linear infinite; }
 #waves svg:nth-child(1) { fill: color-mix(in srgb, var(--accent) 45%, transparent); height: 40%; animation-duration: 26s; }
@@ -1280,7 +1279,7 @@ body.tiles-l #tiles { width: min(1000px, 100%); }
   height: 100%;
   width: var(--pct, 0%);
   border-radius: 2px;
-  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  background: var(--accent);
   transition: width .3s;
 }
 .bar.unknown i { width: 35%; animation: slide 1.1s ease-in-out infinite; }
@@ -1533,7 +1532,7 @@ body.bar-compact #chrome {
   /* кнопки и короткая строка адреса — сколько им нужно, остальное вкладкам */
   grid-template-columns: auto minmax(0, 1fr);
   grid-template-areas: "tool title" "fav fav" "find find";
-  background: radial-gradient(120% 220% at 0% 0%, var(--frame-glow), transparent 55%), var(--frame);
+  background: var(--frame);
   border-bottom: 1px solid var(--border);
 }
 body.bar-compact #toolbar { grid-area: tool; height: 46px; background: transparent; }
@@ -1566,7 +1565,7 @@ body.bar-compact.tint #toolbar { background: transparent; }
 /* «Плавающая»: панель навигации парит над страницей со скруглёнными краями */
 body.bar-floating #chrome {
   padding-bottom: 8px;
-  background: radial-gradient(120% 220% at 0% 0%, var(--frame-glow), transparent 55%), var(--frame);
+  background: var(--frame);
 }
 body.bar-floating #titlebar { height: 44px; align-items: center; background: transparent; }
 body.bar-floating #tabs { height: 34px; align-items: center; }
@@ -1595,7 +1594,7 @@ body.bar-vertical #chrome {
   grid-template-columns: minmax(0, 1fr) auto;
   grid-template-rows: 38px auto auto minmax(0, 1fr);
   grid-template-areas: "drag win" "tool tool" "find find" "tabs tabs";
-  background: radial-gradient(160% 60% at 0% 0%, var(--frame-glow), transparent 60%), var(--frame);
+  background: var(--frame);
   border-right: 1px solid var(--border);
 }
 body.bar-vertical #titlebar { display: contents; }
@@ -1676,10 +1675,7 @@ body.nt-greeting #greeting {
   display: block;
   font: 300 clamp(40px, 7vw, 72px)/1.1 "Segoe UI Variable Display", "Segoe UI", sans-serif;
   letter-spacing: -.02em;
-  background: linear-gradient(100deg, var(--text), var(--accent) 60%, var(--accent-2));
-  -webkit-background-clip: text;
-          background-clip: text;
-  color: transparent;
+  color: var(--text);
 }
 body.nt-greeting #clock { margin-top: 10px; font-size: 22px; font-weight: 500; letter-spacing: 0; color: var(--muted); }
 body.nt-greeting #date { margin-top: 2px; }
@@ -1706,7 +1702,6 @@ body.nt-tiles #stat { position: static; margin-top: 28px; }
 
 body.tint #titlebar {
   background:
-    radial-gradient(120% 220% at 0% 0%, var(--frame-glow), transparent 55%),
     color-mix(in srgb, var(--accent) 16%, var(--frame));
 }
 body.tint #toolbar, body.tint #favbar, body.tint #findbar, body.tint .tab.active {
@@ -1790,12 +1785,12 @@ body.glass { --glass-frame: color-mix(in srgb, var(--frame) var(--glass-a), tran
              --glass-surface: color-mix(in srgb, var(--surface) var(--glass-a), transparent);
              --glass-surface-2: color-mix(in srgb, var(--surface-2) calc(var(--glass-a) * .6), transparent); }
 body.glass #chrome { backdrop-filter: blur(22px) saturate(1.6); }
-body.glass #titlebar { background: radial-gradient(120% 220% at 0% 0%, var(--frame-glow), transparent 55%), var(--glass-frame); }
+body.glass #titlebar { background: var(--glass-frame); }
 body.glass :is(#toolbar, #favbar, #findbar), body.glass .tab.active { background: var(--glass-toolbar); }
 body.glass .tab .foot.l { background: radial-gradient(circle at 0 0, transparent 9.5px, var(--glass-toolbar) 10px); }
 body.glass .tab .foot.r { background: radial-gradient(circle at 100% 0, transparent 9.5px, var(--glass-toolbar) 10px); }
 body.glass:is(.bar-compact, .bar-floating, .bar-vertical) #chrome {
-  background: radial-gradient(120% 220% at 0% 0%, var(--frame-glow), transparent 55%), var(--glass-frame);
+  background: var(--glass-frame);
 }
 body.glass:is(.bar-compact, .bar-floating) #titlebar,
 body.glass.bar-compact :is(#toolbar, #favbar, #findbar),
@@ -1823,7 +1818,7 @@ body.glass #hubnav, body.glass .card { background: var(--glass-surface-2); }
   gap: 6px;
   margin: 0 10px 14px;
   padding: 8px 0 10px;
-  background: linear-gradient(var(--surface) calc(100% - 10px), transparent);
+  background: var(--surface);
 }
 .setcat {
   height: 32px;
@@ -1855,7 +1850,7 @@ body.glass #hubnav, body.glass .card { background: var(--glass-surface-2); }
   display: grid;
   place-items: center;
   overflow: hidden;
-  background: radial-gradient(80% 70% at 50% 45%, color-mix(in srgb, var(--accent) 16%, var(--bg)), var(--bg));
+  background: var(--bg);
   cursor: default;
 }
 #splash .sbg, #splash .swarp { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
@@ -2017,7 +2012,7 @@ body.glass #hubnav, body.glass .card { background: var(--glass-surface-2); }
 
 /* ---------- аккаунт ---------- */
 .acc-head { display: flex; align-items: center; gap: 14px; padding: 16px 18px 10px; }
-.acc-avatar { flex: none; width: 48px; height: 48px; display: grid; place-items: center; border-radius: 50%; background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; font-size: 21px; font-weight: 600; }
+.acc-avatar { flex: none; width: 48px; height: 48px; display: grid; place-items: center; border-radius: 50%; background: var(--accent); color: #fff; font-size: 21px; font-weight: 600; }
 .acc-who { flex: 1; min-width: 0; }
 .acc-who b { display: block; font-size: 16px; font-weight: 600; }
 .acc-who small { display: block; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2047,7 +2042,7 @@ body.glass #hubnav, body.glass .card { background: var(--glass-surface-2); }
 :root { --island-w: 62; --island-r: 23px; } /* настоящие значения ставит app.js на :root — на body они бы их перекрыли */
 body.bar-island #chrome {
   padding-bottom: 8px;
-  background: radial-gradient(120% 220% at 0% 0%, var(--frame-glow), transparent 55%), var(--frame);
+  background: var(--frame);
 }
 body.bar-island #titlebar { background: transparent; }
 body.bar-island #toolbar,
@@ -2125,7 +2120,7 @@ body.bar-island.island-tabs #findbar { grid-area: find; }
 body.bar-island.island-tabs #progress { width: calc(var(--island-w) * 1% - 40px); }
 
 /* прозрачные панели: остров — матовое стекло */
-body.glass.bar-island #chrome { background: radial-gradient(120% 220% at 0% 0%, var(--frame-glow), transparent 55%), var(--glass-frame); }
+body.glass.bar-island #chrome { background: var(--glass-frame); }
 body.glass.bar-island #toolbar, body.glass.bar-island.island-tabs #tabs { background: var(--glass-toolbar); }
 
 /* ---------- свои кнопки на панели ---------- */
@@ -2169,8 +2164,8 @@ body.island-float #sheet {
 body.island-float #layer { top: var(--page-top); z-index: 4; }
 body.island-float #hub { top: calc(var(--bar-h) - var(--page-top) + 14px); }
 body.island-float #chrome { background: transparent; }
-body.island-float #titlebar { background: radial-gradient(120% 220% at 0% 0%, var(--frame-glow), transparent 55%), var(--frame); }
-body.glass.island-float #titlebar { background: radial-gradient(120% 220% at 0% 0%, var(--frame-glow), transparent 55%), var(--glass-frame); }
+body.island-float #titlebar { background: var(--frame); }
+body.glass.island-float #titlebar { background: var(--glass-frame); }
 
 #translatebtn, #pipbtn, #boostbtn { display: none; color: var(--muted); }
 #translatebtn.show, #pipbtn.show, #boostbtn.show { display: grid; }
@@ -2329,3 +2324,139 @@ body.url-collapsed #urlbox.expanded {
 /* кнопка в уведомлении */
 .toast-btn { margin-left: 12px; padding: 3px 10px; border-radius: 8px; color: var(--accent); font-weight: 600; pointer-events: auto; }
 .toast-btn:hover { background: var(--hover); }
+
+/* ---------- плоские темы (Lumi, Ember, Moss, Steel — из приложения Lumi; Ryoku) ---------- */
+:root[data-theme="dark"][data-palette="lumi"] {
+  --frame: #000000;
+  --frame-glow: transparent;
+  --toolbar: #121212;
+  --bg: #000000;
+  --surface: #1c1c1e;
+  --surface-2: #121212;
+  --text: #f5f5f7;
+  --muted: #a1a1a6;
+  --faint: color-mix(in srgb, #a1a1a6 70%, #000000);
+  --border: #2c2c2e;
+  --hover: color-mix(in srgb, #f5f5f7 8%, transparent);
+  --press: color-mix(in srgb, #f5f5f7 14%, transparent);
+  --accent: #ffffff;
+  --accent-2: #ffffff;
+  --accent-3: #ffffff;
+  --on-accent: #000000;
+  --danger: #ff453a;
+  --scrim: color-mix(in srgb, #000000 55%, transparent);
+}
+:root[data-theme="dark"][data-palette="ember"] {
+  --frame: #0e0b0a;
+  --frame-glow: transparent;
+  --toolbar: #1a1412;
+  --bg: #0e0b0a;
+  --surface: #261c18;
+  --surface-2: #1a1412;
+  --text: #f5ebe6;
+  --muted: #c4a090;
+  --faint: color-mix(in srgb, #c4a090 70%, #0e0b0a);
+  --border: #3a2a24;
+  --hover: color-mix(in srgb, #f5ebe6 8%, transparent);
+  --press: color-mix(in srgb, #f5ebe6 14%, transparent);
+  --accent: #e07040;
+  --accent-2: #e07040;
+  --accent-3: #e07040;
+  --on-accent: #1a0e08;
+  --danger: #ef4444;
+  --scrim: color-mix(in srgb, #0e0b0a 55%, transparent);
+}
+:root[data-theme="dark"][data-palette="moss"] {
+  --frame: #0a100e;
+  --frame-glow: transparent;
+  --toolbar: #121a17;
+  --bg: #0a100e;
+  --surface: #1a2520;
+  --surface-2: #121a17;
+  --text: #e6f2ec;
+  --muted: #8fb8a4;
+  --faint: color-mix(in srgb, #8fb8a4 70%, #0a100e);
+  --border: #2a3a32;
+  --hover: color-mix(in srgb, #e6f2ec 8%, transparent);
+  --press: color-mix(in srgb, #e6f2ec 14%, transparent);
+  --accent: #1db954;
+  --accent-2: #1db954;
+  --accent-3: #1db954;
+  --on-accent: #000000;
+  --danger: #ef4444;
+  --scrim: color-mix(in srgb, #0a100e 55%, transparent);
+}
+:root[data-theme="dark"][data-palette="steel"] {
+  --frame: #0c0e12;
+  --frame-glow: transparent;
+  --toolbar: #151820;
+  --bg: #0c0e12;
+  --surface: #1e2330;
+  --surface-2: #151820;
+  --text: #eef1f6;
+  --muted: #9aa3b5;
+  --faint: color-mix(in srgb, #9aa3b5 70%, #0c0e12);
+  --border: #2c3344;
+  --hover: color-mix(in srgb, #eef1f6 8%, transparent);
+  --press: color-mix(in srgb, #eef1f6 14%, transparent);
+  --accent: #6b8cae;
+  --accent-2: #6b8cae;
+  --accent-3: #6b8cae;
+  --on-accent: #0a0e14;
+  --danger: #ef4444;
+  --scrim: color-mix(in srgb, #0c0e12 55%, transparent);
+}
+:root[data-theme="dark"][data-palette="ryoku"] {
+  --frame: #000000;
+  --frame-glow: transparent;
+  --toolbar: #0a0a0a;
+  --bg: #000000;
+  --surface: #0a0a0a;
+  --surface-2: #0a0a0a;
+  --text: #cdc4ba;
+  --muted: #958f87;
+  --faint: #7a756e;
+  --border: rgba(205, 196, 186, .26);
+  --hover: color-mix(in srgb, #cdc4ba 8%, transparent);
+  --press: color-mix(in srgb, #cdc4ba 14%, transparent);
+  --accent: #e2342a;
+  --accent-2: #e2342a;
+  --accent-3: #e2342a;
+  --on-accent: #000000;
+  --danger: #e2342a;
+  --scrim: color-mix(in srgb, #000000 55%, transparent);
+}
+/* плоский стиль: глубина — тонкой линией, а не тенью; тени только у всплывающего */
+:root[data-palette] #toolbar { box-shadow: inset 0 -1px 0 var(--border); }
+:root[data-palette] :is(.card, .tile, .searchbox, #urlbox) { box-shadow: none; }
+:root[data-palette] :is(.card, .tile) { border: 1px solid var(--border); }
+:root[data-palette] .tile { background: var(--surface-2); }
+:root[data-palette] .tile:hover { background: var(--surface); box-shadow: none; }
+:root[data-palette] .menu { box-shadow: 0 12px 32px rgba(0, 0, 0, .5), 0 0 0 1px var(--border); }
+:root[data-palette] #urlbox { background: var(--bg); border: 1px solid var(--border); }
+:root[data-palette] #urlbox:focus-within { border-color: var(--accent); }
+/* Ryoku: скругление 6 px, только настоящие круги круглые */
+:root[data-palette="ryoku"] :is(.tab, .tab .bg, #urlbox, .menu, .card, .tile, .searchbox, .text-btn, .icon-btn, .mi, .tm-chip, .set .field, .seg button) { border-radius: 6px; }
+:root[data-palette="ryoku"] .tab { border-radius: 6px 6px 0 0; }
+:root[data-palette="ryoku"] :is(.text-btn.primary, .setcat.on) { background: var(--text); color: #000; }
+/* карточки тем в параметрах */
+.themes { display: flex; flex-wrap: wrap; gap: 10px; padding: 4px 18px 14px; }
+.theme-card {
+  width: 128px;
+  padding: 8px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  text-align: left;
+  transition: border-color .15s, transform .2s var(--spring);
+}
+.theme-card:hover { transform: translateY(-2px); }
+.theme-card.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.theme-card .tp { display: block; height: 62px; border-radius: 8px; border: 1px solid var(--tp-line); background: var(--tp-bg); position: relative; overflow: hidden; }
+.theme-card .tp i { position: absolute; left: 0; right: 0; top: 0; height: 16px; background: var(--tp-bar); border-bottom: 1px solid var(--tp-line); }
+.theme-card .tp b { position: absolute; left: 10px; top: 26px; width: 46px; height: 6px; border-radius: 3px; background: var(--tp-text); opacity: .85; }
+.theme-card .tp s { position: absolute; left: 10px; top: 38px; width: 30px; height: 6px; border-radius: 3px; background: var(--tp-text); opacity: .4; }
+.theme-card .tp u { position: absolute; right: 10px; bottom: 9px; width: 16px; height: 16px; border-radius: 50%; background: var(--tp-accent); }
+.theme-card .tn { display: block; margin-top: 7px; font-weight: 600; font-size: 13px; }
+.theme-card .td { display: block; color: var(--muted); font-size: 11.5px; }
