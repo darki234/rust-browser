@@ -451,6 +451,8 @@ struct App {
     tasks_watch: bool,
     /// Страница боковой панели заморожена, пока панель закрыта.
     panel_sleeping: bool,
+    /// Окно свёрнуто: видимые вкладки и интерфейс в режиме низкой памяти.
+    minimized: bool,
     /// «Только сайт»: панели спрятаны до наведения на верх окна (на время сеанса).
     site_only: bool,
     last_tasks: Instant,
@@ -626,6 +628,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         last_sleep_check: Instant::now(),
         tasks_watch: false,
         panel_sleeping: false,
+        minimized: false,
         site_only: false,
         last_tasks: Instant::now(),
         tasks_sent: Default::default(),
@@ -687,6 +690,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 WindowEvent::Resized(_) => {
                     app.layout();
+                    app.apply_minimized();
                     let maximized = app.window.is_maximized();
                     if maximized != app.maximized {
                         app.maximized = maximized;
@@ -1220,6 +1224,8 @@ impl App {
                 let _ = webview.set_bounds(rect(left, PANEL_HEADER, panel_width, height - PANEL_HEADER));
             }
             let _ = webview.set_visible(shown);
+            // спрятанный мессенджер — меньше памяти; скрипты работают, уведомления приходят
+            platform::set_background(webview, !shown || self.minimized);
         }
     }
 
@@ -3534,6 +3540,35 @@ impl App {
         }
     }
 
+    /// Окно свернули — то, что было на экране (вкладки, интерфейс, мессенджер в панели),
+    /// переходит в режим низкой памяти, как советует Microsoft для неактивного приложения.
+    /// Развернули — обратно в обычный. Скрипты при этом работают: музыка не прерывается.
+    fn apply_minimized(&mut self) {
+        let minimized = self.window.is_minimized();
+        if minimized == self.minimized {
+            return;
+        }
+        self.minimized = minimized;
+        for id in self.visible_with(self.active) {
+            if let Some(webview) = self.tab(id).filter(|t| !t.sleeping).and_then(|t| t.webview.as_ref()) {
+                platform::set_background(webview, minimized);
+            }
+        }
+        platform::set_background(&self.ui, minimized);
+        if let Some(panel) = &self.panel {
+            if !self.panel_sleeping {
+                platform::set_background(panel, minimized);
+            }
+        }
+        let app = self.store.settings.sidebar_app.as_str();
+        for (name, webview) in &self.panel_apps {
+            // мессенджер на экране панели — по окну; остальные и так в фоне
+            if *name == app && self.panel_width() > 0.0 {
+                platform::set_background(webview, minimized);
+            }
+        }
+    }
+
     /// Закрытая боковая панель (заметки, калькулятор) засыпает сразу — WebView2 сам
     /// разбудит её, когда панель снова покажут. Мессенджеры не трогаем: в них уведомления.
     fn sleep_panel(&mut self) {
@@ -4398,6 +4433,7 @@ impl App {
             Some(webview) => {
                 let _ = webview.set_bounds(bounds);
                 let _ = webview.load_url(&url);
+                platform::set_background(&webview, false);
                 webview
             }
             None => {
@@ -4466,6 +4502,7 @@ impl App {
         if let Some((webview, _, _)) = self.ext_popup.take() {
             let _ = webview.set_visible(false);
             let _ = webview.load_url("about:blank"); // скрипты расширения останавливаются
+            platform::set_background(&webview, true);
             self.ext_popup_spare = Some(webview);
         }
     }
