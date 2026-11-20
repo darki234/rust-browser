@@ -1437,6 +1437,9 @@ body:is(.bar-classic, .bar-compact, .bar-floating) #tabs::-webkit-scrollbar { di
    листание включается, только когда и значки уже не влезают */
 body:is(.bar-classic, .bar-compact, .bar-floating) .tab:not(.pinned) { min-width: 36px; }
 body:is(.bar-classic, .bar-compact, .bar-floating) .tab.active:not(.pinned) { min-width: 84px; }
+/* со звуком нужен ещё динамик: иначе крестик вылезает за край вкладки */
+body:is(.bar-classic, .bar-compact, .bar-floating) .tab:not(.pinned):has(.audio.on) { min-width: 66px; }
+body:is(.bar-classic, .bar-compact, .bar-floating) .tab.active:not(.pinned):has(.audio.on) { min-width: 96px; }
 body.bar-compact .tab { height: 34px; }
 body.bar-compact #newtab { margin: 0 0 0 4px; }
 body.bar-compact #winctl { align-self: stretch; }
