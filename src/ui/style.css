@@ -298,6 +298,10 @@ body.inprivate .tab:not(.active) { color: rgba(242, 239, 255, .75); }
 @container (max-width: 60px) {
   .title { display: none; }
 }
+/* совсем узкая — значок по центру */
+@container (max-width: 30px) {
+  .tab:not(.active) .fav { margin-left: -2px; }
+}
 
 .tab.sleeping .fav { filter: grayscale(.9); opacity: .55; }
 
@@ -1429,7 +1433,10 @@ body.bar-compact #tabs { height: 34px; align-items: center; padding: 0 6px; }
 /* много вкладок в одной строке — листаются колесом, а не наезжают на кнопки окна */
 body:is(.bar-classic, .bar-compact, .bar-floating) #tabs { overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
 body:is(.bar-classic, .bar-compact, .bar-floating) #tabs::-webkit-scrollbar { display: none; }
-body:is(.bar-classic, .bar-compact, .bar-floating) .tab:not(.pinned) { min-width: 72px; }
+/* много вкладок: неактивные ужимаются до значка, активная остаётся с крестиком;
+   листание включается, только когда и значки уже не влезают */
+body:is(.bar-classic, .bar-compact, .bar-floating) .tab:not(.pinned) { min-width: 36px; }
+body:is(.bar-classic, .bar-compact, .bar-floating) .tab.active:not(.pinned) { min-width: 84px; }
 body.bar-compact .tab { height: 34px; }
 body.bar-compact #newtab { margin: 0 0 0 4px; }
 body.bar-compact #winctl { align-self: stretch; }
