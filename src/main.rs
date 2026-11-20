@@ -83,7 +83,7 @@ static BACKDROP_VERSION: std::sync::atomic::AtomicU32 = std::sync::atomic::Atomi
 /// Снимки вкладок для предпросмотра при наведении: номер вкладки → JPEG.
 static TAB_SHOTS: std::sync::LazyLock<Mutex<HashMap<u32, Vec<u8>>>> = std::sync::LazyLock::new(Default::default);
 /// Ссылки сайтов «в новой вкладке» — в фоне (настройка; читается из обработчика WebView2).
-static LINKS_BACKGROUND: AtomicBool = AtomicBool::new(true);
+static LEFT_CLICK_BACKGROUND: AtomicBool = AtomicBool::new(false);
 
 /// Щель между половинами разделённого экрана — за неё тянут разделитель.
 const SPLIT_GAP: f64 = 6.0;
@@ -742,7 +742,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn window_dark_hint() -> bool {
     let settings: store::Settings = Store::load(data_dir()).settings;
     AMOLED.store(settings.theme == "amoled", Ordering::Relaxed);
-    LINKS_BACKGROUND.store(settings.links_background, Ordering::Relaxed);
+    LEFT_CLICK_BACKGROUND.store(settings.left_click_background, Ordering::Relaxed);
     match settings.theme.as_str() {
         "dark" | "amoled" => true,
         "light" => false,
@@ -1008,10 +1008,11 @@ fn build_tab(app: &mut App, id: u32, bounds: Rect) -> wry::Result<WebView> {
             let started = matches!(event, PageLoadEvent::Started);
             let _ = load.send_event(UserEvent::Loading(id, started));
         })
-        // Ссылки «в новом окне» открываем новой вкладкой.
+        // Ссылки «в новом окне» открываем новой вкладкой: колёсиком и Ctrl+щелчком — в фоне,
+        // обычным щелчком — с переходом на неё (если в настройках не выбрано «всегда в фоне»).
         .with_new_window_req_handler(move |url, _| {
             let background = platform::background_click();
-            let background = background || LINKS_BACKGROUND.load(Ordering::Relaxed);
+            let background = background || LEFT_CLICK_BACKGROUND.load(Ordering::Relaxed);
             let _ = popup.send_event(UserEvent::NewTabRequested(url, background));
             NewWindowResponse::Deny
         })
@@ -2507,9 +2508,22 @@ impl App {
                     settings.process_limit = limit as u32;
                 }
             }
-            "links_background" => {
-                settings.links_background = value.as_bool().unwrap_or(settings.links_background);
-                LINKS_BACKGROUND.store(settings.links_background, Ordering::Relaxed);
+            "left_click_background" => {
+                settings.left_click_background = value.as_bool().unwrap_or(settings.left_click_background);
+                LEFT_CLICK_BACKGROUND.store(settings.left_click_background, Ordering::Relaxed);
+            }
+            "hidden_tools" | "hidden_menu" => {
+                let list: Vec<String> = serde_json::from_value::<Vec<String>>(value.clone())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|k| !k.is_empty() && k.len() < 40)
+                    .take(64)
+                    .collect();
+                if key == "hidden_tools" {
+                    settings.hidden_tools = list;
+                } else {
+                    settings.hidden_menu = list;
+                }
             }
             "dark_all" => {
                 settings.dark_all = value.as_bool().unwrap_or(settings.dark_all);
@@ -3698,7 +3712,7 @@ impl App {
                 "islandRadius": settings.island_radius,
                 "islandTabs": settings.island_tabs,
                 "darkAll": settings.dark_all,
-                "linksBackground": settings.links_background,
+                "leftClickBackground": settings.left_click_background,
                 "autoUpdate": settings.auto_update,
                 "processLimit": settings.process_limit,
                 "compact": settings.compact,
@@ -3708,6 +3722,8 @@ impl App {
                 "updateSource": settings.update_source,
                 "darkSites": settings.dark_sites,
                 "buttons": settings.buttons,
+                "hiddenTools": settings.hidden_tools,
+                "hiddenMenu": settings.hidden_menu,
                 "splash": settings.splash,
                 "motion": settings.motion,
                 "barStyle": settings.bar_style,
@@ -4089,6 +4105,12 @@ impl App {
                 if passwords::origin_of(&tab.url) == passwords::origin_of(url) {
                     tab.pw_form = true;
                     self.dirty = true;
+                }
+            }
+            "open_bg" => {
+                let link = message["url"].as_str().unwrap_or("");
+                if (link.starts_with("https://") || link.starts_with("http://")) && link.len() < 8000 {
+                    self.new_background_tab(link);
                 }
             }
             "translate_sel" => {
@@ -4839,6 +4861,19 @@ const SCROLL_SCRIPT: &str = r#"(() => {
   };
   addEventListener('loadedmetadata', video, true);
   addEventListener('play', video, true);
+  // ссылка колёсиком или с Ctrl — в новой вкладке в фоне (сами, а не по состоянию кнопок мыши:
+  // к моменту запроса нового окна колёсико уже отпущено)
+  const background = (e) => {
+    const middle = e.type === 'auxclick' && e.button === 1;
+    const ctrl = e.type === 'click' && e.button === 0 && (e.ctrlKey || e.metaKey) && !e.shiftKey;
+    if (e.defaultPrevented || (!middle && !ctrl)) return;
+    const link = e.composedPath().find((n) => n.tagName === 'A' && n.href);
+    if (!link || !/^https?:/i.test(link.href)) return;
+    e.preventDefault();
+    try { window.chrome.webview.postMessage(JSON.stringify({ cmd: 'open_bg', url: link.href })); } catch (err) {}
+  };
+  addEventListener('auxclick', background, true);
+  addEventListener('click', background, true);
 })();"#;
 
 /// Поля параметров, которые относятся к этому компьютеру и не синхронизируются.
@@ -4924,7 +4959,7 @@ impl App {
                     self.store.settings = settings;
                     self.store.save_settings();
                     AMOLED.store(self.store.settings.theme == "amoled", Ordering::Relaxed);
-                    LINKS_BACKGROUND.store(self.store.settings.links_background, Ordering::Relaxed);
+                    LEFT_CLICK_BACKGROUND.store(self.store.settings.left_click_background, Ordering::Relaxed);
                     self.apply_theme();
                     self.sent.clear();
                 }

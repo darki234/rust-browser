@@ -733,9 +733,108 @@ function renderToolbar() {
 
   if (switched && finding) closeFind(false);
   renderDownloadRing();
+  applyToolbarPrefs();
+  updateAllTabsButton();
 }
 
+// ---------- что показывать на панели и в меню ----------
+const TOOLBAR_TOOLS = [
+  ['shield', 'Блокировщик рекламы'], ['extbtn', 'Расширения'], ['downloads', 'Загрузки'],
+  ['hubbtn', 'Избранное и журнал'], ['splitbtn', 'Разделить экран'], ['panelbtn', 'Боковая панель'],
+];
+function applyToolbarPrefs() {
+  const hidden = new Set(S.settings.hiddenTools || []);
+  for (const [id] of TOOLBAR_TOOLS) $('#' + id)?.classList.toggle('user-hidden', hidden.has(id));
+}
+function setToolHidden(id, hide) {
+  const list = new Set(S.settings.hiddenTools || []);
+  if (hide) list.add(id); else list.delete(id);
+  set('hidden_tools', [...list]);
+}
+function setMenuHidden(key, hide) {
+  const list = new Set(S.settings.hiddenMenu || []);
+  if (hide) list.add(key); else list.delete(key);
+  set('hidden_menu', [...list]);
+}
+// правый щелчок по кнопке панели — убрать её
+for (const [id, name] of TOOLBAR_TOOLS) {
+  $('#' + id)?.addEventListener('contextmenu', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const button = event.currentTarget;
+    showMenu('tool', [
+      h('div', { class: 'menu-title' }, name),
+      item({ icon: 'x', label: 'Убрать с панели', onClick: () => { setToolHidden(id, true); toast('Вернуть кнопку: Параметры → Панели и вкладки'); } }),
+      item({ icon: 'gear', label: 'Настроить панель и меню', onClick: () => { settingsCat = 'layout'; openHub('settings'); } }),
+    ], () => {
+      const anchor = button.getBoundingClientRect();
+      el.menu.style.left = Math.max(8, Math.min(anchor.left - 10, innerWidth - 280)) + 'px';
+      el.menu.style.top = anchor.bottom + 10 + 'px';
+    });
+  });
+}
+
+// ---------- все вкладки: список с поиском, когда вкладки не помещаются ----------
+const allTabsBtn = $('#alltabs');
+function updateAllTabsButton() {
+  const overflow = tabsScroll() && el.tabs.scrollWidth > el.tabs.clientWidth + (el.tabs.classList.contains('overflow') ? -20 : 2);
+  allTabsBtn.classList.toggle('show', overflow || menuKind === 'alltabs');
+  el.tabs.classList.toggle('overflow', overflow);
+  $('#titlebar').classList.toggle('overflow', overflow);
+}
+addEventListener('resize', updateAllTabsButton);
+allTabsBtn.addEventListener('click', () => (menuKind === 'alltabs' ? closeMenu() : openAllTabs()));
+
+function openAllTabs() {
+  const query = h('input', { type: 'text', class: 'alltabs-q', placeholder: 'Поиск по вкладкам', spellcheck: 'false' });
+  const list = h('div', { class: 'alltabs-list' });
+  const rows = S.tabs.map((tab) => {
+    const close = h('button', { class: 'icon-btn small', title: 'Закрыть вкладку' }, icon('x', 14));
+    const row = h('button', { class: 'mi alltabs-row' + (tab.id === S.active ? ' current' : '') + (tab.sleeping ? ' sleeping' : '') },
+      h('span', { class: 'ic' }, favicon(tab.url, false, tab.favicon)),
+      h('span', { class: 'lbl' }, h('b', {}, tab.title || hostOf(tab.url) || 'Новая вкладка'), h('small', {}, hostOf(tab.url) || '')),
+      tab.audio ? h('span', { class: 'kb' }, icon('speaker', 14)) : null,
+      close);
+    row.addEventListener('click', () => { closeMenu(); send('activate', { id: tab.id }); });
+    row.addEventListener('auxclick', (event) => { if (event.button === 1) { event.preventDefault(); send('close_tab', { id: tab.id }); row.remove(); } });
+    close.addEventListener('click', (event) => { event.stopPropagation(); send('close_tab', { id: tab.id }); row.remove(); });
+    row.dataset.text = ((tab.title || '') + ' ' + (tab.url || '')).toLowerCase();
+    return row;
+  });
+  list.append(...rows);
+  query.addEventListener('input', () => {
+    const q = query.value.trim().toLowerCase();
+    rows.forEach((row) => { row.style.display = !q || row.dataset.text.includes(q) ? '' : 'none'; });
+    menuItems = rows.filter((row) => row.isConnected && row.style.display !== 'none');
+    menuSel = menuItems.length ? 0 : -1;
+    menuItems.forEach((node, i) => node.classList.toggle('sel', i === menuSel));
+  });
+  query.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && menuSel < 0 && menuItems[0]) { event.preventDefault(); menuItems[0].click(); }
+  });
+  showMenu('alltabs', [h('div', { class: 'menu-title' }, `Вкладки · ${S.tabs.length}`), query, list], (rect) => {
+    const anchor = allTabsBtn.getBoundingClientRect();
+    el.menu.style.top = anchor.bottom + 6 + 'px';
+    el.menu.style.left = Math.max(8, Math.min(anchor.right, innerWidth - 8) - rect.width) + 'px';
+    el.menu.style.transformOrigin = 'top right';
+  }).then(() => {
+    menuItems = rows;
+    setTimeout(() => {
+      query.focus();
+      list.querySelector('.current')?.scrollIntoView({ block: 'center' });
+    }, 30);
+  });
+}
+
+let dlAnimTimer = 0, dlDoneSeen = null;
 function renderDownloadRing() {
+  // загрузка закончилась — короткая зелёная вспышка, чтобы было видно и маленький файл
+  const done = new Set(S.downloads.filter((d) => d.state === 'done').map((d) => d.id));
+  if (dlDoneSeen && [...done].some((id) => !dlDoneSeen.has(id))) {
+    replay(el.downloads, 'dl-done');
+    setTimeout(() => el.downloads.classList.remove('dl-done'), 1400);
+  }
+  dlDoneSeen = done;
   const running = S.downloads.filter((d) => d.state === 'progress' || d.state === 'paused');
   el.downloads.classList.toggle('active', running.length > 0);
   const total = running.reduce((sum, d) => sum + Math.max(d.total, 0), 0);
@@ -1426,36 +1525,55 @@ function zoomRow() {
     h('button', { class: 'icon-btn', title: 'Во весь экран (F11)', onclick: () => { closeMenu(); send('fullscreen'); } }, icon('expand', 16)));
 }
 
+// пункты главного меню, которые можно прятать: ключ и название в настройках
+const MENU_ITEMS = [
+  ['new_tab', 'Новая вкладка'], ['new_window', 'Новое окно'], ['inprivate', 'Новое окно InPrivate'], ['zoom', 'Масштаб'],
+  ['bookmarks', 'Избранное'], ['history', 'Журнал'], ['downloads', 'Загрузки'], ['tasks', 'Диспетчер вкладок'],
+  ['find', 'Найти на странице'], ['print', 'Печать'], ['phone', 'Отправить на телефон'], ['translate', 'Перевести страницу'],
+  ['pip', 'Картинка в картинке'], ['site_only', 'Только сайт'], ['compact', 'Компактный режим'], ['split', 'Разделить экран'],
+  ['dark', 'Тёмная тема для этого сайта'], ['favbar', 'Панель избранного'], ['devtools', 'Инструменты разработчика'],
+];
+
 function mainMenuNodes() {
+  const hidden = new Set(S.settings.hiddenMenu || []);
+  const nodes = mainMenuAll()
+    .filter((n) => !(Array.isArray(n) && hidden.has(n[0])))
+    .map((n) => (Array.isArray(n) ? n[1] : n));
+  // без пустых разделов: убираем разделители в начале, в конце и подряд
+  const isSep = (n) => n.classList.contains('sep');
+  return nodes.filter((n, i) => !isSep(n) || (i > 0 && i < nodes.length - 1 && !isSep(nodes[i - 1])));
+}
+
+function mainMenuAll() {
   const tab = activeTab();
   const page = tab && !tab.start;
   return [
-    item({ icon: 'plus', label: 'Новая вкладка', kb: 'Ctrl+T', onClick: () => send('new_tab') }),
-    item({ icon: 'window', label: 'Новое окно', kb: 'Ctrl+N', onClick: () => send('new_window') }),
-    item({ icon: 'mask', label: 'Новое окно InPrivate', kb: 'Ctrl+Shift+N', onClick: () => send('inprivate') }),
+    ['new_tab', item({ icon: 'plus', label: 'Новая вкладка', kb: 'Ctrl+T', onClick: () => send('new_tab') })],
+    ['new_window', item({ icon: 'window', label: 'Новое окно', kb: 'Ctrl+N', onClick: () => send('new_window') })],
+    ['inprivate', item({ icon: 'mask', label: 'Новое окно InPrivate', kb: 'Ctrl+Shift+N', onClick: () => send('inprivate') })],
     sep(),
-    zoomRow(),
+    ['zoom', zoomRow()],
     sep(),
-    item({ icon: 'star', label: 'Избранное', kb: 'Ctrl+Shift+O', onClick: () => openHub('bookmarks') }),
-    item({ icon: 'clock', label: 'Журнал', kb: 'Ctrl+H', onClick: () => openHub('history') }),
-    item({ icon: 'download', label: 'Загрузки', kb: 'Ctrl+J', onClick: () => openHub('downloads') }),
-    item({ icon: 'gauge', label: 'Диспетчер вкладок', kb: 'Shift+Esc', onClick: () => openHub('tasks') }),
+    ['bookmarks', item({ icon: 'star', label: 'Избранное', kb: 'Ctrl+Shift+O', onClick: () => openHub('bookmarks') })],
+    ['history', item({ icon: 'clock', label: 'Журнал', kb: 'Ctrl+H', onClick: () => openHub('history') })],
+    ['downloads', item({ icon: 'download', label: 'Загрузки', kb: 'Ctrl+J', onClick: () => openHub('downloads') })],
+    ['tasks', item({ icon: 'gauge', label: 'Диспетчер вкладок', kb: 'Shift+Esc', onClick: () => openHub('tasks') })],
     sep(),
-    item({ icon: 'search', label: 'Найти на странице', kb: 'Ctrl+F', disabled: !page, onClick: () => setTimeout(openFind, 140) }),
-    item({ icon: 'print', label: 'Печать', kb: 'Ctrl+P', disabled: !page, onClick: () => send('print') }),
-    item({ icon: 'forward', label: 'Отправить на телефон', disabled: !page, onClick: () => send('send_to_phone') }),
-    item({ icon: 'translate', label: /\.translate\.goog\//.test(activeTab()?.url || '') ? 'Показать оригинал' : 'Перевести страницу',
+    ['find', item({ icon: 'search', label: 'Найти на странице', kb: 'Ctrl+F', disabled: !page, onClick: () => setTimeout(openFind, 140) })],
+    ['print', item({ icon: 'print', label: 'Печать', kb: 'Ctrl+P', disabled: !page, onClick: () => send('print') })],
+    ['phone', item({ icon: 'forward', label: 'Отправить на телефон', disabled: !page, onClick: () => send('send_to_phone') })],
+    ['translate', item({ icon: 'translate', label: /\.translate\.goog\//.test(activeTab()?.url || '') ? 'Показать оригинал' : 'Перевести страницу',
       disabled: !page || (/^ru/.test(activeTab()?.lang || '') && !/\.translate\.goog\//.test(activeTab()?.url || '')),
-      onClick: () => send('translate', { original: /\.translate\.goog\//.test(activeTab()?.url || '') }) }),
-    item({ icon: 'pip', label: 'Картинка в картинке', kb: 'Alt+P', disabled: !page || !activeTab()?.video, onClick: () => send('pip') }),
-    item({ icon: 'expand', label: 'Только сайт', kb: 'Ctrl+Shift+F', check: !!S.siteOnly, onClick: () => send('site_only') }),
-    item({ icon: 'expand', label: 'Компактный режим', kb: 'Ctrl+Shift+K', check: !!S.settings.compact, onClick: () => set('compact', !S.settings.compact) }),
-    item({ icon: 'split', label: S.split && [S.split.left, S.split.right].includes(S.active) ? 'Убрать разделение экрана' : 'Разделить экран', disabled: !page,
-      onClick: () => send(S.split && [S.split.left, S.split.right].includes(S.active) ? 'unsplit' : 'split') }),
-    item({ icon: 'moon2', label: 'Тёмная тема для этого сайта', check: !!activeTab()?.dark, disabled: !page, onClick: () => send('dark_site') }),
-    item({ icon: 'bar', label: 'Панель избранного', kb: 'Ctrl+Shift+B', check: S.settings.favbar,
-      onClick: () => send('set', { key: 'favbar', value: !S.settings.favbar }) }),
-    item({ icon: 'code', label: 'Инструменты разработчика', kb: 'F12', disabled: !page, onClick: () => send('devtools') }),
+      onClick: () => send('translate', { original: /\.translate\.goog\//.test(activeTab()?.url || '') }) })],
+    ['pip', item({ icon: 'pip', label: 'Картинка в картинке', kb: 'Alt+P', disabled: !page || !activeTab()?.video, onClick: () => send('pip') })],
+    ['site_only', item({ icon: 'expand', label: 'Только сайт', kb: 'Ctrl+Shift+F', check: !!S.siteOnly, onClick: () => send('site_only') })],
+    ['compact', item({ icon: 'expand', label: 'Компактный режим', kb: 'Ctrl+Shift+K', check: !!S.settings.compact, onClick: () => set('compact', !S.settings.compact) })],
+    ['split', item({ icon: 'split', label: S.split && [S.split.left, S.split.right].includes(S.active) ? 'Убрать разделение экрана' : 'Разделить экран', disabled: !page,
+      onClick: () => send(S.split && [S.split.left, S.split.right].includes(S.active) ? 'unsplit' : 'split') })],
+    ['dark', item({ icon: 'moon2', label: 'Тёмная тема для этого сайта', check: !!activeTab()?.dark, disabled: !page, onClick: () => send('dark_site') })],
+    ['favbar', item({ icon: 'bar', label: 'Панель избранного', kb: 'Ctrl+Shift+B', check: S.settings.favbar,
+      onClick: () => send('set', { key: 'favbar', value: !S.settings.favbar }) })],
+    ['devtools', item({ icon: 'code', label: 'Инструменты разработчика', kb: 'F12', disabled: !page, onClick: () => send('devtools') })],
     sep(),
     S.install?.updateReady && item({ icon: 'reload', label: 'Перезапустить и обновиться', onClick: () => send('restart_update') }),
     item({ icon: 'gear', label: 'Параметры', onClick: () => openHub('settings') }),
@@ -2035,10 +2153,11 @@ const SETTINGS_CATS = [
         toggle(() => S.settings.urlInTab, (value) => set('url_in_tab', value))),
       setting('Панель избранного', 'Сайты из избранного под адресной строкой · Ctrl+Shift+B',
         toggle(() => S.settings.favbar, (value) => set('favbar', value))),
-      setting('Ссылки в новой вкладке — в фоне', 'Ссылка, которую сайт открывает в новой вкладке, не уводит со страницы: вкладка появляется рядом',
+      setting('Ссылки в новой вкладке — всегда в фоне', 'Колёсико и Ctrl+щелчок открывают вкладку в фоне всегда. Включите, чтобы и обычный щелчок не уводил со страницы',
         toggle(() => S.settings.linksBackground, (value) => set('links_background', value))),
       setting('Боковая панель', 'Заметки, калькулятор и мессенджеры справа · Ctrl+Shift+E',
         toggle(() => S.panelOpen, () => send('toggle_panel')))),
+    toolbarMenuCard(),
     myButtonsCard(),
     h('div', { class: 'card' }, h('h2', {}, 'Новая вкладка'),
       setting('Что показывать', 'Часы с поиском, приветствие, плитки сайтов или почти ничего',
@@ -2317,7 +2436,11 @@ window.ui = {
   closeFind: () => closeFind(false),
   setFind,
   zoomChanged: refreshMainMenu,
-  downloadStarted: () => replay(el.downloads, 'bounce'),
+  downloadStarted: () => {
+    replay(el.downloads, 'bounce');
+    clearTimeout(dlAnimTimer);
+    dlAnimTimer = setTimeout(() => el.downloads.classList.remove('bounce'), 1300);
+  },
   dataCleared: () => toast('Данные сайтов удалены'),
   toast,
   passwordOffer,
@@ -2711,6 +2834,20 @@ function renderMyButtons() {
 }
 
 const setButtons = (list) => set('buttons', list);
+
+function toolbarMenuCard() {
+  const chips = (list, getHidden, onToggle) => h('div', { class: 'tm-chips' }, ...list.map(([key, name]) => {
+    const chip = h('button', { class: 'tm-chip', onclick: () => onToggle(key, !getHidden().includes(key)) }, h('span', { class: 'tm-dot' }), name);
+    settingsUpdaters.push(() => chip.classList.toggle('on', !getHidden().includes(key)));
+    return chip;
+  }));
+  return h('div', { class: 'card' }, h('h2', {}, 'Панель инструментов и меню'),
+    h('div', { class: 'ext-hint acc-intro' }, 'Нажмите, чтобы показать или спрятать. Кнопку на панели можно убрать и правым щелчком по ней'),
+    h('div', { class: 'tm-head' }, 'Кнопки на панели'),
+    chips(TOOLBAR_TOOLS, () => S.settings.hiddenTools || [], setToolHidden),
+    h('div', { class: 'tm-head' }, 'Пункты меню «…»'),
+    chips(MENU_ITEMS, () => S.settings.hiddenMenu || [], setMenuHidden));
+}
 
 function myButtonsCard() {
   const list = h('div', { class: 'mybtns-list' });

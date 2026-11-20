@@ -76,8 +76,13 @@ pub struct Settings {
     /// Тёмная тема для сайтов: список сайтов и «для всех».
     pub dark_sites: Vec<String>,
     pub dark_all: bool,
-    /// Ссылки «в новой вкладке» открываются в фоне — остаёмся на своей странице.
-    pub links_background: bool,
+    /// Ссылки «в новой вкладке» открываются в фоне и по обычному щелчку
+    /// (колёсико и Ctrl+щелчок — в фоне всегда).
+    pub left_click_background: bool,
+    /// Какие кнопки спрятаны с панели инструментов (id кнопок).
+    pub hidden_tools: Vec<String>,
+    /// Какие пункты спрятаны из главного меню.
+    pub hidden_menu: Vec<String>,
     /// Обновляться самому и откуда брать новые сборки.
     pub auto_update: bool,
     /// Лимит процессов страниц (0 — сам движок решает).
@@ -143,7 +148,9 @@ impl Default for Settings {
             island_tabs: false,
             dark_sites: Vec::new(),
             dark_all: false,
-            links_background: true,
+            left_click_background: false,
+            hidden_tools: Vec::new(),
+            hidden_menu: Vec::new(),
             auto_update: true,
             process_limit: 0,
             compact: false,
