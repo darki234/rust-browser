@@ -21,7 +21,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     time::{Duration, Instant},
@@ -1024,6 +1024,7 @@ fn build_tab(app: &mut App, id: u32, bounds: Rect) -> wry::Result<WebView> {
     platform::hook_history(&webview, id, proxy.clone());
     platform::hook_messages(&webview, id, proxy.clone());
     platform::hook_crashes(&webview, id, proxy.clone());
+    platform::hook_context_menu(&webview);
     platform::hook_focus(&webview, id, proxy.clone());
     platform::hook_page_state(&webview, id, proxy.clone());
     platform::hook_find(&webview, id, proxy.clone());
@@ -1808,10 +1809,7 @@ impl App {
                 let _ = self.ui.evaluate_script(&format!("ui.setFix({seq}, {fix})"));
             }
             UserEvent::HistoryChanged(id) => self.sync_location(id),
-            UserEvent::NewTabRequested(url, true) => {
-                self.new_background_tab(&url);
-                let _ = self.ui.evaluate_script("ui.toast('Ссылка открыта в новой вкладке')");
-            }
+            UserEvent::NewTabRequested(url, true) => self.new_background_tab(&url),
             UserEvent::NewTabRequested(url, false) => self.new_tab(Some(url)),
             UserEvent::Blocked(id) => {
                 if let Some(tab) = self.tab_mut(id) {
@@ -4772,6 +4770,13 @@ const SELECTION_SCRIPT: &str = r#"(() => {
     place(card, anchor, true);
     try { window.chrome.webview.postMessage(JSON.stringify({ cmd: 'translate_sel', text: lastText, seq })); } catch (e) {}
   };
+  // перевод из контекстного меню: текст и точку щелчка даёт движок
+  window.__rbTranslateText = (text, x, y) => {
+    ensure();
+    lastText = text.trim();
+    anchor = { left: x, right: x, top: y, bottom: y, width: 0, height: 0 };
+    translate();
+  };
   window.__rbTranslated = (r) => {
     if (!host || r.seq !== seq) return;
     root.querySelector('.l').textContent = r.error ? 'Не удалось перевести' : lang(r.from) + ' → ' + lang(r.to);
@@ -4813,20 +4818,48 @@ const SELECTION_SCRIPT: &str = r#"(() => {
 
 /// Перевод фрагмента через Google Переводчик (тот же, что для страниц): на русский,
 /// а русский текст — на английский. Возвращает (перевод, язык оригинала, язык перевода).
+/// Ответ translate_a/single (client=gtx): [[["перевод","оригинал",…],…],null,"en",…].
+fn parse_gtx(body: &[u8]) -> Option<(String, String)> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    let translated: String = value[0].as_array()?.iter().filter_map(|part| part[0].as_str()).collect();
+    let from = value[2].as_str().unwrap_or("auto").to_string();
+    (!translated.trim().is_empty()).then_some((translated, from))
+}
+
+/// Ответ translate_a/t (client=dict-chrome-ex): [["перевод","en"]] или ["перевод"].
+fn parse_dict(body: &[u8]) -> Option<(String, String)> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    let first = &value[0];
+    let (translated, from) = match first.as_array() {
+        Some(pair) => (pair.first()?.as_str()?, pair.get(1).and_then(Value::as_str).unwrap_or("auto")),
+        None => (first.as_str()?, "auto"),
+    };
+    (!translated.trim().is_empty()).then(|| (translated.to_string(), from.to_string()))
+}
+
 fn translate_text(text: &str) -> Result<(String, String, String), String> {
     let request = |to: &str| -> Result<(String, String), String> {
         let url = format!(
             "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl={to}&dt=t&q={}",
             percent_encode(text)
         );
-        let (body, _) = icons::curl(&url, 2_000_000, 15).ok_or("нет связи с переводчиком")?;
-        let value: Value = serde_json::from_slice(&body).map_err(|_| "переводчик ответил непонятно")?;
-        let translated: String = value[0].as_array().into_iter().flatten().filter_map(|part| part[0].as_str()).collect();
-        let from = value[2].as_str().unwrap_or("auto").to_string();
-        if translated.trim().is_empty() {
-            return Err("переводчик ничего не вернул".into());
+        // основной адрес Google иногда отвечает «слишком много запросов» (429) —
+        // тогда спрашиваем адрес, которым пользуется расширение Google Переводчика
+        // после отказа основной адрес 10 минут не спрашиваем — сразу запасной, без задержки
+        static GTX_BLOCKED_UNTIL: AtomicU64 = AtomicU64::new(0);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        if now >= GTX_BLOCKED_UNTIL.load(Ordering::Relaxed) {
+            if let Some(found) = icons::curl(&url, 2_000_000, 6).and_then(|(body, _)| parse_gtx(&body)) {
+                return Ok(found);
+            }
+            GTX_BLOCKED_UNTIL.store(now + 600, Ordering::Relaxed);
         }
-        Ok((translated, from))
+        let backup = format!(
+            "https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=auto&tl={to}&q={}",
+            percent_encode(text)
+        );
+        let (body, _) = icons::curl(&backup, 2_000_000, 10).ok_or("нет связи с переводчиком")?;
+        parse_dict(&body).ok_or_else(|| "переводчик ничего не вернул".into())
     };
     let (translated, from) = request("ru")?;
     if from == "ru" {
@@ -5751,6 +5784,16 @@ mod tests {
         assert_eq!(rest_action(min(15), 15, false, false, true), Rest::Suspend);
         assert_eq!(rest_action(min(20), 15, true, false, true), Rest::Keep); // уже спит
         assert_eq!(rest_action(min(45), 15, true, false, true), Rest::Discard);
+    }
+
+    #[test]
+    fn translator_answers_are_parsed() {
+        let gtx = r#"[[["Привет, ","Hello, ",null],["мир","world",null]],null,"en"]"#.as_bytes();
+        assert_eq!(parse_gtx(gtx), Some(("Привет, мир".into(), "en".into())));
+        assert_eq!(parse_gtx(b"<html>Sorry</html>"), None);
+        assert_eq!(parse_dict(r#"[["Безумная информатика","en"]]"#.as_bytes()), Some(("Безумная информатика".into(), "en".into())));
+        assert_eq!(parse_dict(r#"["Привет"]"#.as_bytes()), Some(("Привет".into(), "auto".into())));
+        assert_eq!(parse_dict(b"[]"), None);
     }
 
     #[test]

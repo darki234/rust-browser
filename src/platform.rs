@@ -18,7 +18,7 @@ use std::{
 
 use tao::event_loop::EventLoopProxy;
 use webview2_com::{
-    take_pwstr, AcceleratorKeyPressedEventHandler, BytesReceivedChangedEventHandler,
+    take_pwstr, AcceleratorKeyPressedEventHandler, ContextMenuRequestedEventHandler, CustomItemSelectedEventHandler, BytesReceivedChangedEventHandler,
     BrowserExtensionEnableCompletedHandler, BrowserExtensionRemoveCompletedHandler,
     AddScriptToExecuteOnDocumentCreatedCompletedHandler, CallDevToolsProtocolMethodCompletedHandler,
     CapturePreviewCompletedHandler, FocusChangedEventHandler, GetFaviconCompletedHandler, ProcessFailedEventHandler,
@@ -447,6 +447,125 @@ pub fn hook_crashes(webview: &WebView, tab: u32, proxy: Proxy) {
     }));
     unsafe {
         let _ = webview.webview().add_ProcessFailed(&handler, &mut 0i64);
+    }
+}
+
+/// Пункты контекстного меню страницы, которые браузеру не нужны: «Проверить» и «Другие
+/// инструменты» (это для разработчиков — есть F12), пункты расширений.
+const MENU_DROP: &[&str] = &["inspectElement", "other", "moreTools", "webCapture", "share"];
+
+/// Своё контекстное меню страницы: без лишних пунктов и с «Перевести» для выделенного текста.
+/// Текст выделения берём у движка — он знает его и там, где скрипт страницы не видит
+/// (теневой DOM, как на YouTube).
+pub fn hook_context_menu(webview: &WebView) {
+    let core = webview.webview();
+    let Ok(core11) = core.cast::<ICoreWebView2_11>() else { return };
+    let Ok(env) = (unsafe { core.cast::<ICoreWebView2_2>().and_then(|c| c.Environment()) })
+        .and_then(|e| e.cast::<ICoreWebView2Environment9>())
+    else {
+        return;
+    };
+    let target = core.clone();
+    let handler = ContextMenuRequestedEventHandler::create(Box::new(move |_, args| {
+        let Some(args) = args else { return Ok(()) };
+        unsafe {
+            let items = args.MenuItems()?;
+            let mut count = 0u32;
+            items.Count(&mut count)?;
+            let dump = std::env::var_os("RB_MENU_DUMP").is_some();
+            let mut names = Vec::new();
+            // лишние пункты
+            let mut i = count;
+            while i > 0 {
+                i -= 1;
+                let item = items.GetValueAtIndex(i)?;
+                let mut name = PWSTR::null();
+                item.Name(&mut name)?;
+                let name = take_pwstr(name);
+                if dump {
+                    names.push(name.clone());
+                }
+                if MENU_DROP.contains(&name.as_str()) {
+                    items.RemoveValueAtIndex(i)?;
+                }
+            }
+            // «Перевести» — сразу после «Копировать»
+            let menu_target = args.ContextMenuTarget()?;
+            let mut has = BOOL::default();
+            menu_target.HasSelection(&mut has)?;
+            if has.as_bool() {
+                let mut text = PWSTR::null();
+                menu_target.SelectionText(&mut text)?;
+                let text = take_pwstr(text);
+                let mut point = windows::Win32::Foundation::POINT::default();
+                args.Location(&mut point)?;
+                if text.chars().any(char::is_alphabetic) && text.chars().count() <= 2000 {
+                    let item = env.CreateContextMenuItem(w!("Перевести"), None::<&IStream>, COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_COMMAND)?;
+                    let page = target.clone();
+                    let chosen = CustomItemSelectedEventHandler::create(Box::new(move |_, _| {
+                        let quoted = serde_json::to_string(&text).unwrap_or_default();
+                        let script = format!(
+                            "window.__rbTranslateText && __rbTranslateText({quoted}, {} / devicePixelRatio, {} / devicePixelRatio)",
+                            point.x, point.y
+                        );
+                        let _ = page.ExecuteScript(&HSTRING::from(script), None::<&ICoreWebView2ExecuteScriptCompletedHandler>);
+                        Ok(())
+                    }));
+                    item.add_CustomItemSelected(&chosen, &mut 0i64)?;
+                    items.Count(&mut count)?;
+                    let mut at = 0u32;
+                    for j in 0..count {
+                        let mut name = PWSTR::null();
+                        items.GetValueAtIndex(j)?.Name(&mut name)?;
+                        if take_pwstr(name) == "copy" {
+                            at = j + 1;
+                        }
+                    }
+                    items.InsertValueAtIndex(at, &item)?;
+                }
+            }
+            // разделители: без двойных, в начале и в конце
+            items.Count(&mut count)?;
+            let mut prev_sep = true;
+            let mut j = 0u32;
+            while j < count {
+                let mut kind = COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND::default();
+                items.GetValueAtIndex(j)?.Kind(&mut kind)?;
+                let sep = kind == COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_SEPARATOR;
+                if sep && prev_sep {
+                    items.RemoveValueAtIndex(j)?;
+                    count -= 1;
+                    continue;
+                }
+                prev_sep = sep;
+                j += 1;
+            }
+            if count > 0 {
+                let mut kind = COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND::default();
+                items.GetValueAtIndex(count - 1)?.Kind(&mut kind)?;
+                if kind == COREWEBVIEW2_CONTEXT_MENU_ITEM_KIND_SEPARATOR {
+                    items.RemoveValueAtIndex(count - 1)?;
+                }
+            }
+            // для проверки: пункты до и после (RB_MENU_DUMP=1)
+            if dump {
+                items.Count(&mut count)?;
+                let mut after = Vec::new();
+                for j in 0..count {
+                    let mut name = PWSTR::null();
+                    items.GetValueAtIndex(j)?.Name(&mut name)?;
+                    after.push(take_pwstr(name));
+                }
+                names.reverse();
+                let _ = std::fs::write(std::env::temp_dir().join("rb_menu.txt"), format!("{}
+=>
+{}", names.join(" "), after.join(" ")));
+            }
+        }
+        Ok(())
+    }));
+    unsafe {
+        let _ = core11.add_ContextMenuRequested(&handler, &mut 0i64);
     }
 }
 
