@@ -63,6 +63,8 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.webkit:webkit:1.12.1")
+    // сканер QR-кода связки с компьютером (без сервисов Google)
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     // готовые профили запуска Compose ставятся при установке — первый запуск быстрее
     implementation("androidx.profileinstaller:profileinstaller:1.4.1")
 }

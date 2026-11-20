@@ -115,13 +115,15 @@ class MainActivity : ComponentActivity() {
         browser.saveSession()
         store.saveSettings()
         if (!isInPictureInPictureMode) browser.pauseAll()
-        sync.syncIfStale(60_000) // изменения с телефона — в облако, пока не забыли
+        sync.stopPolling()
+        sync.syncIfStale(60_000) // изменения с телефона — на компьютер, пока не забыли
     }
 
     override fun onResume() {
         super.onResume()
         browser.resumeActive()
-        sync.syncIfStale(5 * 60_000) // свежее с компьютера
+        sync.startPolling() // компьютер в той же сети — свежее за секунды
+        sync.syncIfStale(5 * 60_000)
     }
 
     @Suppress("DEPRECATION")
@@ -170,28 +172,23 @@ class MainActivity : ComponentActivity() {
         return runCatching { filePicker.launch(params.createIntent()); true }.getOrElse { fileCallback = null; false }
     }
 
-    // ---------- файл синхронизации в OneDrive ----------
+    // ---------- QR-код связки с компьютера ----------
 
-    private var syncPicked: ((Uri) -> Unit)? = null
-    private val syncPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        uri ?: return@registerForActivityResult
-        // постоянный доступ: после перезапуска телефона файл открывается без выбора
-        runCatching { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
-            .onFailure { runCatching { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) } }
-        syncPicked?.invoke(uri)
-        syncPicked = null
+    private var scanned: ((String) -> Unit)? = null
+    private val qrScanner = registerForActivityResult(com.journeyapps.barcodescanner.ScanContract()) { result ->
+        result.contents?.let { scanned?.invoke(it) }
+        scanned = null
     }
 
-    fun pickSyncFile(done: (Uri) -> Unit) {
-        syncPicked = done
-        syncPicker.launch(arrayOf("*/*"))
+    fun scanQr(done: (String) -> Unit) {
+        scanned = done
+        val options = com.journeyapps.barcodescanner.ScanOptions()
+            .setDesiredBarcodeFormats(com.journeyapps.barcodescanner.ScanOptions.QR_CODE)
+            .setPrompt("Наведите камеру на QR-код в параметрах Rust Browser на компьютере")
+            .setBeepEnabled(false)
+            .setOrientationLocked(false)
+        qrScanner.launch(options)
     }
-
-    fun fileName(uri: Uri): String = runCatching {
-        contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
-            if (c.moveToFirst()) c.getString(0) else null
-        }
-    }.getOrNull() ?: uri.lastPathSegment.orEmpty()
 
     // ---------- подтверждение личности (показ паролей) ----------
 

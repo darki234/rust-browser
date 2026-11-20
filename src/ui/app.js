@@ -38,6 +38,7 @@ const ICONS = {
   alert: '<circle cx="12" cy="12" r="9.5"/><path d="M12 7.5v5"/><path d="M12 16.5h.01"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="m20.5 20.5-4.5-4.5"/>',
   globe: '<circle cx="12" cy="12" r="9.5"/><path d="M2.5 12h19"/><path d="M12 2.5c3 3 3 16 0 19"/><path d="M12 2.5c-3 3-3 16 0 19"/>',
+  edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
   trash: '<path d="M4 7h16"/><path d="M18 7v12a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V7"/><path d="M9 7V4h6v3"/>',
   folder: '<path d="M3 6a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
   file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>',
@@ -174,6 +175,21 @@ function replay(el, cls) {
 }
 
 let toastTimer = 0;
+/** Уведомление с кнопкой (например, «Вернуть»): висит дольше обычного. */
+function toastAction(text, label, onClick) {
+  toast(text);
+  const box = $('#toast');
+  const button = h('button', { class: 'toast-btn' }, label);
+  button.addEventListener('click', () => { onClick(); box.classList.remove('show'); setTimeout(() => send('toast', {}), 350); });
+  box.append(button);
+  send('toast', { w: box.offsetWidth, h: box.offsetHeight });
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    box.classList.remove('show');
+    toastTimer = setTimeout(() => send('toast', {}), 350);
+  }, 5000);
+}
+
 function toast(text) {
   const el = $('#toast');
   el.textContent = text;
@@ -235,7 +251,7 @@ const hsl = (h, s, l) => `hsl(${((h % 360) + 360) % 360} ${Math.round(s * 100)}%
 
 let appearanceKey = null;
 function applyAppearance(s) {
-  const key = [s.accent, s.tintFrame, s.motion, s.barStyle, !!S.siteOnly, s.newtabLayout, S.dark, s.theme, s.glass, s.islandWidth, s.islandRadius, s.islandTabs].join('|');
+  const key = [s.accent, s.tintFrame, s.motion, s.barStyle, !!S.siteOnly, s.newtabLayout, S.dark, s.theme, s.glass, s.islandWidth, s.islandRadius, s.islandTabs, s.tileSize].join('|');
   if (key === appearanceKey) return;
   appearanceKey = key;
   const root = document.documentElement.style;
@@ -264,6 +280,7 @@ function applyAppearance(s) {
   root.setProperty('--island-r', Math.round(((s.islandRadius ?? 100) / 100) * 23) + 'px');
   requestAnimationFrame(reportChrome);
   for (const n of ['clock', 'minimal', 'tiles', 'greeting']) body.toggle('nt-' + n, s.newtabLayout === n);
+  for (const n of ['s', 'm', 'l']) body.toggle('tiles-' + n, (s.tileSize || 'm') === n);
   body.toggle('amoled', s.theme === 'amoled');
   // стекло: непрозрачность панелей 100 % − выбранная прозрачность
   body.toggle('glass', s.glass > 0);
@@ -692,6 +709,10 @@ function renderToolbar() {
   tb.title = translated ? 'Показать оригинал' : 'Перевести страницу на русский';
   // «картинка в картинке» — когда на странице играет видео
   $('#pipbtn').classList.toggle('show', !tab.start && !!tab.audio && !!tab.video);
+  const boost = siteBoost(tab);
+  $('#boostbtn').classList.toggle('show', !tab.start && (!!tab.audio || !!tab.video || boost !== 100));
+  $('#boostbtn').classList.toggle('on', boost !== 100);
+  $('#boostbtn .boostval').textContent = boost !== 100 ? boost + '%' : '';
   el.reload.disabled = tab.start;
   el.reload.classList.toggle('loading', tab.loading);
   el.reload.title = tab.loading ? 'Остановить (Esc)' : 'Обновить (F5)';
@@ -1303,6 +1324,82 @@ function renderWallpaper() {
 
 $('#wallbtn').addEventListener('click', () => openHub('settings'));
 
+// ---------- плитки стартовой: правка, удаление, порядок, размер ----------
+
+let dragTile = -1;
+function tileNode(bookmark, index) {
+  const close = h('button', { class: 'tile-x', title: 'Убрать плитку' }, icon('x', 13));
+  close.addEventListener('click', (event) => { event.stopPropagation(); removeTile(bookmark); });
+  const tile = h('div', {
+    class: 'tile', style: `--i:${index}`, title: bookmark.url, draggable: 'true',
+    onclick: () => send('open', { url: bookmark.url }),
+    // наведение — сайт начинает грузиться заранее, щелчок покажет его почти мгновенно
+    onmouseenter: () => { clearTimeout(prewarmTimer); prewarmTimer = setTimeout(() => send('prewarm', { url: bookmark.url }), 140); },
+    onmouseleave: () => clearTimeout(prewarmTimer),
+  }, favicon(bookmark.url, true), h('span', { class: 'name' }, bookmark.title || hostOf(bookmark.url)), close);
+  tile.addEventListener('auxclick', (event) => { if (event.button === 1) send('open', { url: bookmark.url, newTab: true }); });
+  tile.addEventListener('contextmenu', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const size = S.settings.tileSize || 'm';
+    showMenu('tile', [
+      h('div', { class: 'menu-title' }, bookmark.title || hostOf(bookmark.url)),
+      item({ icon: 'open', label: 'Открыть в новой вкладке', onClick: () => send('open', { url: bookmark.url, newTab: true }) }),
+      item({ icon: 'edit', label: 'Изменить название и адрес', onClick: () => editTile(bookmark, index) }),
+      item({ icon: 'plus', label: 'Добавить сайт', onClick: () => editTile(null, index + 1) }),
+      sep(),
+      h('div', { class: 'menu-title' }, 'Размер плиток'),
+      ...[['s', 'Маленькие'], ['m', 'Средние'], ['l', 'Большие']].map(([value, label]) =>
+        item({ label, check: size === value, onClick: () => set('tile_size', value) })),
+      sep(),
+      item({ icon: 'trash', label: 'Убрать плитку', danger: true, onClick: () => removeTile(bookmark) }),
+    ], () => {
+      el.menu.style.left = Math.max(8, Math.min(event.clientX, innerWidth - 270)) + 'px';
+      el.menu.style.top = Math.max(8, Math.min(event.clientY, innerHeight - 380)) + 'px';
+    });
+  });
+  // перетаскивание — новый порядок
+  tile.addEventListener('dragstart', (event) => { dragTile = index; tile.classList.add('dragging'); event.dataTransfer.effectAllowed = 'move'; });
+  tile.addEventListener('dragend', () => { dragTile = -1; tile.classList.remove('dragging'); document.querySelectorAll('.tile.drop').forEach((t) => t.classList.remove('drop')); });
+  tile.addEventListener('dragover', (event) => { if (dragTile < 0 || dragTile === index) return; event.preventDefault(); tile.classList.add('drop'); });
+  tile.addEventListener('dragleave', () => tile.classList.remove('drop'));
+  tile.addEventListener('drop', (event) => {
+    event.preventDefault();
+    tile.classList.remove('drop');
+    if (dragTile >= 0 && dragTile !== index) send('bookmark_move', { from: dragTile, to: index });
+  });
+  return tile;
+}
+
+function removeTile(bookmark) {
+  const index = S.bookmarks.findIndex((b) => b.url === bookmark.url);
+  send('bookmark_remove', { url: bookmark.url });
+  toastAction(`Плитка «${bookmark.title || hostOf(bookmark.url)}» убрана`, 'Вернуть', () =>
+    send('bookmark_edit', { old: '', url: bookmark.url, title: bookmark.title, index: Math.max(0, index) }));
+}
+
+/** Окошко правки плитки: bookmark = null — новая плитка на месте index. */
+function editTile(bookmark, index) {
+  const title = h('input', { type: 'text', class: 'field', placeholder: 'Название', spellcheck: 'false', value: bookmark?.title || '' });
+  const url = h('input', { type: 'text', class: 'field', placeholder: 'Адрес сайта, например music.yandex.ru', spellcheck: 'false', value: bookmark?.url || '' });
+  const save = () => {
+    if (!url.value.trim()) return url.focus();
+    closeMenu();
+    send('bookmark_edit', { old: bookmark?.url || '', url: url.value.trim(), title: title.value, index });
+  };
+  [title, url].forEach((input) => input.addEventListener('keydown', (e) => { if (e.key === 'Enter') save(); e.stopPropagation(); }));
+  showMenu('tile-edit', [
+    h('div', { class: 'menu-title' }, bookmark ? 'Изменить плитку' : 'Новая плитка'),
+    h('div', { class: 'tile-form' }, url, title,
+      h('div', { class: 'tile-form-btns' },
+        h('button', { class: 'text-btn', onclick: closeMenu }, 'Отмена'),
+        h('button', { class: 'text-btn primary', onclick: save }, 'Сохранить'))),
+  ], (rect) => {
+    el.menu.style.left = Math.max(8, (innerWidth - rect.width) / 2) + 'px';
+    el.menu.style.top = Math.max(8, innerHeight * 0.3) + 'px';
+  }).then(() => setTimeout(() => (bookmark ? title : url).focus(), 30));
+}
+
 function renderStart() {
   renderEngines();
   renderWallpaper();
@@ -1311,17 +1408,11 @@ function renderStart() {
   const key = limit + JSON.stringify(S.bookmarks);
   if (key !== tilesKey) {
     tilesKey = key;
-    const tiles = S.bookmarks.slice(0, limit).map((bookmark, index) =>
-      h('div', {
-        class: 'tile', style: `--i:${index}`, title: bookmark.url,
-        onclick: () => send('open', { url: bookmark.url }),
-        // наведение — сайт начинает грузиться заранее, щелчок покажет его почти мгновенно
-        onmouseenter: () => { clearTimeout(prewarmTimer); prewarmTimer = setTimeout(() => send('prewarm', { url: bookmark.url }), 140); },
-        onmouseleave: () => clearTimeout(prewarmTimer),
-      }, favicon(bookmark.url, true), h('span', { class: 'name' }, bookmark.title || hostOf(bookmark.url))));
-    el.tiles.replaceChildren(...(tiles.length
-      ? tiles
-      : [h('div', { class: 'tiles-hint' }, 'Здесь появятся сайты из избранного — добавляйте их звёздочкой или Ctrl+D')]));
+    const tiles = S.bookmarks.slice(0, limit).map((bookmark, index) => tileNode(bookmark, index));
+    // «+» — добавить свой сайт прямо сюда
+    const add = h('div', { class: 'tile add', style: `--i:${tiles.length}`, title: 'Добавить сайт', onclick: () => editTile(null, Math.min(S.bookmarks.length, limit)) },
+      h('span', { class: 'plus' }, icon('plus', 22)), h('span', { class: 'name' }, 'Добавить'));
+    el.tiles.replaceChildren(...tiles, ...(tiles.length < limit ? [add] : []));
   }
   el.stat.replaceChildren(
     icon('shield', 14),
@@ -2523,6 +2614,49 @@ function showPasswordPicker() {
 
 $('#translatebtn').addEventListener('click', () => send('translate', { original: /\.translate\.goog\//.test(activeTab()?.url || '') }));
 $('#pipbtn').addEventListener('click', () => send('pip'));
+
+// ---------- усилитель звука ----------
+
+function siteBoost(tab) {
+  const host = hostOf(tab?.url || '').replace(/^www\./, '');
+  return (S.settings.siteBoost || {})[host] ?? 100;
+}
+
+let boostTimer = 0;
+$('#boostbtn').addEventListener('click', () => {
+  if (menuKind === 'boost') return closeMenu();
+  const tab = activeTab();
+  let level = siteBoost(tab);
+  const value = h('div', { class: 'boost-value' });
+  const range = h('input', { type: 'range', min: 0, max: 600, step: 10, class: 'range boost-range' });
+  const show = () => {
+    value.textContent = level + ' %';
+    value.classList.toggle('loud', level > 100);
+    range.value = level;
+    range.style.setProperty('--fill', (level / 6) + '%');
+  };
+  const pick = (v, now) => {
+    level = Math.max(0, Math.min(600, Math.round(v / 10) * 10));
+    show();
+    clearTimeout(boostTimer);
+    // ползунок — плавно, но без лишних сообщений на каждый пиксель
+    boostTimer = setTimeout(() => send('boost', { level }), now ? 0 : 60);
+  };
+  range.addEventListener('input', () => pick(Number(range.value)));
+  show();
+  showMenu('boost', [
+    h('div', { class: 'menu-title' }, 'Усиление звука · ' + hostOf(tab.url).replace(/^www\./, '')),
+    h('div', { class: 'boost-box' }, value, range,
+      h('div', { class: 'boost-presets' }, ...[100, 200, 300, 400, 600].map((v) =>
+        h('button', { class: 'text-btn outline', onclick: () => pick(v, true) }, v + '%'))),
+      h('div', { class: 'ext-hint' }, 'Запоминается для сайта. Выше 100 % звук усиливается, ограничитель не даёт ему хрипеть')),
+  ], (rect) => {
+    const anchor = $('#boostbtn').getBoundingClientRect();
+    el.menu.style.top = anchor.bottom + 10 + 'px';
+    el.menu.style.left = Math.max(8, Math.min(anchor.right, innerWidth - 8) - rect.width) + 'px';
+    el.menu.style.transformOrigin = 'top right';
+  });
+});
 
 pwkey.addEventListener('click', () => {
   if (menuKind === 'pwsave' || menuKind === 'pwpick') return closeMenu();

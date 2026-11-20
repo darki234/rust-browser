@@ -1061,6 +1061,41 @@ body.inprivate #privatenote { display: flex; }
 .tile:hover { transform: translateY(-5px) scale(1.04); box-shadow: var(--shadow); background: var(--surface); }
 .tile:active { transform: scale(.95); }
 .tile .name { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.tile { position: relative; }
+/* крестик при наведении */
+.tile-x {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--surface2, var(--hover));
+  color: var(--muted);
+  opacity: 0;
+  transform: scale(.7);
+  transition: opacity .15s, transform .2s var(--spring), background .15s, color .15s;
+}
+.tile:hover .tile-x { opacity: 1; transform: none; }
+.tile-x:hover { background: var(--danger); color: #fff; }
+.tile.dragging { opacity: .35; }
+.tile.drop { outline: 2px dashed var(--accent); outline-offset: 3px; }
+.tile.add { border-style: dashed; background: transparent; color: var(--muted); }
+.tile.add .plus { width: 44px; height: 44px; display: grid; place-items: center; border-radius: 13px; background: var(--hover); }
+.tile.add:hover { color: var(--accent); }
+.tile-form { display: flex; flex-direction: column; gap: 8px; width: 340px; padding: 4px 8px 8px; }
+.tile-form .field { width: 100%; }
+.tile-form-btns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+/* размер плиток */
+body.tiles-s .tile { width: 84px; height: 82px; border-radius: 16px; gap: 7px; }
+body.tiles-s .tile .fav.lg { width: 30px; height: 30px; border-radius: 9px; }
+body.tiles-s .tile .name { font-size: 11px; }
+body.tiles-l .tile { width: 140px; height: 128px; border-radius: 24px; }
+body.tiles-l .tile .fav.lg { width: 52px; height: 52px; border-radius: 15px; }
+body.tiles-l .tile .name { font-size: 13px; }
+body.tiles-l #tiles { width: min(1000px, 100%); }
 .tiles-hint { color: var(--muted); font-size: 13px; text-align: center; }
 
 #stat {
@@ -2134,8 +2169,17 @@ body.island-float #chrome { background: transparent; }
 body.island-float #titlebar { background: radial-gradient(120% 220% at 0% 0%, var(--frame-glow), transparent 55%), var(--frame); }
 body.glass.island-float #titlebar { background: radial-gradient(120% 220% at 0% 0%, var(--frame-glow), transparent 55%), var(--glass-frame); }
 
-#translatebtn, #pipbtn { display: none; color: var(--muted); }
-#translatebtn.show, #pipbtn.show { display: grid; }
+#translatebtn, #pipbtn, #boostbtn { display: none; color: var(--muted); }
+#translatebtn.show, #pipbtn.show, #boostbtn.show { display: grid; }
+#boostbtn.show.on { display: flex; width: auto; gap: 3px; padding: 0 7px; color: var(--accent); }
+#boostbtn .boostval { font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
+#boostbtn .boostval:empty { display: none; }
+.boost-box { display: flex; flex-direction: column; gap: 12px; width: 300px; padding: 4px 12px 10px; }
+.boost-value { font-size: 30px; font-weight: 600; text-align: center; font-variant-numeric: tabular-nums; transition: color .2s; }
+.boost-value.loud { color: var(--accent); }
+.boost-range { width: 100%; }
+.boost-presets { display: flex; gap: 6px; justify-content: space-between; }
+.boost-presets .text-btn { flex: 1; padding: 5px 0; }
 #translatebtn.on { color: var(--accent); }
 
 #afbtn { display: none; color: var(--muted); }
@@ -2278,3 +2322,7 @@ body.url-collapsed #urlbox.expanded {
 /* исправленный запрос в подсказках */
 .sug.fix .t { font-weight: 600; }
 .sug.fix .kind { color: var(--accent); }
+
+/* кнопка в уведомлении */
+.toast-btn { margin-left: 12px; padding: 3px 10px; border-radius: 8px; color: var(--accent); font-weight: 600; pointer-events: auto; }
+.toast-btn:hover { background: var(--hover); }

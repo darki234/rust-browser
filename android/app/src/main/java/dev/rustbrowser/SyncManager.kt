@@ -1,7 +1,6 @@
 package dev.rustbrowser
 
 import android.content.Context
-import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import androidx.compose.runtime.getValue
@@ -13,8 +12,10 @@ import java.io.File
 import java.util.concurrent.Executors
 
 /**
- * Вход в аккаунт и синхронизация. Тяжёлое (ключ из пароля, шифр, чтение облака) — в
- * фоновом потоке; на главном только снимок данных и применение результата.
+ * Синхронизация с компьютером: сначала напрямую по Wi‑Fi, потом через диск WebDAV.
+ * Сеть и шифр — в фоновом потоке; на главном только снимок данных и применение итога.
+ * Пока приложение открыто, телефон раз в несколько секунд спрашивает у компьютера номер
+ * версии данных — вкладка, отправленная с компьютера, приходит почти сразу.
  */
 class SyncManager(private val context: Context, private val store: Store, private val passwords: Passwords) {
     /** Пришли вкладки с компьютера: (адрес, заголовок). Открывает их браузер. */
@@ -30,37 +31,19 @@ class SyncManager(private val context: Context, private val store: Store, privat
 
     private fun now() = System.currentTimeMillis()
 
-    fun login(name: String, password: String, uri: Uri) {
-        if (busy) return
-        busy = true
-        error = null
-        worker.execute {
-            try {
-                val bytes = engine.read(uri) ?: throw SyncError("файл не открылся — проверьте, что OneDrive его скачал")
-                val salt = SyncCrypto.readSalt(bytes) ?: throw SyncError("это не файл синхронизации Rust Browser")
-                val key = SyncCrypto.deriveKey(password, salt)
-                SyncCrypto.decrypt(bytes, key) // неверный пароль — исключение
-                val (sealed, iv) = Keystore.seal(key)
-                val acc = SyncAccount(name.trim(), uri, salt, sealed, iv)
-                main.post {
-                    account = acc
-                    save()
-                    busy = false
-                    syncNow(manual = true)
-                }
-            } catch (e: Exception) {
-                main.post { busy = false; error = e.message ?: "не удалось войти" }
-            }
+    /** Вход в связку по коду из QR. */
+    fun pair(code: String): Boolean {
+        val pair = PairCode.parse(code) ?: run { error = "Это не код Rust Browser — откройте на компьютере Параметры → Синхронизация"; return false }
+        val (sealed, iv) = Keystore.seal(pair.key)
+        val dav = pair.dav?.let { (url, user, pass) ->
+            val (sp, si) = Keystore.seal(pass.toByteArray(Charsets.UTF_8))
+            Dav(url, user, sp, si)
         }
-    }
-
-    /** Файл в облаке переехал (OneDrive пересоздал его) — указать заново, пароль не нужен. */
-    fun relink(uri: Uri) {
-        val acc = account ?: return
-        account = SyncAccount(acc.name, uri, acc.salt, acc.sealedKey, acc.keyIv, acc.hashes, acc.synced)
-        save()
+        account = SyncAccount(pair.group, sealed, iv, SyncCrypto.hex(SyncCrypto.random(6)), pair.pcName, pair.hosts, pair.port, dav)
         error = null
+        save()
         syncNow(manual = true)
+        return true
     }
 
     fun logout() {
@@ -69,68 +52,184 @@ class SyncManager(private val context: Context, private val store: Store, privat
         error = null
     }
 
-    /** Раз в 5 минут при возвращении в приложение и при уходе из него. */
+    /** При возвращении в приложение и при уходе из него — если давно не было. */
     fun syncIfStale(maxAgeMs: Long) {
         val acc = account ?: return
         if (now() - acc.synced * 1000 > maxAgeMs) syncNow(manual = false)
     }
 
-    fun syncNow(manual: Boolean) {
+    // ---------- опрос компьютера ----------
+
+    private var polling = false
+    private var lastRev: Long? = null
+    private val poll = object : Runnable {
+        override fun run() {
+            if (!polling) return
+            val acc = account
+            if (acc != null && !busy) {
+                val key = acc.group
+                worker.execute {
+                    val rev = lanHosts(acc).firstNotNullOfOrNull { host -> Lan.rev(host, acc.port, key) }
+                    main.post {
+                        if (rev != null && rev != lastRev) {
+                            val first = lastRev == null
+                            lastRev = rev
+                            if (!first) syncNow(manual = false, lanOnly = true)
+                        }
+                    }
+                }
+            }
+            main.postDelayed(this, 5_000)
+        }
+    }
+
+    fun startPolling() {
+        if (polling) return
+        polling = true
+        main.postDelayed(poll, 1_500)
+    }
+
+    fun stopPolling() {
+        polling = false
+        main.removeCallbacks(poll)
+    }
+
+    /** Где искать компьютер: адреса из кода, а на эмуляторе — сам компьютер. */
+    private fun lanHosts(acc: SyncAccount): List<String> = (if (Lan.emulator()) listOf("10.0.2.2") else emptyList()) + acc.hosts
+
+    // ---------- синхронизация ----------
+
+    private fun localNow(): Map<String, Any> =
+        engine.localSections(store.bookmarks.toList(), store.history.toList(), store.historyCleared, passwords.toJson(), store.sentTabs)
+
+    /** Wi‑Fi, затем диск. [lanOnly] — когда компьютер сам сказал, что у него новое. */
+    fun syncNow(manual: Boolean, lanOnly: Boolean = false) {
         val acc = account ?: return
         if (busy) return
         busy = true
-        // снимок своих данных — здесь, на главном потоке
-        val local = engine.localSections(store.bookmarks.toList(), store.history.toList(), store.historyCleared, passwords.toJson(), store.sentTabs)
+        lanPhase(acc, manual) { lanChanged, lanOk ->
+            if (lanOnly || acc.dav == null) {
+                finish(acc, manual, lanChanged, if (lanOk) null else if (acc.dav == null) "компьютер не найден в этой сети Wi‑Fi" else null)
+            } else {
+                davPhase(acc, manual, lanChanged, lanOk)
+            }
+        }
+    }
+
+    /** Слить ответ собеседника [peer] со своими данными; итог — на главном потоке. */
+    private fun mergeWith(remote: JSONObject, local: Map<String, Any>, base: Map<String, String>, defaultsOnly: Boolean): Map<String, Any> {
+        val results = LinkedHashMap<String, Any>()
+        for ((name, value) in local) {
+            val r = remote.opt(name)
+            var choice = engine.choose(value, r, base[name])
+            // первые плитки телефона не разносим по компьютерам
+            if (name == "bookmarks" && base[name] == null && defaultsOnly && r != null) choice = "remote"
+            results[name] = when (choice) {
+                "local" -> value
+                "remote" -> r!!
+                else -> engine.merge(name, value, r!!)
+            }
+        }
+        return results
+    }
+
+    private fun lanPhase(acc: SyncAccount, manual: Boolean, next: (changed: Int, ok: Boolean) -> Unit) {
+        val local = localNow()
         val defaultsOnly = store.bookmarksAreDefaults()
-        val hashes = acc.hashes.toMap()
+        val base = acc.bases["pc"] ?: emptyMap()
         worker.execute {
             try {
                 val key = acc.key()
-                val bytes = engine.read(acc.uri) ?: throw SyncError("файл в облаке недоступен — откройте OneDrive и повторите")
-                val bundle = SyncCrypto.decrypt(bytes, key)
-                val sections = bundle.optJSONObject("sections") ?: JSONObject()
-                val results = LinkedHashMap<String, Any>()
-                for ((name, value) in local) {
-                    val remote = sections.opt(name)
-                    var choice = engine.choose(value, remote, hashes[name])
-                    // первые плитки телефона не разносим по компьютерам
-                    if (name == "bookmarks" && hashes[name] == null && defaultsOnly && remote != null) choice = "remote"
-                    results[name] = when (choice) {
-                        "local" -> value
-                        "remote" -> remote!!
-                        else -> engine.merge(name, value, remote!!)
+                val sections = JSONObject()
+                local.forEach { (k, v) -> sections.put(k, v) }
+                val packet = SyncCrypto.encrypt(
+                    JSONObject().put("sections", sections).put("device", engine.device()).put("id", acc.device).put("time", now() / 1000),
+                    key, acc.group,
+                )
+                var answer: ByteArray? = null
+                var found: Pair<String, Int>? = null
+                for (host in lanHosts(acc)) {
+                    answer = Lan.exchange(host, acc.port, acc.group, packet)
+                    if (answer != null) { found = host to acc.port; break }
+                }
+                if (answer == null) {
+                    // компьютер мог сменить адрес — ищем его по сети
+                    Lan.discover(acc.group)?.let { (host, port) ->
+                        answer = Lan.exchange(host, port, acc.group, packet)
+                        if (answer != null) found = host to port
                     }
                 }
-                // в облако — все разделы компьютера как были, поверх — наши слитые
-                val out = JSONObject(sections.toString())
-                results.forEach { (k, v) -> out.put(k, v) }
-                val needsWrite = results.any { (k, v) -> !Json.same(v, sections.opt(k)) }
-                var writeError: String? = null
-                if (needsWrite) {
-                    val fresh = JSONObject().put("sections", out).put("device", engine.device()).put("time", now() / 1000)
-                    try {
-                        engine.write(acc.uri, SyncCrypto.encrypt(fresh, key, acc.salt))
-                    } catch (e: Exception) {
-                        writeError = "с компьютера получено, но изменения телефона не записались: ${e.message}"
-                    }
+                val bytes = answer
+                if (bytes == null) {
+                    main.post { next(0, false) }
+                    return@execute
                 }
-                val newHashes = results.mapValues { Json.fingerprint(it.value) }.toMutableMap()
+                val remote = SyncCrypto.decrypt(bytes, key).optJSONObject("sections") ?: JSONObject()
+                val results = mergeWith(remote, local, base, defaultsOnly)
+                val hashes = results.mapValues { Json.fingerprint(it.value) }
                 main.post {
                     val changed = apply(results, local)
-                    // не записалось — старые отпечатки, в следующий раз попробуем снова
-                    if (writeError == null) acc.hashes = newHashes
-                    acc.synced = now() / 1000
-                    save()
-                    busy = false
-                    error = writeError
-                    if (manual && writeError == null) {
-                        val text = if (changed > 0) "Синхронизировано: обновлено разделов — $changed" else "Всё синхронизировано"
-                        android.widget.Toast.makeText(context, text, android.widget.Toast.LENGTH_SHORT).show()
+                    acc.bases["pc"] = hashes
+                    found?.let { (host, port) ->
+                        if (!Lan.emulator() || host != "10.0.2.2") acc.hosts = (listOf(host) + acc.hosts).distinct().take(4)
+                        acc.port = port
                     }
+                    acc.via = "lan"
+                    next(changed, true)
                 }
             } catch (e: Exception) {
                 main.post { busy = false; error = e.message ?: "синхронизация не удалась" }
             }
+        }
+    }
+
+    private fun davPhase(acc: SyncAccount, manual: Boolean, lanChanged: Int, lanOk: Boolean) {
+        val dav = acc.dav ?: return finish(acc, manual, lanChanged, null)
+        val local = localNow()
+        val defaultsOnly = store.bookmarksAreDefaults()
+        val base = acc.bases["webdav"] ?: emptyMap()
+        worker.execute {
+            try {
+                val key = acc.key()
+                val file = dav.file(acc.group)
+                val pass = dav.pass()
+                val bytes = WebDav.get(file, dav.user, pass)
+                val sections = bytes?.let { SyncCrypto.decrypt(it, key).optJSONObject("sections") } ?: JSONObject()
+                val results = mergeWith(sections, local, base, defaultsOnly)
+                // на диск — все разделы компьютера как были, поверх — наши слитые
+                val out = JSONObject(sections.toString())
+                results.forEach { (k, v) -> out.put(k, v) }
+                val needsWrite = bytes == null || results.any { (k, v) -> !Json.same(v, sections.opt(k)) }
+                if (needsWrite) {
+                    val fresh = JSONObject().put("sections", out).put("device", engine.device()).put("id", acc.device).put("time", now() / 1000)
+                    WebDav.put(file, dav.user, pass, SyncCrypto.encrypt(fresh, key, acc.group))
+                }
+                val hashes = results.mapValues { Json.fingerprint(it.value) }
+                main.post {
+                    val changed = apply(results, local)
+                    acc.bases["webdav"] = hashes
+                    if (!lanOk) acc.via = "dav"
+                    finish(acc, manual, lanChanged + changed, null)
+                }
+            } catch (e: Exception) {
+                main.post { finish(acc, manual, lanChanged, if (lanOk) null else e.message ?: "диск недоступен") }
+            }
+        }
+    }
+
+    private fun finish(acc: SyncAccount, manual: Boolean, changed: Int, problem: String?) {
+        // пока шёл обмен, синхронизацию выключили — ничего не возвращаем
+        if (account !== acc) { busy = false; return }
+        if (problem == null) acc.synced = now() / 1000
+        save()
+        busy = false
+        error = problem
+        // снимок для Compose: тот же объект, но с новыми полями
+        account = null
+        account = acc
+        if (manual && problem == null) {
+            val text = if (changed > 0) "Синхронизировано: обновлено разделов — $changed" else "Всё синхронизировано"
+            android.widget.Toast.makeText(context, text, android.widget.Toast.LENGTH_SHORT).show()
         }
     }
 

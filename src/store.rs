@@ -75,6 +75,8 @@ pub struct Settings {
     pub island_tabs: bool,
     /// Тёмная тема для сайтов: список сайтов и «для всех».
     pub dark_sites: Vec<String>,
+    /// Усиление звука по сайтам: хост → громкость в процентах (100 — как есть).
+    pub site_boost: std::collections::BTreeMap<String, u32>,
     pub dark_all: bool,
     /// Ссылки «в новой вкладке» открываются в фоне и по обычному щелчку
     /// (колёсико и Ctrl+щелчок — в фоне всегда).
@@ -106,6 +108,8 @@ pub struct Settings {
     pub bar_style: String,
     /// "clock" | "minimal" | "tiles" | "greeting"
     pub newtab_layout: String,
+    /// Размер плиток на стартовой: "s" | "m" | "l".
+    pub tile_size: String,
     /// Живые обои двигаются всё время, а не только пока человек что-то делает.
     pub wallpaper_always: bool,
     /// "off" | "http" | "socks5"
@@ -147,6 +151,7 @@ impl Default for Settings {
             island_radius: 100,
             island_tabs: false,
             dark_sites: Vec::new(),
+            site_boost: Default::default(),
             dark_all: false,
             left_click_background: false,
             hidden_tools: Vec::new(),
@@ -163,6 +168,7 @@ impl Default for Settings {
             motion: "smooth".to_string(),
             bar_style: "classic".to_string(),
             newtab_layout: "clock".to_string(),
+            tile_size: "m".to_string(),
             wallpaper_always: false,
             proxy_mode: "off".to_string(),
             proxy_host: String::new(),

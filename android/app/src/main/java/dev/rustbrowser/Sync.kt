@@ -1,7 +1,6 @@
 package dev.rustbrowser
 
 import android.content.Context
-import android.net.Uri
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
@@ -9,77 +8,86 @@ import android.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.HttpURLConnection
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
+import java.net.URL
 import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
-import javax.crypto.Mac
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /**
- * Синхронизация с настольным Rust Browser через тот же зашифрованный файл в OneDrive
- * (формат rust-browser-sync/1 из src/sync.rs): PBKDF2-SHA256 600 000 повторов → AES-256-GCM.
+ * Синхронизация с настольным Rust Browser (src/sync.rs, формат rust-browser-sync/2).
  *
- * Телефон сливает закладки и историю по тем же правилам, что и компьютер. Остальные
- * разделы (пароли, расширения, автозаполнение, параметры, заметки) он не трогает
- * и записывает обратно как есть — ничего не теряется.
+ * Телефон входит в «связку» компьютера по QR-коду: в коде случайный ключ AES-256,
+ * номер связки, адреса компьютера в домашней сети и (если подключён) диск WebDAV.
+ * Дома телефон обменивается с компьютером напрямую, вне дома — через файл на диске.
+ * Всё зашифровано ключом связки, свои «точки отсчёта» слияния для компьютера и диска.
  */
 object SyncCrypto {
-    const val FORMAT = "rust-browser-sync/1"
-    const val ITERATIONS = 600_000
-
-    /** PBKDF2-HMAC-SHA256 над байтами UTF-8 пароля — ровно как pbkdf2_hmac в Rust. */
-    fun deriveKey(password: String, salt: ByteArray, iterations: Int = ITERATIONS): ByteArray {
-        val mac = Mac.getInstance("HmacSHA256")
-        mac.init(SecretKeySpec(password.toByteArray(Charsets.UTF_8), "HmacSHA256"))
-        // один блок: длина ключа 32 байта = длина SHA-256
-        mac.update(salt)
-        mac.update(byteArrayOf(0, 0, 0, 1))
-        var u = mac.doFinal()
-        val out = u.copyOf()
-        for (i in 1 until iterations) {
-            u = mac.doFinal(u)
-            for (j in out.indices) out[j] = (out[j].toInt() xor u[j].toInt()).toByte()
-        }
-        return out
-    }
+    const val FORMAT = "rust-browser-sync/2"
 
     fun decrypt(bytes: ByteArray, key: ByteArray): JSONObject {
-        val env = runCatching { JSONObject(String(bytes, Charsets.UTF_8)) }.getOrNull() ?: throw SyncError("файл синхронизации повреждён")
-        if (env.optString("format") != FORMAT) throw SyncError("файл от более новой версии браузера")
+        val env = runCatching { JSONObject(String(bytes, Charsets.UTF_8)) }.getOrNull() ?: throw SyncError("данные синхронизации повреждены")
+        if (env.optString("format") != FORMAT) throw SyncError("данные от другой версии браузера — обновите его")
         val nonce = b64(env.optString("nonce"))
         val sealed = b64(env.optString("data"))
-        if (nonce.size != 12) throw SyncError("файл повреждён")
+        if (nonce.size != 12) throw SyncError("данные повреждены")
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, nonce))
-        val plain = runCatching { cipher.doFinal(sealed) }.getOrNull() ?: throw SyncError("неверный пароль")
+        val plain = runCatching { cipher.doFinal(sealed) }.getOrNull() ?: throw SyncError("чужой ключ — подключите телефон заново по QR-коду")
         return JSONObject(String(plain, Charsets.UTF_8))
     }
 
-    fun encrypt(bundle: JSONObject, key: ByteArray, salt: ByteArray): ByteArray {
-        val nonce = ByteArray(12).also { SecureRandom().nextBytes(it) }
+    fun encrypt(bundle: JSONObject, key: ByteArray, group: String): ByteArray {
+        val nonce = random(12)
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, nonce))
         val sealed = cipher.doFinal(bundle.toString().toByteArray(Charsets.UTF_8))
-        val env = JSONObject()
-            .put("format", FORMAT).put("kdf", "pbkdf2-sha256").put("iterations", ITERATIONS)
-            .put("salt", b64(salt)).put("nonce", b64(nonce)).put("data", b64(sealed))
+        val env = JSONObject().put("format", FORMAT).put("group", group).put("nonce", b64(nonce)).put("data", b64(sealed))
         return env.toString().toByteArray(Charsets.UTF_8)
-    }
-
-    fun readSalt(bytes: ByteArray): ByteArray? = runCatching { b64(JSONObject(String(bytes, Charsets.UTF_8)).getString("salt")) }.getOrNull()
-
-    /** Имя файла аккаунта, как его даёт компьютер: RustBrowser-<8 байт SHA-256 имени>.rbsync */
-    fun fileName(account: String): String {
-        val digest = MessageDigest.getInstance("SHA-256").digest(account.trim().lowercase().toByteArray(Charsets.UTF_8))
-        return "RustBrowser-" + digest.take(8).joinToString("") { "%02x".format(it) } + ".rbsync"
     }
 
     fun b64(bytes: ByteArray): String = Base64.encodeToString(bytes, Base64.NO_WRAP)
     fun b64(text: String): ByteArray = runCatching { Base64.decode(text, Base64.DEFAULT) }.getOrDefault(ByteArray(0))
+    fun hex(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it) }
+    fun random(n: Int): ByteArray = ByteArray(n).also { SecureRandom().nextBytes(it) }
+}
+
+/** Код связки из QR (RBSYNC1.<base64url JSON>), как его даёт компьютер. */
+class PairCode(
+    val group: String,
+    val key: ByteArray,
+    val pcName: String,
+    val hosts: List<String>,
+    val port: Int,
+    val dav: Triple<String, String, String>?, // адрес, логин, пароль
+) {
+    companion object {
+        fun parse(text: String): PairCode? = runCatching {
+            val trimmed = text.trim()
+            if (!trimmed.startsWith("RBSYNC1.")) return null
+            val body = trimmed.removePrefix("RBSYNC1.")
+            val json = JSONObject(String(Base64.decode(body, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP), Charsets.UTF_8))
+            val key = SyncCrypto.b64(json.getString("k"))
+            if (key.size != 32 || json.optString("g").isEmpty()) return null
+            val a = json.optJSONArray("a") ?: JSONArray()
+            val w = json.optJSONObject("w")
+            PairCode(
+                json.getString("g"), key, json.optString("n"),
+                (0 until a.length()).map { a.getString(it) }, json.optInt("p", Lan.PORT),
+                w?.let { Triple(it.optString("u"), it.optString("l"), it.optString("p")) },
+            )
+        }.getOrNull()
+    }
 }
 
 class SyncError(message: String) : Exception(message)
@@ -148,32 +156,155 @@ object Json {
     }
 }
 
-// ---------- аккаунт на телефоне ----------
+// ---------- связка на телефоне ----------
 
-/** Аккаунт: файл в облаке (адрес от системы), соль, ключ под защитой Android Keystore. */
+/** Диск WebDAV: адрес, логин, пароль под Keystore. */
+class Dav(val url: String, val user: String, val sealedPass: ByteArray, val passIv: ByteArray) {
+    fun pass(): String = String(Keystore.open(sealedPass, passIv), Charsets.UTF_8)
+    fun file(group: String) = url.trim().trimEnd('/') + "/rust-browser-$group.rbsync"
+    fun toJson(): JSONObject = JSONObject().put("url", url).put("user", user).put("pass", SyncCrypto.b64(sealedPass)).put("iv", SyncCrypto.b64(passIv))
+
+    companion object {
+        fun from(j: JSONObject?): Dav? = j?.let { Dav(it.getString("url"), it.getString("user"), SyncCrypto.b64(it.getString("pass")), SyncCrypto.b64(it.getString("iv"))) }
+    }
+}
+
+/** Связка: номер, ключ под Keystore, компьютер в домашней сети, диск, точки отсчёта слияния. */
 class SyncAccount(
-    val name: String,
-    val uri: Uri,
-    val salt: ByteArray,
+    val group: String,
     val sealedKey: ByteArray,
     val keyIv: ByteArray,
-    var hashes: MutableMap<String, String> = mutableMapOf(),
+    val device: String,
+    val pcName: String,
+    var hosts: List<String>,
+    var port: Int,
+    var dav: Dav?,
+    var bases: MutableMap<String, Map<String, String>> = mutableMapOf(),
     var synced: Long = 0,
+    /** Как прошла последняя синхронизация: "lan" — по Wi‑Fi, "dav" — через диск. */
+    var via: String = "",
 ) {
-    fun toJson(): JSONObject = JSONObject()
-        .put("name", name).put("uri", uri.toString())
-        .put("salt", SyncCrypto.b64(salt)).put("key", SyncCrypto.b64(sealedKey)).put("iv", SyncCrypto.b64(keyIv))
-        .put("hashes", JSONObject(hashes as Map<*, *>)).put("synced", synced)
+    fun toJson(): JSONObject {
+        val b = JSONObject()
+        bases.forEach { (peer, map) -> b.put(peer, JSONObject(map as Map<*, *>)) }
+        return JSONObject()
+            .put("group", group).put("key", SyncCrypto.b64(sealedKey)).put("iv", SyncCrypto.b64(keyIv))
+            .put("device", device).put("pc", pcName).put("hosts", JSONArray(hosts)).put("port", port)
+            .put("dav", dav?.toJson() ?: JSONObject.NULL).put("bases", b).put("synced", synced).put("via", via)
+    }
 
     fun key(): ByteArray = Keystore.open(sealedKey, keyIv)
 
     companion object {
         fun load(dir: File): SyncAccount? = runCatching {
             val j = JSONObject(File(dir, "account.json").readText())
-            val hashes = j.optJSONObject("hashes")?.let { h -> h.keys().asSequence().associateWith { h.getString(it) }.toMutableMap() } ?: mutableMapOf()
-            SyncAccount(j.getString("name"), Uri.parse(j.getString("uri")), SyncCrypto.b64(j.getString("salt")),
-                SyncCrypto.b64(j.getString("key")), SyncCrypto.b64(j.getString("iv")), hashes, j.optLong("synced"))
+            if (j.optString("group").isEmpty()) return null // старый вход через OneDrive больше не используется
+            val bases = mutableMapOf<String, Map<String, String>>()
+            j.optJSONObject("bases")?.let { b ->
+                b.keys().forEach { peer -> val m = b.getJSONObject(peer); bases[peer] = m.keys().asSequence().associateWith { m.getString(it) } }
+            }
+            val hosts = j.optJSONArray("hosts")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList()
+            SyncAccount(j.getString("group"), SyncCrypto.b64(j.getString("key")), SyncCrypto.b64(j.getString("iv")), j.getString("device"),
+                j.optString("pc"), hosts, j.optInt("port", Lan.PORT), Dav.from(j.optJSONObject("dav")), bases, j.optLong("synced"), j.optString("via"))
         }.getOrNull()
+    }
+}
+
+// ---------- доставка: домашняя сеть и диск ----------
+
+/** Компьютер в домашней сети: простой HTTP поверх сокета (данные и так зашифрованы). */
+object Lan {
+    const val PORT = 47801
+
+    private fun request(host: String, port: Int, head: String, body: ByteArray, timeout: Int): Pair<Int, ByteArray>? = runCatching {
+        Socket().use { s ->
+            s.connect(InetSocketAddress(host, port), timeout)
+            s.soTimeout = 20_000
+            val out = s.getOutputStream()
+            out.write((head + "Content-Length: ${body.size}\r\nConnection: close\r\n\r\n").toByteArray(Charsets.UTF_8))
+            out.write(body)
+            out.flush()
+            val raw = s.getInputStream().readBytes()
+            var split = -1
+            for (i in 0 until raw.size - 3) {
+                if (raw[i] == 13.toByte() && raw[i + 1] == 10.toByte() && raw[i + 2] == 13.toByte() && raw[i + 3] == 10.toByte()) { split = i; break }
+            }
+            if (split < 0) return null
+            val status = String(raw, 0, split, Charsets.UTF_8).split(" ").getOrNull(1)?.toIntOrNull() ?: 0
+            status to raw.copyOfRange(split + 4, raw.size)
+        }
+    }.getOrNull()
+
+    /** Номер версии данных на компьютере — дёшево узнать, есть ли новое. */
+    fun rev(host: String, port: Int, group: String): Long? {
+        val (status, body) = request(host, port, "GET /rb-rev HTTP/1.1\r\nHost: $host\r\nX-RB-Group: $group\r\n", ByteArray(0), 1500) ?: return null
+        return if (status == 200) String(body).trim().toLongOrNull() else null
+    }
+
+    fun exchange(host: String, port: Int, group: String, packet: ByteArray): ByteArray? {
+        val (status, body) = request(host, port, "POST /rb-sync HTTP/1.1\r\nHost: $host\r\nX-RB-Group: $group\r\n", packet, 2500) ?: return null
+        return if (status == 200) body else null
+    }
+
+    /** Компьютер сменил адрес — кричим на всю сеть, он отвечает своим портом. */
+    fun discover(group: String): Pair<String, Int>? = runCatching {
+        DatagramSocket().use { s ->
+            s.broadcast = true
+            s.soTimeout = 1200
+            val msg = "rb-find $group".toByteArray()
+            s.send(DatagramPacket(msg, msg.size, InetAddress.getByName("255.255.255.255"), PORT))
+            val buf = ByteArray(128)
+            val packet = DatagramPacket(buf, buf.size)
+            s.receive(packet)
+            val text = String(buf, 0, packet.length)
+            val port = text.removePrefix("rb-here ").trim().toIntOrNull() ?: return null
+            packet.address.hostAddress!! to port
+        }
+    }.getOrNull()
+
+    /** Эмулятор Android видит компьютер, на котором запущен, по адресу 10.0.2.2. */
+    fun emulator(): Boolean = Build.FINGERPRINT.contains("generic") || Build.MODEL.contains("sdk_gphone") || Build.HARDWARE.contains("ranchu")
+}
+
+/** Диск WebDAV: файл связки скачать и записать. */
+object WebDav {
+    private fun open(url: String, user: String, pass: String, method: String): HttpURLConnection {
+        val c = URL(url).openConnection() as HttpURLConnection
+        c.requestMethod = method
+        c.connectTimeout = 10_000
+        c.readTimeout = 20_000
+        val auth = Base64.encodeToString("$user:$pass".toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+        c.setRequestProperty("Authorization", "Basic $auth")
+        return c
+    }
+
+    private fun fail(code: Int): Nothing = throw SyncError(when (code) {
+        401, 403 -> "диск не пустил: проверьте логин и пароль приложения"
+        404, 409 -> "на диске нет такой папки"
+        507 -> "на диске закончилось место"
+        else -> "диск ответил ошибкой $code"
+    })
+
+    /** null — файла ещё нет. */
+    fun get(url: String, user: String, pass: String): ByteArray? {
+        val c = open(url, user, pass, "GET")
+        try {
+            val code = c.responseCode
+            if (code == 404) return null
+            if (code != 200) fail(code)
+            return c.inputStream.use { it.readBytes() }
+        } finally { c.disconnect() }
+    }
+
+    fun put(url: String, user: String, pass: String, bytes: ByteArray) {
+        val c = open(url, user, pass, "PUT")
+        try {
+            c.doOutput = true
+            c.setFixedLengthStreamingMode(bytes.size)
+            c.outputStream.use { it.write(bytes) }
+            val code = c.responseCode
+            if (code !in 200..299) fail(code)
+        } finally { c.disconnect() }
     }
 }
 
@@ -267,13 +398,6 @@ class SyncEngine(private val context: Context, private val store: Store) {
             last == rh -> "local"
             else -> "merge"
         }
-    }
-
-    fun read(uri: Uri): ByteArray? = runCatching { context.contentResolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull()
-
-    fun write(uri: Uri, bytes: ByteArray) {
-        val out = context.contentResolver.openOutputStream(uri, "wt") ?: throw SyncError("облако не дало записать файл")
-        out.use { it.write(bytes) }
     }
 
     fun device(): String = "${Build.MANUFACTURER} ${Build.MODEL}".trim()

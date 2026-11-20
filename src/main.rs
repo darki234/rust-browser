@@ -250,6 +250,8 @@ struct Tab {
     af_address: bool,
     /// id скрипта тёмной темы для сайтов в этой вкладке (его снимают при смене настройки).
     dark_script: Arc<Mutex<Option<String>>>,
+    /// Скрипт с уровнями усиления звука по сайтам (меняется на лету).
+    boost_script: Arc<Mutex<Option<String>>>,
     /// Группа вкладки (0 — без группы).
     group: u32,
 }
@@ -281,6 +283,7 @@ impl Tab {
             retries: (String::new(), 0, None),
             lang: String::new(),
             dark_script: Default::default(),
+            boost_script: Default::default(),
             af_card: false,
             af_address: false,
             group: 0,
@@ -1013,6 +1016,7 @@ fn build_tab(app: &mut App, id: u32, bounds: Rect) -> wry::Result<WebView> {
         .with_initialization_script(SCROLL_SCRIPT)
         .with_initialization_script(SELECTION_SCRIPT)
         .with_initialization_script(PREFETCH_SCRIPT)
+        .with_initialization_script(BOOST_SCRIPT)
         .with_initialization_script(autofill::DETECT_SCRIPT)
         .with_navigation_handler(move |url| {
             let _ = nav.send_event(UserEvent::UrlChanged(id, url));
@@ -1049,6 +1053,7 @@ fn build_tab(app: &mut App, id: u32, bounds: Rect) -> wry::Result<WebView> {
     platform::hook_downloads(&webview, app.download_dir.clone(), proxy);
     if let Some(tab) = app.tab(id) {
         platform::set_document_script(&webview, &tab.dark_script, Some(&dark_sites_script(&app.store.settings)));
+        platform::set_document_script(&webview, &tab.boost_script, Some(&boost_sites_script(&app.store.settings)));
     }
     // встроенное сохранение паролей WebView2 выключено: пароли хранит свой менеджер
     platform::set_passwords(&webview, false);
@@ -2494,9 +2499,10 @@ impl App {
             "wallpaper_always" => {
                 settings.wallpaper_always = value.as_bool().unwrap_or(settings.wallpaper_always)
             }
-            "motion" | "bar_style" | "newtab_layout" | "splash" => {
+            "motion" | "bar_style" | "newtab_layout" | "splash" | "tile_size" => {
                 let allowed: &[&str] = match key {
                     "motion" => &["smooth", "fast", "bouncy", "off"],
+                    "tile_size" => &["s", "m", "l"],
                     "splash" => &["compass", "aurora", "warp", "minimal", "off"],
                     "bar_style" => &["classic", "compact", "floating", "vertical", "island"],
                     _ => &["clock", "minimal", "tiles", "greeting"],
@@ -2506,6 +2512,7 @@ impl App {
                     "motion" => settings.motion = choice.to_string(),
                     "bar_style" => settings.bar_style = choice.to_string(),
                     "splash" => settings.splash = choice.to_string(),
+                    "tile_size" => settings.tile_size = choice.to_string(),
                     _ => settings.newtab_layout = choice.to_string(),
                 }
             }
@@ -2901,6 +2908,29 @@ impl App {
                 self.store.save_settings();
                 self.apply_dark_sites();
             }
+            "boost" => {
+                // усиление звука для сайта во вкладке: 0…600 %, запоминается для сайта
+                let Some(host) = self.active_tab().and_then(|t| adblock::host_of(&t.url)).map(|h| h.trim_start_matches("www.").to_string()) else { return };
+                let level = (number("level") as u32).min(600);
+                if level == 100 {
+                    self.store.settings.site_boost.remove(&host);
+                } else {
+                    self.store.settings.site_boost.insert(host, level);
+                }
+                self.store.save_settings();
+                let script = boost_sites_script(&self.store.settings);
+                for tab in &self.tabs {
+                    if let Some(webview) = &tab.webview {
+                        platform::set_document_script(webview, &tab.boost_script, Some(&script));
+                    }
+                }
+                for id in self.visible_with(self.active) {
+                    if let Some(webview) = self.tab(id).and_then(|t| t.webview.as_ref()) {
+                        let _ = webview.evaluate_script(&format!("window.__rbBoost && __rbBoost({})", level as f64 / 100.0));
+                    }
+                }
+                self.dirty = true;
+            }
             "dark_site_remove" => {
                 let host = text("host");
                 self.store.settings.dark_sites.retain(|h| *h != host);
@@ -3284,6 +3314,41 @@ impl App {
                 self.store.remove_bookmark(&text("url"));
                 self.store.save_bookmarks();
                 self.dirty = true;
+            }
+            // плитки стартовой: правка, добавление, порядок
+            "bookmark_edit" => {
+                let (old, title) = (text("old"), text("title").trim().chars().take(120).collect::<String>());
+                let url = to_url(&text("url"), search_url(&self.store.settings.search));
+                if !url.starts_with("http") {
+                    return;
+                }
+                self.store.reload_bookmarks();
+                if self.store.bookmarks.iter().any(|b| b.url == url && b.url != old) {
+                    let _ = self.ui.evaluate_script("ui.toast('Такой сайт уже есть в избранном')");
+                    return;
+                }
+                if let Some(b) = self.store.bookmarks.iter_mut().find(|b| b.url == old) {
+                    b.url = url;
+                    b.title = title;
+                } else if old.is_empty() {
+                    let title = if title.is_empty() { adblock::host_of(&url).unwrap_or("").trim_start_matches("www.").to_string() } else { title };
+                    // новая плитка — в конец видимых плиток (после первых, что на стартовой)
+                    let at = (number("index") as usize).min(self.store.bookmarks.len());
+                    self.store.bookmarks.insert(at, store::Bookmark { url, title });
+                }
+                self.store.save_bookmarks();
+                self.dirty = true;
+            }
+            "bookmark_move" => {
+                let (from, to) = (number("from") as usize, number("to") as usize);
+                self.store.reload_bookmarks();
+                let len = self.store.bookmarks.len();
+                if from < len && to < len && from != to {
+                    let b = self.store.bookmarks.remove(from);
+                    self.store.bookmarks.insert(to, b);
+                    self.store.save_bookmarks();
+                    self.dirty = true;
+                }
             }
             "download_open" => {
                 if let Some(download) = self.downloads.iter().find(|d| d.id == number("id")) {
@@ -3778,6 +3843,7 @@ impl App {
                 "processLimitActive": PROCESS_LIMIT.load(Ordering::Relaxed),
                 "updateSource": settings.update_source,
                 "darkSites": settings.dark_sites,
+                "siteBoost": settings.site_boost,
                 "buttons": settings.buttons,
                 "hiddenTools": settings.hidden_tools,
                 "hiddenMenu": settings.hidden_menu,
@@ -3785,6 +3851,7 @@ impl App {
                 "motion": settings.motion,
                 "barStyle": settings.bar_style,
                 "newtabLayout": settings.newtab_layout,
+                "tileSize": settings.tile_size,
                 "wallpaperAlways": settings.wallpaper_always,
                 "proxyMode": settings.proxy_mode,
                 "proxyHost": settings.proxy_host,
@@ -4169,6 +4236,9 @@ impl App {
                 if (link.starts_with("https://") || link.starts_with("http://")) && link.len() < 8000 {
                     self.new_background_tab(link);
                 }
+            }
+            "boost_drm" => {
+                let _ = self.ui.evaluate_script("ui.toast('Это видео защищено от копирования — его звук браузер усилить не может')");
             }
             "translate_sel" => {
                 // выделенный текст — переводим в фоне, ответ вернётся в эту вкладку
@@ -4644,6 +4714,113 @@ fn extension_icon(id: &str) -> Option<PathBuf> {
     guard.iter().find(|(k, _)| k == id).map(|(_, p)| p.clone())
 }
 
+/// Усилитель звука: громкость видео и музыки на странице до 600 %, через Web Audio
+/// (усиление + ограничитель, чтобы не хрипело). Работает во всех рамках страницы:
+/// верхняя пересылает уровень встроенным плеерам. Звук элемента не трогаем, пока
+/// громкость 100 %, и не трогаем вовсе, если Web Audio его не получит (чужой сайт
+/// без CORS — иначе была бы тишина).
+const BOOST_SCRIPT: &str = r#"(() => {
+  if (window.__rbBoostInit) return;
+  window.__rbBoostInit = true;
+  const top = window.top === window;
+  let level = 1, ctx = null, explicit = false;
+  // уровень сайта: список приходит отдельным скриптом, он выполняется позже этого
+  const saved = () => {
+    const v = (window.__rbBoostSites || {})[location.hostname.replace(/^www\./, '')];
+    return v ? v / 100 : 1;
+  };
+  const settle = () => { if (top && !explicit) level = saved(); };
+  const hooked = new WeakMap();
+  const usable = (m) => {
+    const src = m.currentSrc || m.src || '';
+    if (!src || src.startsWith('blob:') || src.startsWith('data:') || m.crossOrigin) return true;
+    try { return new URL(src, location.href).origin === location.origin; } catch (e) { return false; }
+  };
+  // защищённое видео (DRM, фильмы по подписке): движок может отдавать его звук мимо Web Audio —
+  // перехват дал бы тишину до перезагрузки страницы, поэтому такие видео не трогаем
+  let drmTold = false;
+  const drm = (m) => {
+    if (!m.mediaKeys) return false;
+    if (level !== 1 && !drmTold) {
+      drmTold = true;
+      try { top ? window.chrome.webview.postMessage(JSON.stringify({ cmd: 'boost_drm' })) : window.top.postMessage({ __rbBoostDrm: 1 }, '*'); } catch (e) {}
+    }
+    return true;
+  };
+  const hook = (m) => {
+    if (hooked.has(m)) return hooked.get(m);
+    if (level === 1 || !usable(m) || drm(m)) return null;
+    try {
+      ctx = ctx || new AudioContext({ latencyHint: 'playback' });
+      const source = ctx.createMediaElementSource(m);
+      const gain = ctx.createGain();
+      const limiter = ctx.createDynamicsCompressor();
+      limiter.threshold.value = -1.5; limiter.knee.value = 2; limiter.ratio.value = 20;
+      limiter.attack.value = 0.003; limiter.release.value = 0.2;
+      const meter = ctx.createAnalyser();
+      meter.fftSize = 2048;
+      source.connect(gain).connect(limiter).connect(meter).connect(ctx.destination);
+      const node = { gain, meter };
+      hooked.set(m, node);
+      return node;
+    } catch (e) { return null; }
+  };
+  const media = () => [...document.querySelectorAll('video, audio')];
+  const apply = () => {
+    for (const m of media()) {
+      const node = hook(m);
+      if (node) node.gain.gain.setTargetAtTime(level, ctx.currentTime, 0.04);
+    }
+    if (ctx && ctx.state === 'suspended') ctx.resume().catch(() => {});
+  };
+  const forward = () => {
+    for (const f of document.querySelectorAll('iframe')) {
+      try { f.contentWindow.postMessage({ __rbBoost: level }, '*'); } catch (e) {}
+    }
+  };
+  window.__rbBoost = (v) => {
+    level = Math.max(0, Math.min(6, Number.isFinite(Number(v)) ? Number(v) : 1));
+    explicit = true;
+    apply();
+    forward();
+  };
+  // для проверки: насколько громко сейчас звучит (среднеквадратичное, 0…1)
+  window.__rbBoostMeter = () => {
+    let best = 0;
+    for (const m of media()) {
+      const node = hooked.get(m);
+      if (!node) continue;
+      const data = new Float32Array(node.meter.fftSize);
+      node.meter.getFloatTimeDomainData(data);
+      best = Math.max(best, Math.sqrt(data.reduce((s, x) => s + x * x, 0) / data.length));
+    }
+    return { level, hooked: media().filter((m) => hooked.has(m)).length, media: media().length, rms: best, state: ctx && ctx.state };
+  };
+  addEventListener('message', (e) => {
+    const d = e.data;
+    if (!d || typeof d !== 'object') return;
+    if (typeof d.__rbBoost === 'number' && e.source === parent && !top) window.__rbBoost(d.__rbBoost);
+    // встроенный плеер родился позже — спрашивает уровень у родителя
+    if (d.__rbBoostDrm && top) { try { window.chrome.webview.postMessage(JSON.stringify({ cmd: 'boost_drm' })); } catch (err) {} }
+    if (d.__rbBoostAsk && e.source) { settle(); try { e.source.postMessage({ __rbBoost: level }, '*'); } catch (err) {} }
+  });
+  const onMedia = (e) => { if (!(e.target instanceof HTMLMediaElement)) return; settle(); if (level !== 1) apply(); };
+  addEventListener('play', onMedia, true);
+  addEventListener('loadedmetadata', onMedia, true);
+  if (top) {
+    addEventListener('DOMContentLoaded', () => { settle(); forward(); });
+    addEventListener('load', forward);
+  } else {
+    try { parent.postMessage({ __rbBoostAsk: 1 }, '*'); } catch (e) {}
+  }
+})();"#;
+
+/// Уровни усиления по сайтам — для скрипта выше (выполняется раньше него в каждом документе).
+fn boost_sites_script(settings: &store::Settings) -> String {
+    let sites = serde_json::to_string(&settings.site_boost).unwrap_or_else(|_| "{}".into());
+    format!("window.__rbBoostSites = {sites};")
+}
+
 /// Предзагрузка ссылок: при наведении на ссылку своего сайта Chromium начинает грузить
 /// её заранее (правила speculation rules, «moderate» — после короткой задержки наведения).
 const PREFETCH_SCRIPT: &str = r#"(() => {
@@ -4655,9 +4832,11 @@ const PREFETCH_SCRIPT: &str = r#"(() => {
     s.id = '__rb_prefetch';
     s.textContent = JSON.stringify({ prefetch: [{ source: 'document', eagerness: 'moderate',
       where: { and: [{ href_matches: '/*' }, { not: { selector_matches: '[rel~=nofollow], [href*=logout], [href*=signout], [href*=exit]' } }] } }] });
-    document.head.append(s);
+    try { document.head.append(s); } catch (e) {}
   };
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', add); else add();
+  // сайты с Trusted Types (YouTube) не дают вписать текст в script — там просто без предзагрузки
+  const safe = () => { try { add(); } catch (e) {} };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', safe); else safe();
 })();"#;
 
 /// «Картинка в картинке»: самое крупное видео на странице; повторно — вернуть обратно.
