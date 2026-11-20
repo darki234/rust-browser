@@ -3569,6 +3569,32 @@ impl App {
         }
     }
 
+    /// Как «Экономия памяти» в Chrome: когда оперативки в системе почти не осталось,
+    /// не ждём таймера сна, а выгружаем фоновые вкладки — сначала чужих сайтов и давно скрытые.
+    fn relieve_memory_pressure(&mut self) {
+        let load = efficiency::memory_load();
+        let active_host = self.tab(self.active).and_then(|t| adblock::host_of(&t.url)).map(str::to_owned);
+        let candidates: Vec<PressureTab> = self
+            .tabs
+            .iter()
+            .map(|t| PressureTab {
+                id: t.id,
+                hidden_for: t.hidden_since.map(|since| since.elapsed()),
+                keep: t.audio || t.pinned || t.webview.is_none(),
+                same_site: active_host.is_some() && adblock::host_of(&t.url) == active_host.as_deref(),
+            })
+            .collect();
+        let victims = pressure_victims(&candidates, load);
+        for id in &victims {
+            if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == *id) {
+                unload(tab);
+            }
+        }
+        if !victims.is_empty() {
+            self.dirty = true;
+        }
+    }
+
     /// Закрытая боковая панель (заметки, калькулятор) засыпает сразу — WebView2 сам
     /// разбудит её, когда панель снова покажут. Мессенджеры не трогаем: в них уведомления.
     fn sleep_panel(&mut self) {
@@ -3588,6 +3614,9 @@ impl App {
         let minutes = self.sleep_limit();
         // Выгрузка отменила бы загрузку, поэтому пока что-то качается — только сон.
         let downloading = self.downloads.iter().any(|d| d.state == "progress" || d.state == "paused");
+        if minutes > 0 && !downloading {
+            self.relieve_memory_pressure();
+        }
         for tab in &mut self.tabs {
             let hidden_for = tab.hidden_since.map(|since| since.elapsed());
             let action = rest_action(hidden_for, minutes, tab.sleeping, tab.audio, tab.webview.is_some());
@@ -5294,6 +5323,33 @@ enum Rest {
     Discard,
 }
 
+/// Вкладка глазами «экономии памяти».
+struct PressureTab {
+    id: u32,
+    hidden_for: Option<Duration>,
+    /// Играет звук, закреплена или уже выгружена — не трогаем.
+    keep: bool,
+    /// Тот же сайт, что и открытая вкладка: к нему, скорее всего, вернутся.
+    same_site: bool,
+}
+
+/// Какие вкладки выгрузить при загрузке памяти системы `load` %. До 80% — никакие;
+/// 80–89% — одну за проверку (раз в 30 с), от 90% — до трёх. Только скрытые дольше минуты,
+/// сначала чужих сайтов, среди них — давно скрытые.
+fn pressure_victims(tabs: &[PressureTab], load: u32) -> Vec<u32> {
+    let count = match load {
+        0..=79 => return Vec::new(),
+        80..=89 => 1,
+        _ => 3,
+    };
+    let mut list: Vec<&PressureTab> = tabs
+        .iter()
+        .filter(|t| !t.keep && t.hidden_for.is_some_and(|h| h >= Duration::from_secs(60)))
+        .collect();
+    list.sort_by(|a, b| a.same_site.cmp(&b.same_site).then(b.hidden_for.cmp(&a.hidden_for)));
+    list.into_iter().take(count).map(|t| t.id).collect()
+}
+
 /// Что сделать с фоновой вкладкой, скрытой `hidden_for`, при пороге сна `limit_minutes`.
 fn rest_action(
     hidden_for: Option<Duration>,
@@ -5346,7 +5402,10 @@ static PROCESS_LIMIT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU3
 
 fn engine_args(proxy: Option<&wry::ProxyConfig>, process_limit: u32) -> String {
     let mut args = String::from(
-        "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required",
+        // первые три — флаги wry (наши аргументы заменяют его набор), остальные — фоновые службы
+        // Chromium, которые браузеру не нужны: перевод страниц, подсказки оптимизации, трансляция
+        // на ТВ и запасной процесс страницы, который держится в памяти «на всякий случай»
+        "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,Translate,OptimizationHints,MediaRouter,SpareRendererForSitePerProcess --autoplay-policy=no-user-gesture-required",
     );
     match proxy {
         Some(wry::ProxyConfig::Http(e)) => args.push_str(&format!(" --proxy-server=http://{}:{}", e.host, e.port)),
@@ -5657,6 +5716,27 @@ mod tests {
         assert_eq!(rest_action(min(15), 15, false, false, true), Rest::Suspend);
         assert_eq!(rest_action(min(20), 15, true, false, true), Rest::Keep); // уже спит
         assert_eq!(rest_action(min(45), 15, true, false, true), Rest::Discard);
+    }
+
+    #[test]
+    fn memory_pressure_unloads_other_sites_first() {
+        let tab = |id, secs: Option<u64>, keep, same_site| PressureTab {
+            id,
+            hidden_for: secs.map(Duration::from_secs),
+            keep,
+            same_site,
+        };
+        let tabs = [
+            tab(1, None, false, true),          // активная
+            tab(2, Some(600), false, true),     // тот же сайт, давно
+            tab(3, Some(120), false, false),    // чужой сайт
+            tab(4, Some(900), false, false),    // чужой сайт, дольше всех
+            tab(5, Some(3000), true, false),    // играет звук
+            tab(6, Some(30), false, false),     // скрыта только что
+        ];
+        assert!(pressure_victims(&tabs, 70).is_empty());
+        assert_eq!(pressure_victims(&tabs, 85), vec![4]);
+        assert_eq!(pressure_victims(&tabs, 95), vec![4, 3, 2]);
     }
 
     #[test]

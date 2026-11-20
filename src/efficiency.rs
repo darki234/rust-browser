@@ -11,6 +11,7 @@ use windows::{
         Foundation::CloseHandle,
         System::{
             Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS},
+            SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX},
             ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX},
             Threading::{
                 GetProcessInformation, OpenProcess, ProcessPowerThrottling, SetProcessInformation,
@@ -154,6 +155,14 @@ pub fn is_efficient(pid: u32) -> Option<bool> {
         );
         let _ = CloseHandle(process);
         read.ok().map(|_| state.StateMask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED != 0)
+    }
+}
+
+/// Насколько занята оперативка всей системы, в процентах (0 — не удалось узнать).
+pub fn memory_load() -> u32 {
+    unsafe {
+        let mut status = MEMORYSTATUSEX { dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32, ..Default::default() };
+        if GlobalMemoryStatusEx(&mut status).is_ok() { status.dwMemoryLoad } else { 0 }
     }
 }
 
