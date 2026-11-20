@@ -321,8 +321,7 @@ function themeCards() {
     return card;
   });
   return h('div', {},
-    h('div', { class: 'set' }, h('div', { class: 'label' }, 'Плоские темы',
-      h('small', {}, 'Без градиентов: ровный цвет, тонкие линии вместо теней. Четыре — как в Lumi, одна — как в Ryoku'))),
+    h('div', { class: 'set' }, h('div', { class: 'label' }, 'Плоские темы')),
     h('div', { class: 'themes' }, ...cards));
 }
 
@@ -2282,7 +2281,7 @@ const SETTINGS_CATS = [
       ...islandSettings(),
       setting('Компактный режим', 'Вкладки и адресная строка свёрнуты в тонкую полоску сверху и выезжают при наведении мыши — почти весь экран для сайта · Ctrl+Shift+K',
         toggle(() => S.settings.compact, (value) => set('compact', value))),
-      setting('Адрес во вкладке', 'Как в Safari: отдельной адресной строки нет, адрес показывает активная вкладка — щелчок по ней или Ctrl+L открывает ввод',
+      setting('Адрес во вкладке', 'Отдельной адресной строки нет, адрес показывает активная вкладка — щелчок по ней или Ctrl+L открывает ввод',
         toggle(() => S.settings.urlInTab, (value) => set('url_in_tab', value))),
       setting('Панель избранного', 'Сайты из избранного под адресной строкой · Ctrl+Shift+B',
         toggle(() => S.settings.favbar, (value) => set('favbar', value))),
@@ -2322,7 +2321,7 @@ const SETTINGS_CATS = [
       setting('Усыплять неактивные вкладки', 'Через это время фоновая вкладка засыпает, а через втрое больше выгружается из памяти',
         segmented([[5, '5 мин'], [15, '15 мин'], [30, '30 мин'], [60, '1 ч'], [0, 'Никогда']],
           () => S.settings.sleepMinutes, (value) => set('sleep_minutes', value))),
-      setting('Режим эффективности для фоновых вкладок', 'Windows даёт их процессам меньше ресурсов, как в Edge. Вкладку на экране и со звуком не трогаем',
+      setting('Режим эффективности для фоновых вкладок', 'Windows даёт их процессам меньше ресурсов. Вкладку на экране и со звуком не трогаем',
         toggle(() => S.settings.efficiencyMode, (value) => set('efficiency_mode', value))),
       setting('Экономия при работе от батареи', () => S.onBattery
           ? 'Сейчас от батареи: фоновые вкладки засыпают через 5 минут'
@@ -2688,8 +2687,7 @@ $('#boostbtn').addEventListener('click', () => {
     h('div', { class: 'menu-title' }, 'Усиление звука · ' + hostOf(tab.url).replace(/^www\./, '')),
     h('div', { class: 'boost-box' }, value, range,
       h('div', { class: 'boost-presets' }, ...[100, 200, 300, 400, 600].map((v) =>
-        h('button', { class: 'text-btn outline', onclick: () => pick(v, true) }, v + '%'))),
-      h('div', { class: 'ext-hint' }, 'Запоминается для сайта. Выше 100 % звук усиливается, ограничитель не даёт ему хрипеть')),
+        h('button', { class: 'text-btn outline', onclick: () => pick(v, true) }, v + '%')))),
   ], (rect) => {
     const anchor = $('#boostbtn').getBoundingClientRect();
     el.menu.style.top = anchor.bottom + 10 + 'px';
@@ -2873,7 +2871,7 @@ function extensionsCards() {
       setting('Chrome Web Store', 'Откройте страницу расширения в магазине и нажмите «Установить в Rust Browser» внизу справа. Пакет проверяется по подписи магазина',
         h('button', { class: 'text-btn primary', onclick: () => { send('open', { url: STORE_URL, newTab: true }); closeHub(); } }, 'Открыть магазин')),
       h('div', { class: 'ext-warn' }, icon('alert', 14),
-        'Движок Chromium 157 поддерживает только расширения нового формата (Manifest V3). Старые расширения MV2 не установятся — так же, как в Chrome и Edge')),
+        'Поддерживаются расширения нового формата (Manifest V3), старые (MV2) не устанавливаются')),
     h('div', { class: 'card' }, h('h2', {}, 'Перенести из другого браузера'),
       h('div', { class: 'ext-hint' }, 'Копируются сами расширения. Их настройки и вход остаются в том браузере'),
       browsers),
