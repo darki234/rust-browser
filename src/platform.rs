@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         Arc, Mutex,
     },
     time::{Duration, Instant},
@@ -1282,7 +1282,54 @@ pub fn style_window(hwnd: isize, dark: bool) {
         };
         set(DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND.0);
         set(DWMWA_USE_IMMERSIVE_DARK_MODE, dark as i32);
+        // Цвет рамки окна — как фон под страницами. Важно у развёрнутого окна при скрытой
+        // панели задач: снизу остаётся полоска в 1 px, чтобы панель выезжала, и Windows
+        // красила её белым.
+        let (r, g, b, _) = crate::backdrop_color(dark);
+        let colorref = r as u32 | (g as u32) << 8 | (b as u32) << 16;
+        FRAME_COLOR.store(colorref, Ordering::Relaxed);
+        set(windows::Win32::Graphics::Dwm::DWMWA_CAPTION_COLOR, colorref as i32);
+        set(windows::Win32::Graphics::Dwm::DWMWA_BORDER_COLOR, colorref as i32);
+        let _ = windows::Win32::UI::Shell::SetWindowSubclass(hwnd, Some(frame_proc), 0x5242, 0);
+        let _ = windows::Win32::Graphics::Gdi::RedrawWindow(
+            Some(hwnd),
+            None,
+            None,
+            windows::Win32::Graphics::Gdi::RDW_FRAME | windows::Win32::Graphics::Gdi::RDW_INVALIDATE,
+        );
     }
+}
+
+/// Цвет рамки окна (COLORREF) для своей отрисовки нерабочей области.
+static FRAME_COLOR: AtomicU32 = AtomicU32::new(0x0018_1312);
+
+/// Рамка развёрнутого окна (та самая полоска в 1 px у скрытой панели задач) — цветом темы.
+unsafe extern "system" fn frame_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    lparam: windows::Win32::Foundation::LPARAM,
+    _id: usize,
+    _data: usize,
+) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::{Foundation::{POINT, RECT}, Graphics::Gdi::*, UI::WindowsAndMessaging::*};
+    if msg == WM_NCPAINT && IsZoomed(hwnd).as_bool() {
+        let dc = GetWindowDC(Some(hwnd));
+        let (mut outer, mut inner) = (RECT::default(), RECT::default());
+        let _ = GetWindowRect(hwnd, &mut outer);
+        let _ = GetClientRect(hwnd, &mut inner);
+        let mut origin = POINT::default();
+        let _ = ClientToScreen(hwnd, &mut origin);
+        let (ox, oy) = (origin.x - outer.left, origin.y - outer.top);
+        let _ = ExcludeClipRect(dc, ox, oy, ox + inner.right, oy + inner.bottom);
+        let whole = RECT { left: 0, top: 0, right: outer.right - outer.left, bottom: outer.bottom - outer.top };
+        let brush = CreateSolidBrush(windows::Win32::Foundation::COLORREF(FRAME_COLOR.load(Ordering::Relaxed)));
+        FillRect(dc, &whole, brush);
+        let _ = DeleteObject(brush.into());
+        ReleaseDC(Some(hwnd), dc);
+        return windows::Win32::Foundation::LRESULT(0);
+    }
+    windows::Win32::UI::Shell::DefSubclassProc(hwnd, msg, wparam, lparam)
 }
 
 /// Стандартный диалог выбора папки. None — пользователь отменил выбор.

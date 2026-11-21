@@ -2460,3 +2460,7 @@ body.url-collapsed #urlbox.expanded {
 .theme-card .tp u { position: absolute; right: 10px; bottom: 9px; width: 16px; height: 16px; border-radius: 50%; background: var(--tp-accent); }
 .theme-card .tn { display: block; margin-top: 7px; font-weight: 600; font-size: 13px; }
 .theme-card .td { display: block; color: var(--muted); font-size: 11.5px; }
+
+/* итог проверки прокси */
+.set .label .proxy-result.ok { color: var(--ok); }
+.set .label .proxy-result.bad { color: var(--danger); }

@@ -2185,13 +2185,51 @@ function proxyCard() {
     class: 'text-btn primary',
     onclick: () => send('set_proxy', { mode, host: host.value, port: Number(port.value) || 0 }),
   }, 'Применить и перезапустить');
-  const addressRow = setting('Адрес прокси', 'Логин и пароль прокси не поддерживаются', host, port);
-  settingsUpdaters.push(() => { addressRow.style.display = mode === 'off' ? 'none' : ''; });
+  const result = h('small', { class: 'proxy-result' });
+  const test = h('button', {
+    class: 'text-btn outline',
+    onclick: () => {
+      proxyTesting = (info) => {
+        test.disabled = false;
+        test.textContent = 'Проверить';
+        result.className = 'proxy-result ' + (info.ok ? 'ok' : 'bad');
+        result.textContent = info.ok
+          ? `Работает · ${countryName(info.loc)} · ${(info.ms / 1000).toFixed(1).replace('.', ',')} с · внешний адрес ${info.ip}`
+          : 'Не отвечает — попробуйте другой прокси';
+      };
+      test.disabled = true;
+      test.textContent = 'Проверяю…';
+      result.className = 'proxy-result';
+      result.textContent = '';
+      send('proxy_test', { mode, host: host.value, port: Number(port.value) || 0 });
+    },
+  }, 'Проверить');
+  const addressRow = setting('Адрес прокси', 'Логин и пароль прокси не поддерживаются', host, port, test);
+  const resultRow = h('div', { class: 'set' }, h('div', { class: 'label' }, result));
+  settingsUpdaters.push(() => {
+    addressRow.style.display = mode === 'off' ? 'none' : '';
+    resultRow.style.display = mode === 'off' || !result.textContent ? 'none' : '';
+  });
   return h('div', { class: 'card' }, h('h2', {}, 'Сеть'),
     setting('Прокси', 'Весь трафик браузера пойдёт через этот сервер. Нужен перезапуск — вкладки вернутся сами; другие окна браузера закройте', modeSeg),
     addressRow,
+    resultRow,
     h('div', { class: 'set' }, h('div', { class: 'label' }), h('div', { class: 'controls' }, apply)));
 }
+
+let proxyTesting = null;
+function proxyResult(info) {
+  if (proxyTesting) proxyTesting(info);
+  settingsUpdaters.forEach((u) => u());
+}
+
+const COUNTRIES = {
+  NL: 'Нидерланды', DE: 'Германия', GB: 'Великобритания', US: 'США', FR: 'Франция', FI: 'Финляндия', SE: 'Швеция',
+  AT: 'Австрия', CH: 'Швейцария', PL: 'Польша', HK: 'Гонконг', SG: 'Сингапур', JP: 'Япония', KR: 'Корея', CN: 'Китай',
+  ID: 'Индонезия', IN: 'Индия', CO: 'Колумбия', BR: 'Бразилия', CA: 'Канада', TR: 'Турция', KZ: 'Казахстан', RU: 'Россия',
+  UA: 'Украина', EG: 'Египет', ES: 'Испания', IT: 'Италия', LV: 'Латвия', LT: 'Литва', EE: 'Эстония', CZ: 'Чехия',
+};
+const countryName = (code) => COUNTRIES[code] || code || 'страна неизвестна';
 
 function importCard() {
   const sources = S.importSources || [];
@@ -2589,7 +2627,8 @@ window.ui = {
   pasteText,
   showSiteInfo,
   showTasks,
-  proxyInvalid: () => toast('Проверьте адрес и порт прокси'),
+  proxyInvalid: () => { if (proxyTesting) proxyTesting({ ok: false }); toast('Проверьте адрес и порт прокси'); },
+  proxyResult,
   cookiesCleared: (count) => { closeMenu(); toast(`Удалено файлов cookie: ${count}`); },
   imported: (count) => toast(count ? `Перенесено в избранное: ${count}` : 'Новых сайтов для избранного не нашлось'),
 };

@@ -36,7 +36,7 @@ use tao::{
     window::{Fullscreen, Icon, ResizeDirection, Theme as WindowTheme, Window, WindowBuilder},
 };
 use wry::{
-    dpi::{LogicalPosition, LogicalSize},
+    dpi::{PhysicalPosition, PhysicalSize},
     http::Request,
     NewWindowResponse, PageLoadEvent, Rect, Theme, WebContext, WebView, WebViewBuilder,
     WebViewBuilderExtWindows, WebViewExtWindows,
@@ -842,15 +842,25 @@ fn toast_part(width: f64, height: f64, w: f64, h: f64) -> [f64; 5] {
     [x, y, w.min(width), h, 12.0]
 }
 
+/// Масштаб экрана окна — для перевода прямоугольников в физические пиксели.
+static SCALE_BITS: AtomicU64 = AtomicU64::new(0x3FF0_0000_0000_0000); // 1.0
+
+/// Прямоугольник в логических пикселях → физические. Края округляются каждый сам по себе:
+/// если округлять отдельно верх и высоту, при масштабе 125 % страница не доставала до
+/// низа окна на пиксель — там светилась белая полоска.
 fn rect(x: f64, y: f64, width: f64, height: f64) -> Rect {
+    let scale = f64::from_bits(SCALE_BITS.load(Ordering::Relaxed));
+    let (x0, y0) = ((x * scale).round(), (y * scale).round());
+    let (x1, y1) = (((x + width.max(0.0)) * scale).round(), ((y + height.max(0.0)) * scale).round());
     Rect {
-        position: LogicalPosition::new(x, y).into(),
-        size: LogicalSize::new(width.max(0.0), height.max(0.0)).into(),
+        position: PhysicalPosition::new(x0 as i32, y0 as i32).into(),
+        size: PhysicalSize::new((x1 - x0).max(0.0) as u32, (y1 - y0).max(0.0) as u32).into(),
     }
 }
 
 fn window_size(window: &Window) -> (f64, f64) {
     let scale = window.scale_factor();
+    SCALE_BITS.store(scale.to_bits(), Ordering::Relaxed);
     let size = window.inner_size();
     (size.width as f64 / scale, size.height as f64 / scale)
 }
@@ -2793,6 +2803,32 @@ impl App {
                 self.save_session();
                 system::restart(platform::browser_pid(&self.ui));
                 self.quit = true;
+            }
+            // проверка прокси без перезапуска: запрос через него к Cloudflare
+            "proxy_test" => {
+                let (mode, host, port) = (text("mode"), text("host").trim().to_string(), number("port"));
+                if !matches!(mode.as_str(), "http" | "socks5") || !valid_proxy_host(&host) || !(1..=65535).contains(&port) {
+                    let _ = self.ui.evaluate_script("ui.proxyInvalid()");
+                    return;
+                }
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    use std::os::windows::process::CommandExt;
+                    let scheme = if mode == "socks5" { "socks5h" } else { "http" };
+                    let started = Instant::now();
+                    let output = std::process::Command::new("curl.exe")
+                        .args(["-s", "-m", "12", "-x", &format!("{scheme}://{host}:{port}"), "https://www.cloudflare.com/cdn-cgi/trace"])
+                        .creation_flags(0x0800_0000)
+                        .output();
+                    let ms = started.elapsed().as_millis() as u64;
+                    let body = output.map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+                    let field = |name: &str| body.lines().find_map(|l| l.strip_prefix(name)).unwrap_or("").to_string();
+                    let result = json!({ "cmd": "proxy_result", "ok": body.contains("ip="), "ms": ms, "loc": field("loc="), "ip": field("ip=") });
+                    let _ = proxy.send_event(UserEvent::Ui(result.to_string()));
+                });
+            }
+            "proxy_result" => {
+                let _ = self.ui.evaluate_script(&format!("ui.proxyResult({message})"));
             }
             "toggle_panel" => self.toggle_panel(),
             "make_default" => {
