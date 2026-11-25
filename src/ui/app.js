@@ -739,7 +739,7 @@ function renderToolbar() {
   el.back.disabled = !tab.canBack;
   el.forward.disabled = !tab.canForward;
   // перевод: страница не по-русски или уже переведённая (тогда — вернуть оригинал)
-  const translated = /\.translate\.goog\//.test(tab.url);
+  const translated = !!tab.translated || /\.translate\.goog\//.test(tab.url);
   const foreign = !!tab.lang && !/^(ru|und)/.test(tab.lang) && /^https?:/.test(tab.url);
   const tb = $('#translatebtn');
   tb.classList.toggle('show', !tab.start && (translated || foreign));
@@ -1693,9 +1693,9 @@ function mainMenuAll() {
     ['find', item({ icon: 'search', label: 'Найти на странице', kb: 'Ctrl+F', disabled: !page, onClick: () => setTimeout(openFind, 140) })],
     ['print', item({ icon: 'print', label: 'Печать', kb: 'Ctrl+P', disabled: !page, onClick: () => send('print') })],
     ['phone', item({ icon: 'forward', label: 'Отправить на телефон', disabled: !page, onClick: () => send('send_to_phone') })],
-    ['translate', item({ icon: 'translate', label: /\.translate\.goog\//.test(activeTab()?.url || '') ? 'Показать оригинал' : 'Перевести страницу',
+    ['translate', item({ icon: 'translate', label: pageTranslated() ? 'Показать оригинал' : 'Перевести страницу',
       disabled: !page || (/^ru/.test(activeTab()?.lang || '') && !/\.translate\.goog\//.test(activeTab()?.url || '')),
-      onClick: () => send('translate', { original: /\.translate\.goog\//.test(activeTab()?.url || '') }) })],
+      onClick: () => send('translate') })],
     ['pip', item({ icon: 'pip', label: 'Картинка в картинке', kb: 'Alt+P', disabled: !page || !activeTab()?.video, onClick: () => send('pip') })],
     ['site_only', item({ icon: 'expand', label: 'Только сайт', kb: 'Ctrl+Shift+F', check: !!S.siteOnly, onClick: () => send('site_only') })],
     ['compact', item({ icon: 'expand', label: 'Компактный режим', kb: 'Ctrl+Shift+K', check: !!S.settings.compact, onClick: () => set('compact', !S.settings.compact) })],
@@ -2690,7 +2690,11 @@ function showPasswordPicker() {
   showMenu('pwpick', nodes, placeAtKey);
 }
 
-$('#translatebtn').addEventListener('click', () => send('translate', { original: /\.translate\.goog\//.test(activeTab()?.url || '') }));
+$('#translatebtn').addEventListener('click', () => send('translate'));
+function pageTranslated() {
+  const tab = activeTab();
+  return !!tab && (!!tab.translated || /\.translate\.goog\//.test(tab.url || ''));
+}
 $('#pipbtn').addEventListener('click', () => send('pip'));
 
 // ---------- усилитель звука ----------

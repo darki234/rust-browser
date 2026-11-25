@@ -181,6 +181,8 @@ pub enum UserEvent {
     TabShot(u32, Option<Vec<u8>>),
     /// Снять вкладку, если она всё ещё на экране.
     ShotActive(u32),
+    /// Пачка текста страницы переведена: (вкладка, номер пачки, переводы по порядку).
+    PageTranslated(u32, u64, Result<Vec<String>, String>),
     /// Перевод выделенного текста готов: (вкладка, номер запроса, итог).
     SelTranslated(u32, u64, Result<(String, String, String), String>),
     /// Исправленный запрос адресной строки (номер запроса, исправление).
@@ -270,6 +272,8 @@ struct Tab {
     retries: (String, u8, Option<Instant>),
     /// Язык страницы — чтобы предложить перевод.
     lang: String,
+    /// Страница переведена на месте (кнопка покажет «оригинал»).
+    translated: bool,
     /// На странице поля карты / адреса — у адреса появляется кнопка автозаполнения.
     af_card: bool,
     af_address: bool,
@@ -307,6 +311,7 @@ impl Tab {
             video: false,
             retries: (String::new(), 0, None),
             lang: String::new(),
+            translated: false,
             dark_script: Default::default(),
             boost_script: Default::default(),
             af_card: false,
@@ -1045,6 +1050,7 @@ fn build_tab(app: &mut App, id: u32, bounds: Rect) -> wry::Result<WebView> {
         .with_initialization_script(SELECTION_SCRIPT)
         .with_initialization_script(PREFETCH_SCRIPT)
         .with_initialization_script(BOOST_SCRIPT)
+        .with_initialization_script(PAGE_TRANSLATE_SCRIPT)
         .with_initialization_script(autofill::DETECT_SCRIPT)
         .with_navigation_handler(move |url| {
             let _ = nav.send_event(UserEvent::UrlChanged(id, url));
@@ -1793,6 +1799,7 @@ impl App {
                     tab.blocked = 0;
                     tab.pw_form = false;
                     tab.video = false;
+                    tab.translated = false;
                     tab.af_card = false;
                     tab.af_address = false;
                     self.dirty = true;
@@ -1841,6 +1848,21 @@ impl App {
                 }
             }
             UserEvent::ShotActive(id) => self.shot_active(id),
+            UserEvent::PageTranslated(id, batch, result) => {
+                let list = match &result {
+                    Ok(list) => json!(list),
+                    Err(_) => Value::Null,
+                };
+                if let Some(webview) = self.tab(id).and_then(|t| t.webview.as_ref()) {
+                    let _ = webview.evaluate_script(&format!("window.__rbTrApply && __rbTrApply({batch}, {list})"));
+                }
+                if let Err(error) = result {
+                    if self.active == id {
+                        let text = format!("Перевод не удался: {error}");
+                        let _ = self.ui.evaluate_script(&format!("ui.toast({text:?})"));
+                    }
+                }
+            }
             UserEvent::SelTranslated(id, seq, result) => {
                 let reply = match result {
                     Ok((text, from, to)) => json!({ "seq": seq, "text": text, "from": from, "to": to }),
@@ -2944,13 +2966,14 @@ impl App {
             }
             "translate" => {
                 let Some(tab) = self.active_tab() else { return };
-                let target = if message["original"].as_bool().unwrap_or(false) {
-                    untranslate_url(&tab.url)
-                } else {
-                    translate_url(&tab.url)
-                };
-                if let Some(target) = target {
-                    self.navigate(self.active, &target);
+                // открытые раньше через translate.goog — вернуть настоящий адрес
+                if let Some(original) = untranslate_url(&tab.url) {
+                    self.navigate(self.active, &original);
+                    return;
+                }
+                let script = if tab.translated { "window.__rbTrRestore && __rbTrRestore()" } else { "window.__rbTrPage && __rbTrPage()" };
+                if let Some(webview) = &tab.webview {
+                    let _ = webview.evaluate_script(script);
                 }
             }
             "dark_site" => {
@@ -3852,6 +3875,7 @@ impl App {
                     "muted": tab.muted,
                     "sleeping": tab.sleeping || (tab.webview.is_none() && !tab.url.is_empty()),
                     "lang": tab.lang,
+                    "translated": tab.translated,
                     "group": tab.group,
                     "dark": adblock::host_of(&tab.url).is_some_and(|h| self.store.settings.dark_sites.iter().any(|d| d == h.trim_start_matches("www."))),
                 })
@@ -4307,6 +4331,24 @@ impl App {
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
                     let _ = proxy.send_event(UserEvent::SelTranslated(id, seq, translate_text(&text)));
+                });
+            }
+            "tr_state" => {
+                if let Some(tab) = self.tab_mut(id) {
+                    tab.translated = message["on"].as_bool().unwrap_or(false);
+                    self.dirty = true;
+                }
+            }
+            "tr_batch" => {
+                let batch = message["id"].as_u64().unwrap_or(0);
+                let texts: Vec<String> = message["texts"]
+                    .as_array()
+                    .map(|a| a.iter().take(100).map(|t| t.as_str().unwrap_or("").chars().take(4000).collect()).collect())
+                    .unwrap_or_default();
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let result = if texts.is_empty() { Ok(Vec::new()) } else { translate_batch(&texts) };
+                    let _ = proxy.send_event(UserEvent::PageTranslated(id, batch, result));
                 });
             }
             "has_video" => {
@@ -4967,6 +5009,7 @@ fn dark_sites_script(settings: &store::Settings) -> String {
 
 /// Адрес страницы через переводчик Google (https://сайт-ru.translate.goog/…): страница
 /// остаётся живой — ссылки, кнопки и прокрутка работают, а текст уже по-русски.
+#[cfg(test)]
 fn translate_url(url: &str) -> Option<String> {
     let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
     let (host, path) = rest.split_once('/').map(|(h, p)| (h, format!("/{p}"))).unwrap_or((rest, "/".into()));
@@ -5113,6 +5156,176 @@ const SELECTION_SCRIPT: &str = r#"(() => {
 
 /// Перевод фрагмента через Google Переводчик (тот же, что для страниц): на русский,
 /// а русский текст — на английский. Возвращает (перевод, язык оригинала, язык перевода).
+/// Перевод страницы на месте: текст страницы уходит в переводчик пачками и подставляется
+/// обратно — без перезагрузки и без чужого сервера между вами и сайтом (вход в аккаунт,
+/// место на странице и всё остальное сохраняются). Сначала то, что на экране; что сайт
+/// дорисует потом (лента, комментарии), переводится следом.
+const PAGE_TRANSLATE_SCRIPT: &str = r#"(() => {
+  if (window.top !== window || window.__rbTr) return;
+  window.__rbTr = true;
+  const SKIP = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEXTAREA', 'INPUT', 'SELECT', 'OPTION', 'CODE', 'PRE', 'KBD', 'SAMP', 'VAR', 'SVG', 'MATH', 'TEMPLATE', 'IFRAME', 'CANVAS', 'SUB', 'SUP']);
+  let originals = new Map(), active = false, seq = 0, observer = null, timer = 0;
+  const pending = new Map(), queue = [];
+  let inFlight = 0;
+  const post = (o) => { try { window.chrome.webview.postMessage(JSON.stringify(o)); } catch (e) {} };
+  const skip = (el) => {
+    for (let e = el; e && e !== document.body; e = e.parentElement) {
+      if (SKIP.has(e.tagName) || e.isContentEditable || e.getAttribute('translate') === 'no' || e.classList.contains('notranslate')) return true;
+    }
+    return false;
+  };
+  const collect = () => {
+    const out = [];
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      const t = n.nodeValue;
+      if (!t || t.length > 4000 || /^\s*[A-Z][a-z]?\s*$/.test(t) || !/\p{L}/u.test(t) || originals.has(n) || !n.parentElement || skip(n.parentElement)) continue;
+      out.push(n);
+    }
+    // сначала то, что на экране и рядом
+    const h = innerHeight;
+    const near = (n) => { const r = n.parentElement.getBoundingClientRect(); return r.bottom > -h && r.top < h * 2 ? 0 : 1; };
+    const keyed = out.map((n) => [near(n), n]);
+    keyed.sort((a, b) => a[0] - b[0]);
+    return keyed.map((k) => k[1]);
+  };
+  // Абзац уходит целиком: куски текста между ссылками и выделениями помечены <a i=N>,
+  // переводчик сохраняет метки — так предложение переводится связно, а перевод
+  // раскладывается обратно по своим местам.
+  const BLOCK = 'p,li,h1,h2,h3,h4,h5,h6,td,th,dt,dd,blockquote,figcaption,caption,summary,label,button,div,section,article,header,footer,nav,aside,main,form,ul,ol,table';
+  const esc = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const units = (nodes) => {
+    const groups = new Map();
+    for (const n of nodes) {
+      const block = n.parentElement.closest(BLOCK) || document.body;
+      if (!groups.has(block)) groups.set(block, []);
+      groups.get(block).push(n);
+    }
+    const out = [];
+    for (const list of groups.values()) {
+      let unit = [], size = 0;
+      for (const n of list) {
+        unit.push(n);
+        size += n.nodeValue.length;
+        if (unit.length >= 60 || size > 2500) { out.push(unit); unit = []; size = 0; }
+      }
+      if (unit.length) out.push(unit);
+    }
+    return out;
+  };
+  const pump = () => {
+    while (inFlight < 4 && queue.length) {
+      const batch = queue.shift();
+      const id = ++seq;
+      pending.set(id, batch);
+      inFlight++;
+      post({ cmd: 'tr_batch', id, texts: batch.map((unit) => unit.map((n, k) => '<a i=' + k + '>' + esc(originals.get(n).trim()) + '</a>').join(' ')) });
+    }
+  };
+  const enqueue = (nodes) => {
+    nodes.forEach((n) => originals.set(n, n.nodeValue));
+    let batch = [], size = 0;
+    for (const unit of units(nodes)) {
+      batch.push(unit);
+      size += unit.reduce((s, n) => s + n.nodeValue.length, 0);
+      if (batch.length >= 40 || size > 3500) { queue.push(batch); batch = []; size = 0; }
+    }
+    if (batch.length) queue.push(batch);
+    pump();
+  };
+  const reader = document.createElement('template');
+  window.__rbTrApply = (id, list) => {
+    const batch = pending.get(id);
+    pending.delete(id);
+    inFlight = Math.max(0, inFlight - 1);
+    if (batch && active && Array.isArray(list)) {
+      batch.forEach((unit, u) => {
+        if (typeof list[u] !== 'string') return;
+        reader.innerHTML = list[u];
+        for (const a of reader.content.querySelectorAll('a[i]')) {
+          const n = unit[Number(a.getAttribute('i'))];
+          const o = n && originals.get(n);
+          if (!n || n.nodeValue !== o) continue;
+          n.nodeValue = o.match(/^\s*/)[0] + a.textContent.trim() + o.match(/\s*$/)[0];
+        }
+      });
+    }
+    pump();
+  };
+  window.__rbTrPage = () => {
+    if (active) return;
+    active = true;
+    post({ cmd: 'tr_state', on: true });
+    enqueue(collect());
+    observer = new MutationObserver(() => {
+      clearTimeout(timer);
+      timer = setTimeout(() => { if (active) enqueue(collect()); }, 500);
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+  };
+  window.__rbTrRestore = () => {
+    active = false;
+    if (observer) observer.disconnect();
+    queue.length = 0;
+    pending.clear();
+    inFlight = 0;
+    originals.forEach((text, n) => { n.nodeValue = text; });
+    originals = new Map();
+    post({ cmd: 'tr_state', on: false });
+  };
+})();"#;
+
+/// Перевести пачку строк на русский (адрес расширения Google Переводчика принимает
+/// много строк в одном запросе). Порядок ответа — как у вопроса.
+fn translate_batch(texts: &[String]) -> Result<Vec<String>, String> {
+    use std::os::windows::process::CommandExt;
+    let body: String = texts.iter().map(|t| format!("q={}", percent_encode(t))).collect::<Vec<_>>().join("&");
+    let file = std::env::temp_dir().join(format!("rb-tr-{}.txt", sync::hex(&sync::random_bytes::<6>())));
+    std::fs::write(&file, body).map_err(|e| e.to_string())?;
+    let mut last = String::from("нет связи с переводчиком");
+    for url in [
+        "https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=auto&tl=ru&format=html",
+        "https://translate.googleapis.com/translate_a/t?client=gtx&sl=auto&tl=ru&format=html",
+    ] {
+        let output = std::process::Command::new("curl.exe")
+            .args(["-s", "-m", "20", "-X", "POST", "-H", "Content-Type: application/x-www-form-urlencoded;charset=UTF-8"])
+            .arg("--data-binary")
+            .arg(format!("@{}", file.display()))
+            .arg(url)
+            .creation_flags(0x0800_0000)
+            .output();
+        let Ok(output) = output else { continue };
+        match parse_batch(&output.stdout, texts.len()) {
+            Some(list) => {
+                let _ = std::fs::remove_file(&file);
+                return Ok(list);
+            }
+            None => last = "переводчик ответил непонятно".into(),
+        }
+    }
+    let _ = std::fs::remove_file(&file);
+    Err(last)
+}
+
+/// Ответ на пачку: [["перевод","en"], …] или ["перевод", …] (если строка одна — бывает и так).
+fn parse_batch(body: &[u8], count: usize) -> Option<Vec<String>> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    let items = value.as_array()?;
+    let list: Vec<String> = items
+        .iter()
+        .map(|item| match item {
+            Value::String(s) => Some(s.clone()),
+            Value::Array(pair) => pair.first()?.as_str().map(str::to_string),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    // одна строка иногда приходит как ["перевод","en"] — тогда это пара, а не список
+    if count == 1 && list.len() == 2 && items.iter().all(Value::is_string) {
+        return Some(vec![list[0].clone()]);
+    }
+    (list.len() == count).then_some(list)
+}
+
 /// Ответ translate_a/single (client=gtx): [[["перевод","оригинал",…],…],null,"en",…].
 fn parse_gtx(body: &[u8]) -> Option<(String, String)> {
     let value: Value = serde_json::from_slice(body).ok()?;
@@ -6235,6 +6448,16 @@ mod tests {
         assert_eq!(rest_action(min(15), 15, false, false, true), Rest::Suspend);
         assert_eq!(rest_action(min(20), 15, true, false, true), Rest::Keep); // уже спит
         assert_eq!(rest_action(min(45), 15, true, false, true), Rest::Discard);
+    }
+
+    #[test]
+    fn page_batches_are_parsed() {
+        let two = r#"[["Привет, мир","en"],["Доброе утро","en"]]"#.as_bytes();
+        assert_eq!(parse_batch(two, 2), Some(vec!["Привет, мир".to_string(), "Доброе утро".to_string()]));
+        assert_eq!(parse_batch(two, 3), None);
+        assert_eq!(parse_batch(r#"["Привет","en"]"#.as_bytes(), 1), Some(vec!["Привет".to_string()]));
+        assert_eq!(parse_batch(r#"["А","Б"]"#.as_bytes(), 2), Some(vec!["А".to_string(), "Б".to_string()]));
+        assert_eq!(parse_batch(b"<html>", 1), None);
     }
 
     #[test]
