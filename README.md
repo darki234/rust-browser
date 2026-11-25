@@ -37,6 +37,18 @@
 | ⌨️ **Удобство** | редактор горячих клавиш, поиск по клавишам, перевод страниц, картинка в картинке |
 | 🔄 **Синхронизация** | закладки и история между Windows и Android через зашифрованный файл в облачной папке (например, OneDrive) |
 
+## 📥 Установка
+
+Скачайте `RustBrowser-Setup-<версия>.exe` со страницы [Releases](https://github.com/darki234/rust-browser/releases) и запустите. Права администратора не нужны: браузер ставится для текущего пользователя в `%LOCALAPPDATA%\Programs\Rust Browser`, удаляется через «Параметры → Приложения». Если на компьютере нет движка Microsoft Edge WebView2, установщик скачает его сам. Новые версии браузер получает с GitHub автоматически.
+
+Для Android — `RustBrowser-<версия>.apk` там же.
+
+### Выпуск новой версии
+
+1. Поднять `version` в `Cargo.toml`.
+2. `powershell -ExecutionPolicy Bypass -File installeruild.ps1` (нужен [Inno Setup 6](https://jrsoftware.org/isinfo.php): `winget install JRSoftware.InnoSetup`) — всё нужное появится в `dist`.
+3. Создать релиз с тегом `v<версия>` и приложить три файла из `dist`: установщик, `…-portable.exe` (по нему обновляются установленные копии) и `.apk`.
+
 ## 🚀 Сборка
 
 ### Windows

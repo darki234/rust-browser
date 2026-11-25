@@ -522,6 +522,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (args, addresses) = system::split_args(&args);
     let inprivate = args.iter().any(|arg| arg == "--inprivate");
     let new_window = args.iter().any(|arg| arg == "--new-window");
+    // удаление установщиком (Inno Setup): только снять регистрацию браузера в Windows
+    if args.iter().any(|arg| arg == "--unregister") {
+        system::unregister_if_mine();
+        return Ok(());
+    }
     // «Параметры → Приложения → Удалить»
     if args.iter().any(|arg| arg == "--uninstall") {
         installer::uninstall();
@@ -3176,10 +3181,6 @@ impl App {
                 let walls = live_walls().0.clone();
                 match installer::install(Some(&walls)) {
                     Ok(path) => {
-                        if self.store.settings.update_source.is_empty() {
-                            self.store.settings.update_source = installer::current_exe().to_string_lossy().to_string();
-                            self.store.save_settings();
-                        }
                         let _ = self.ui.evaluate_script("ui.toast('Установлено: Rust Browser есть в «Пуске» и на рабочем столе. Запускаю установленную копию')");
                         // переезжаем в установленную копию
                         self.save_session();
@@ -3202,6 +3203,11 @@ impl App {
                 self.store.save_all();
                 system::restart(None);
                 self.quit = true;
+            }
+            "update_source_github" => {
+                self.store.settings.update_source.clear();
+                self.store.save_settings();
+                self.dirty = true;
             }
             "pick_update_source" => {
                 if let Some(path) = platform::pick_file(self.window.hwnd(), "Сборка Rust Browser", "*.exe") {
@@ -4056,14 +4062,33 @@ impl App {
     /// Источник обновлений: выбранный exe или тот, из которого установили браузер.
     fn check_update(&mut self, manual: bool) {
         self.last_update_check = Instant::now();
+        let proxy = self.proxy.clone();
+        // источник не выбран — новые версии берутся из релизов на GitHub
+        if self.store.settings.update_source.is_empty() {
+            std::thread::spawn(move || {
+                let result = installer::latest_release().and_then(|release| match release {
+                    Some(release) if installer::newer(&release.version, env!("CARGO_PKG_VERSION")) => {
+                        let file = installer::download_release(&release)?;
+                        let applied = installer::apply_update(&file);
+                        let _ = std::fs::remove_file(&file);
+                        applied.map(|()| true)
+                    }
+                    _ => Ok(false),
+                });
+                if manual && matches!(result, Ok(false)) {
+                    let _ = proxy.send_event(UserEvent::Ui(r#"{"cmd":"__toast_latest"}"#.into()));
+                }
+                let _ = proxy.send_event(UserEvent::Updated(result));
+            });
+            return;
+        }
         let source = PathBuf::from(&self.store.settings.update_source);
-        if self.store.settings.update_source.is_empty() || !source.is_file() {
+        if !source.is_file() {
             if manual {
-                let _ = self.ui.evaluate_script("ui.toast('Источник обновлений не выбран — укажите файл новой сборки')");
+                let _ = self.ui.evaluate_script("ui.toast('Файл-источник обновлений не найден — выберите другой или верните GitHub')");
             }
             return;
         }
-        let proxy = self.proxy.clone();
         std::thread::spawn(move || {
             let result = if installer::update_available(&source) {
                 installer::apply_update(&source).map(|()| true)

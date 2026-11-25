@@ -161,6 +161,91 @@ pub fn update_available(source: &Path) -> bool {
     size(source) != size(&exe) || fs::read(source).ok() != fs::read(&exe).ok()
 }
 
+// ---------- обновления с GitHub ----------
+
+/// Репозиторий с релизами: у людей, поставивших браузер установщиком, новые версии
+/// приходят отсюда (у разработчика источником может быть exe из папки проекта).
+pub const REPO: &str = "darki234/rust-browser";
+
+/// Релиз на GitHub: версия и exe для обновления (переносная сборка).
+pub struct Release {
+    pub version: String,
+    pub url: String,
+    /// SHA-256 файла из GitHub (поле digest), если GitHub его дал.
+    pub sha256: Option<String>,
+}
+
+fn curl_text(args: &[&str]) -> Result<(Vec<u8>, String), String> {
+    use std::os::windows::process::CommandExt;
+    let output = std::process::Command::new("curl.exe")
+        .args(["-s", "-L", "--proto", "=https", "--proto-redir", "=https", "-A", "RustBrowser-Updater", "-w", "\n%{http_code}"])
+        .args(args)
+        .creation_flags(0x0800_0000)
+        .output()
+        .map_err(|_| "нет curl.exe".to_string())?;
+    let mut body = output.stdout;
+    let split = body.iter().rposition(|&b| b == b'\n').ok_or("пустой ответ")?;
+    let code = String::from_utf8_lossy(&body[split + 1..]).trim().to_string();
+    body.truncate(split);
+    Ok((body, code))
+}
+
+/// Последний релиз. None — релизов ещё нет.
+pub fn latest_release() -> Result<Option<Release>, String> {
+    let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
+    let (body, code) = curl_text(&["-m", "20", "-H", "Accept: application/vnd.github+json", &url])?;
+    if code == "404" {
+        return Ok(None);
+    }
+    if code != "200" {
+        return Err(format!("GitHub ответил {code}"));
+    }
+    let value: serde_json::Value = serde_json::from_slice(&body).map_err(|_| "GitHub ответил непонятно")?;
+    let version = value["tag_name"].as_str().unwrap_or("").trim_start_matches(['v', 'V']).to_string();
+    // exe для обновления: переносная сборка, а не установщик
+    let assets: Vec<&serde_json::Value> = value["assets"].as_array().into_iter().flatten().collect();
+    let name = |a: &serde_json::Value| a["name"].as_str().unwrap_or("").to_lowercase();
+    let asset = assets
+        .iter()
+        .find(|a| name(a).ends_with(".exe") && name(a).contains("portable"))
+        .or_else(|| assets.iter().find(|a| name(a).ends_with(".exe") && !name(a).contains("setup")))
+        .copied();
+    let Some(asset) = asset else { return Ok(None) };
+    let url = asset["browser_download_url"].as_str().unwrap_or("").to_string();
+    if !url.starts_with("https://github.com/") || version.is_empty() {
+        return Ok(None);
+    }
+    let sha256 = asset["digest"].as_str().and_then(|d| d.strip_prefix("sha256:")).map(str::to_lowercase);
+    Ok(Some(Release { version, url, sha256 }))
+}
+
+/// Новее ли версия `a`, чем `b` (по числам: 0.10.0 > 0.9.3).
+pub fn newer(a: &str, b: &str) -> bool {
+    let parts = |v: &str| -> Vec<u64> { v.split(['.', '-']).map(|p| p.parse().unwrap_or(0)).take(3).collect() };
+    parts(a) > parts(b)
+}
+
+/// Скачать exe релиза во временную папку и сверить контрольную сумму.
+pub fn download_release(release: &Release) -> Result<PathBuf, String> {
+    use sha2::{Digest, Sha256};
+    let path = std::env::temp_dir().join(format!("RustBrowser-{}.exe", release.version.replace(|c: char| !c.is_ascii_alphanumeric() && c != '.', "")));
+    let target = path.to_string_lossy().to_string();
+    let (_, code) = curl_text(&["-m", "600", "--max-filesize", "157286400", "-o", &target, &release.url])?;
+    if code != "200" {
+        let _ = fs::remove_file(&path);
+        return Err(format!("скачивание не удалось ({code})"));
+    }
+    if let Some(expected) = &release.sha256 {
+        let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+        let actual: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+        if &actual != expected {
+            let _ = fs::remove_file(&path);
+            return Err("файл обновления повреждён (контрольная сумма не сошлась)".into());
+        }
+    }
+    Ok(path)
+}
+
 /// Ставит обновление: со следующего запуска будет работать новая версия.
 pub fn apply_update(source: &Path) -> Result<(), String> {
     let exe = current_exe();
@@ -243,6 +328,15 @@ fn link_target(link: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn versions_compare_by_numbers() {
+        assert!(newer("0.10.0", "0.9.3"));
+        assert!(newer("0.2.1", "0.2.0"));
+        assert!(!newer("0.2.0", "0.2.0"));
+        assert!(!newer("0.1.9", "0.2.0"));
+        assert!(newer("1.0", "0.99.99"));
+    }
 
     #[test]
     fn replace_keeps_old_copy_and_rolls_back() {

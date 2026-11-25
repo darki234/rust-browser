@@ -3397,6 +3397,7 @@ function installCard() {
   const ready = h('div', { class: 'upd-ready' }, icon('check', 16), h('span', {}, 'Новая версия уже установлена — перезапустите браузер, вкладки вернутся'),
     h('button', { class: 'text-btn primary', onclick: () => send('restart_update') }, 'Перезапустить'));
   const source = h('small', {});
+  const github = h('button', { class: 'text-btn outline', onclick: () => send('update_source_github') }, 'Брать с GitHub');
   settingsUpdaters.push(() => {
     const i = S.install || {};
     status.textContent = i.isInstalledCopy
@@ -3405,7 +3406,8 @@ function installCard() {
     installBtn.style.display = i.isInstalledCopy ? 'none' : '';
     installBtn.textContent = i.installed ? 'Обновить установленную копию' : 'Установить в систему';
     ready.style.display = i.updateReady ? '' : 'none';
-    source.textContent = S.settings.updateSource ? `Новые сборки берутся из ${S.settings.updateSource}` : 'Источник не выбран: укажите exe новой сборки (например, из папки проекта)';
+    source.textContent = S.settings.updateSource ? `Новые сборки берутся из ${S.settings.updateSource}` : 'Новые версии приходят с GitHub (darki234/rust-browser)';
+    github.style.display = S.settings.updateSource ? '' : 'none';
   });
   return h('div', { class: 'card' }, h('h2', {}, 'Установка и обновления'),
     h('div', { class: 'set' }, h('div', { class: 'label' }, 'Rust Browser', status), h('div', { class: 'controls' }, installBtn)),
@@ -3414,6 +3416,7 @@ function installCard() {
       toggle(() => S.settings.autoUpdate, (value) => set('auto_update', value))),
     h('div', { class: 'set' }, h('div', { class: 'label' }, 'Источник обновлений', source),
       h('div', { class: 'controls' },
+        github,
         h('button', { class: 'text-btn outline', onclick: () => send('pick_update_source') }, 'Выбрать файл'),
         h('button', { class: 'text-btn outline', onclick: () => send('check_update') }, 'Проверить сейчас'))));
 }

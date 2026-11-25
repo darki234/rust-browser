@@ -214,6 +214,17 @@ pub fn delete_key(path: &str) {
 }
 
 /// Снимает регистрацию браузера в Windows (при удалении).
+/// Снять регистрацию, только если она указывает на этот exe: удаление одной копии браузера
+/// (например, поставленной установщиком в другую папку) не трогает регистрацию другой.
+pub fn unregister_if_mine() {
+    let Ok(exe) = std::env::current_exe() else { return };
+    let command = get_value(&format!(r"{APP_KEY}\shell\open\command"), "").unwrap_or_default();
+    let registered = command.trim().trim_matches('"').to_lowercase();
+    if registered.is_empty() || registered == exe.to_string_lossy().to_lowercase() {
+        unregister();
+    }
+}
+
 pub fn unregister() {
     for path in [format!(r"Software\Classes\{URL_PROGID}"), format!(r"Software\Classes\{HTML_PROGID}"), APP_KEY.to_string()] {
         delete_key(&path);

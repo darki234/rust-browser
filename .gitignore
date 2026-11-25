@@ -8,3 +8,5 @@ assets/walls/*.webm
 *.old2
 *.old3
 *.apk
+
+/dist/
