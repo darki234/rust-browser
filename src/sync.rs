@@ -22,10 +22,10 @@ use std::{
     os::windows::process::CommandExt,
     process::{Command, Stdio},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 pub const FORMAT: &str = "rust-browser-sync/2";
@@ -75,6 +75,9 @@ pub struct WebDav {
 pub struct Peer {
     pub name: String,
     pub seen: u64,
+    /// Время (по часам телефона) последнего принятого пакета: более старый — повтор, отказ.
+    #[serde(default)]
+    pub time: u64,
 }
 
 /// Что синхронизируется. Каждый раздел — произвольный JSON, сливает его main.rs.
@@ -130,9 +133,10 @@ pub struct PairDav {
 pub fn random_bytes<const N: usize>() -> [u8; N] {
     use windows::Win32::Security::Cryptography::{BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG};
     let mut bytes = [0u8; N];
-    unsafe {
-        let _ = BCryptGenRandom(None, &mut bytes, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
-    }
+    // без случайных байтов ключ и nonce вышли бы нулевыми — лучше остановиться
+    unsafe { BCryptGenRandom(None, &mut bytes, BCRYPT_USE_SYSTEM_PREFERRED_RNG) }
+        .ok()
+        .expect("Windows не выдала случайные байты для ключа");
     bytes
 }
 
@@ -176,15 +180,67 @@ pub fn pair_code(pair: &Pair) -> String {
     format!("{PAIR_PREFIX}{}", b64.trim_end_matches('='))
 }
 
+/// Код из QR может прийти от кого угодно — всё, что из него уходит дальше (в curl, в
+/// адреса), проверяется: номер связки — короткий hex, диск — только https (http — только
+/// в домашней сети), никаких управляющих символов.
 pub fn parse_pair(text: &str) -> Option<Pair> {
     let body = text.trim().strip_prefix(PAIR_PREFIX)?;
+    if body.len() > 4096 {
+        return None;
+    }
     let mut b64 = body.replace('-', "+").replace('_', "/");
     while b64.len() % 4 != 0 {
         b64.push('=');
     }
-    let pair: Pair = serde_json::from_slice(&crate::base64_decode(&b64)?).ok()?;
+    let mut pair: Pair = serde_json::from_slice(&crate::base64_decode(&b64)?).ok()?;
     let key = crate::base64_decode(&pair.k)?;
-    (key.len() == 32 && !pair.g.is_empty()).then_some(pair)
+    if key.len() != 32 || !valid_group(&pair.g) {
+        return None;
+    }
+    if let Some(w) = &pair.w {
+        if !valid_dav_url(&w.u) || !clean(&w.l) || !clean(&w.p) || w.l.len() > 256 || w.p.len() > 256 {
+            return None;
+        }
+    }
+    pair.n = pair.n.chars().filter(|c| !c.is_control()).take(64).collect();
+    pair.a.retain(|a| a.parse::<IpAddr>().is_ok());
+    pair.a.truncate(8);
+    if pair.p == 0 {
+        pair.p = LAN_PORT;
+    }
+    Some(pair)
+}
+
+/// Номер связки: hex до 32 знаков (свои — 16).
+pub fn valid_group(group: &str) -> bool {
+    !group.is_empty() && group.len() <= 32 && group.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn clean(text: &str) -> bool {
+    !text.chars().any(char::is_control)
+}
+
+/// Адрес диска: https, а http — только на этом компьютере или в домашней сети
+/// (по http пароль идёт открытым текстом).
+pub fn valid_dav_url(url: &str) -> bool {
+    let url = url.trim();
+    if !clean(url) || url.contains(char::is_whitespace) || url.len() > 2000 {
+        return false;
+    }
+    if url.starts_with("https://") {
+        return url.len() > "https://".len();
+    }
+    let Some(rest) = url.strip_prefix("http://") else { return false };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = host.rsplit_once(':').map_or(host, |(h, _)| h);
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        Ok(IpAddr::V6(ip)) => ip.is_loopback(),
+        Err(_) => false,
+    }
 }
 
 /// QR-код картинкой SVG (цвета задаёт интерфейс).
@@ -224,20 +280,36 @@ pub fn dav_file(url: &str, group: &str) -> String {
     format!("{}/rust-browser-{group}.rbsync", url.trim().trim_end_matches('/'))
 }
 
-/// curl с логином и паролем через stdin — в списке процессов их не видно.
-fn dav_curl(args: &[&str], user: &str, pass: &str) -> Result<(Vec<u8>, u16, String), String> {
+/// curl с логином и паролем через stdin — в списке процессов их не видно. Адрес — только
+/// через --url: строка, начинающаяся с «-», не станет параметром curl.
+fn dav_curl(args: &[&str], url: &str, user: &str, pass: &str) -> Result<(Vec<u8>, u16, String), String> {
+    if !valid_dav_url(url) {
+        return Err("адрес диска должен начинаться с https://".into());
+    }
+    if !clean(user) || !clean(pass) {
+        return Err("в логине или пароле недопустимые символы".into());
+    }
     let escape = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
     let mut child = Command::new("curl.exe")
-        .args(["-s", "-g", "--proto", "=https,http", "--max-time", "20", "-K", "-", "-D", "-"])
+        .args(["-s", "-g", "--proto", "=https,http", "--proto-redir", "=https", "--max-time", "120"])
+        .args(["--max-filesize", "67108864", "-K", "-", "-D", "-"])
         .args(args)
+        .arg("--url")
+        .arg(url)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .creation_flags(0x0800_0000)
         .spawn()
         .map_err(|_| "нет curl.exe")?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = write!(stdin, "user = \"{}:{}\"\n", escape(user), escape(pass));
+    let written = match child.stdin.take() {
+        Some(mut stdin) => write!(stdin, "user = \"{}:{}\"\n", escape(user), escape(pass)).is_ok(),
+        None => false,
+    };
+    if !written {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("не удалось передать логин программе curl".into());
     }
     let output = child.wait_with_output().map_err(|e| e.to_string())?;
     if !output.status.success() {
@@ -274,7 +346,7 @@ fn dav_status(status: u16) -> String {
 
 /// Скачать файл связки: None — его ещё нет.
 pub fn dav_get(url: &str, user: &str, pass: &str) -> Result<Option<(Vec<u8>, String)>, String> {
-    let (body, status, etag) = dav_curl(&[url], user, pass)?;
+    let (body, status, etag) = dav_curl(&[], url, user, pass)?;
     match status {
         200 => Ok(Some((body, etag))),
         404 => Ok(None),
@@ -284,7 +356,7 @@ pub fn dav_get(url: &str, user: &str, pass: &str) -> Result<Option<(Vec<u8>, Str
 
 /// Только метка версии файла — дёшево узнать, поменялся ли он.
 pub fn dav_etag(url: &str, user: &str, pass: &str) -> Result<Option<String>, String> {
-    let (_, status, etag) = dav_curl(&["-I", url], user, pass)?;
+    let (_, status, etag) = dav_curl(&["-I"], url, user, pass)?;
     match status {
         200 => Ok(Some(etag)),
         404 => Ok(None),
@@ -292,13 +364,24 @@ pub fn dav_etag(url: &str, user: &str, pass: &str) -> Result<Option<String>, Str
     }
 }
 
-pub fn dav_put(url: &str, user: &str, pass: &str, bytes: &[u8]) -> Result<(), String> {
+/// Записать файл; возвращает метку версии из ответа сервера (пусто — сервер её не дал).
+pub fn dav_put(url: &str, user: &str, pass: &str, bytes: &[u8]) -> Result<String, String> {
     let temp = std::env::temp_dir().join(format!("rb-sync-{}.tmp", hex(&random_bytes::<6>())));
     std::fs::write(&temp, bytes).map_err(|e| e.to_string())?;
-    let result = dav_curl(&["-T", &temp.to_string_lossy(), url], user, pass);
+    let result = dav_curl(&["-T", &temp.to_string_lossy()], url, user, pass);
     let _ = std::fs::remove_file(&temp);
-    let (_, status, _) = result?;
+    let (_, status, etag) = result?;
     if (200..300).contains(&status) {
+        Ok(etag)
+    } else {
+        Err(dav_status(status))
+    }
+}
+
+/// Удалить файл на диске (пробный файл при подключении).
+pub fn dav_delete(url: &str, user: &str, pass: &str) -> Result<(), String> {
+    let (_, status, _) = dav_curl(&["-X", "DELETE"], url, user, pass)?;
+    if (200..300).contains(&status) || status == 404 {
         Ok(())
     } else {
         Err(dav_status(status))
@@ -325,11 +408,18 @@ where
     let (listener, port) = (LAN_PORT..LAN_PORT + 5).find_map(|p| TcpListener::bind((bind, p)).ok().map(|l| (l, p)))?;
     let exchange = Arc::new(exchange);
     let (group, rev) = (lan.group.clone(), lan.rev.clone());
+    let open = Arc::new(AtomicUsize::new(0));
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
-            let (exchange, group, rev) = (exchange.clone(), group.clone(), rev.clone());
+            // в домашней сети одновременно приходят один-два телефона; больше — уже не наши
+            if open.load(Ordering::Relaxed) >= MAX_CONNECTIONS {
+                continue;
+            }
+            open.fetch_add(1, Ordering::Relaxed);
+            let (exchange, group, rev, open) = (exchange.clone(), group.clone(), rev.clone(), open.clone());
             std::thread::spawn(move || {
                 let _ = handle(stream, &group, &rev, &*exchange);
+                open.fetch_sub(1, Ordering::Relaxed);
             });
         }
     });
@@ -341,7 +431,7 @@ where
         while let Ok((n, from)) = socket.recv_from(&mut buf) {
             let text = String::from_utf8_lossy(&buf[..n]);
             let current = group.lock().map(|g| g.clone()).unwrap_or_default();
-            if !current.is_empty() && text.trim() == format!("rb-find {current}") {
+            if !current.is_empty() && same(text.trim().as_bytes(), format!("rb-find {current}").as_bytes()) {
                 let _ = socket.send_to(format!("rb-here {port}").as_bytes(), from);
             }
         }
@@ -349,11 +439,27 @@ where
     Some(port)
 }
 
+const MAX_CONNECTIONS: usize = 8;
+const MAX_BODY: usize = 16 * 1024 * 1024;
+/// Весь запрос целиком — не дольше этого: медленный «капающий» клиент не держит поток.
+const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Сравнение без утечки по времени (номер связки).
+fn same(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 fn handle(mut stream: TcpStream, group: &Mutex<String>, rev: &AtomicU64, exchange: &dyn Fn(Vec<u8>) -> Option<Vec<u8>>) -> std::io::Result<()> {
-    stream.set_read_timeout(Some(Duration::from_secs(15)))?;
+    let deadline = Instant::now() + REQUEST_DEADLINE;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+    let late = || std::io::Error::new(std::io::ErrorKind::TimedOut, "запрос слишком долгий");
     let mut data = Vec::new();
     let mut buf = [0u8; 16 * 1024];
     let head_end = loop {
+        if Instant::now() > deadline {
+            return Err(late());
+        }
         let n = stream.read(&mut buf)?;
         if n == 0 {
             return Ok(());
@@ -379,7 +485,7 @@ fn handle(mut stream: TcpStream, group: &Mutex<String>, rev: &AtomicU64, exchang
         write!(stream, "HTTP/1.1 {code}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len())?;
         stream.write_all(body)
     };
-    if current.is_empty() || header("X-RB-Group") != current {
+    if current.is_empty() || !same(header("X-RB-Group").as_bytes(), current.as_bytes()) {
         return reply(&mut stream, "403 Forbidden", b"");
     }
     if request.starts_with("GET /rb-rev") {
@@ -389,11 +495,14 @@ fn handle(mut stream: TcpStream, group: &Mutex<String>, rev: &AtomicU64, exchang
         return reply(&mut stream, "404 Not Found", b"");
     }
     let length: usize = header("Content-Length").parse().unwrap_or(0);
-    if length > 64 * 1024 * 1024 {
+    if length > MAX_BODY {
         return reply(&mut stream, "413 Payload Too Large", b"");
     }
     let mut body = data[head_end + 4..].to_vec();
     while body.len() < length {
+        if Instant::now() > deadline {
+            return Err(late());
+        }
         let n = stream.read(&mut buf)?;
         if n == 0 {
             break;
@@ -495,6 +604,24 @@ mod tests {
         assert_eq!(parse_pair("RBSYNC1.мусор"), None);
         assert_eq!(parse_pair("что-то другое"), None);
         assert!(qr_svg(&code).starts_with("<?xml") || qr_svg(&code).contains("<svg"));
+    }
+
+    #[test]
+    fn pair_code_rejects_dangerous_fields() {
+        let base = |u: &str, l: &str, g: &str| Pair {
+            g: g.into(),
+            k: crate::base64(&[5u8; 32]),
+            w: Some(PairDav { u: u.into(), l: l.into(), p: "x".into() }),
+            ..Default::default()
+        };
+        let ok = |pair: Pair| parse_pair(&pair_code(&pair)).is_some();
+        assert!(ok(base("https://webdav.yandex.ru", "me", "ab12")));
+        assert!(!ok(base("-oC:/Users/x/Startup/a.bat", "me", "ab12")));
+        assert!(!ok(base("http://evil.example/dav", "me", "ab12")));
+        assert!(ok(base("http://192.168.1.10:8080/dav", "me", "ab12")));
+        assert!(!ok(base("https://a.org", "me\noutput = C:/x", "ab12")));
+        assert!(!ok(base("https://a.org", "me", "../../x")));
+        assert!(valid_dav_url("http://localhost:9/dav") && !valid_dav_url("https://a.org/ b"));
     }
 
     #[test]

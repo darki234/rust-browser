@@ -78,15 +78,32 @@ class PairCode(
             val body = trimmed.removePrefix("RBSYNC1.")
             val json = JSONObject(String(Base64.decode(body, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP), Charsets.UTF_8))
             val key = SyncCrypto.b64(json.getString("k"))
-            if (key.size != 32 || json.optString("g").isEmpty()) return null
+            val group = json.optString("g")
+            // код мог прислать кто угодно: номер связки — короткий hex, диск — https
+            // (http — только в домашней сети), без управляющих символов
+            if (key.size != 32 || group.isEmpty() || group.length > 32 || !group.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }) return null
             val a = json.optJSONArray("a") ?: JSONArray()
             val w = json.optJSONObject("w")
+            val dav = w?.let { Triple(it.optString("u").trim(), it.optString("l"), it.optString("p")) }
+            if (dav != null && (!davUrlOk(dav.first) || dav.second.any { it.isISOControl() } || dav.third.any { it.isISOControl() })) return null
+            val hosts = (0 until a.length()).map { a.getString(it) }.filter { h -> h.length <= 45 && h.all { it.isLetterOrDigit() || it == '.' || it == ':' } }.take(8)
             PairCode(
-                json.getString("g"), key, json.optString("n"),
-                (0 until a.length()).map { a.getString(it) }, json.optInt("p", Lan.PORT),
-                w?.let { Triple(it.optString("u"), it.optString("l"), it.optString("p")) },
+                group, key, json.optString("n").filter { !it.isISOControl() }.take(64),
+                hosts, json.optInt("p", Lan.PORT).takeIf { it in 1..65535 } ?: Lan.PORT,
+                dav,
             )
         }.getOrNull()
+
+        /** https — всегда; http — только адрес в домашней сети (иначе пароль идёт открытым текстом). */
+        fun davUrlOk(url: String): Boolean {
+            if (url.any { it.isISOControl() || it.isWhitespace() } || url.length > 2000) return false
+            if (url.startsWith("https://")) return url.length > 8
+            val host = url.removePrefix("http://").takeIf { it != url }?.substringBefore('/')?.substringBefore(':') ?: return false
+            if (host == "localhost") return true
+            val p = host.split('.').mapNotNull { it.toIntOrNull() }
+            if (p.size != 4) return false
+            return p[0] == 10 || p[0] == 127 || (p[0] == 192 && p[1] == 168) || (p[0] == 172 && p[1] in 16..31)
+        }
     }
 }
 

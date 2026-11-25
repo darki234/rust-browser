@@ -425,6 +425,9 @@ await check('синхронизация: код связки, обмен с те
   const merged = open(await answer.text());
   if (!merged.sections.bookmarks.some((b) => b.url === 'https://e2e-phone.example/')) throw new Error('закладка телефона не слилась');
   if (merged.sections.history) throw new Error('телефону ушли лишние разделы');
+  // перехваченный старый пакет не принимается
+  const replay = await fetch(base + '/rb-sync', { method: 'POST', headers: { 'X-RB-Group': pair.g }, body: seal({ ...phone, time: phone.time - 600 }) });
+  if (replay.status !== 403) throw new Error('старый пакет приняли: ' + replay.status);
   stage = 3; await waitFor(async () => (await tabsCount()) === before + 1);
   stage = 4; await waitFor(() => ui.evaluate("(S.account.peers || []).some((p) => p.name === 'E2E Phone')"));
   // диск WebDAV: маленький сервер с паролем

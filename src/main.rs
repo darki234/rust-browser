@@ -204,15 +204,15 @@ pub enum UserEvent {
     /// Появился новый значок сайта — перерисовать плитки.
     IconSaved,
     /// Телефон пришёл по Wi‑Fi со своим пакетом — ответ уходит обратно в канал.
-    LanSync(Vec<u8>, std::sync::mpsc::Sender<Option<Vec<u8>>>),
+    LanSync(sync::Bundle, std::sync::mpsc::Sender<Option<Vec<u8>>>),
     /// С диска WebDAV скачан файл связки (или его там ещё нет, или ошибка); bool — по кнопке.
-    DavFetched(Result<(Option<sync::Bundle>, String), String>, bool),
+    DavFetched(Result<(Option<sync::Bundle>, String), String>, bool, u64),
     /// Файл записан на диск: новая метка версии; отпечатки, ручная ли, сколько разделов поменялось.
-    DavStored(Result<String, String>, std::collections::BTreeMap<String, String>, bool, usize),
+    DavStored(Result<String, String>, std::collections::BTreeMap<String, String>, bool, usize, u64),
     /// Метка версии файла на диске — поменялась ли.
-    DavEtag(Option<String>),
+    DavEtag(Option<String>, u64),
     /// Проверка диска при подключении.
-    DavChecked(Result<(), String>, sync::WebDav),
+    DavChecked(Result<(), String>, sync::WebDav, u64),
     /// Процессы WebView2; true — показать их в диспетчере вкладок.
     Processes(Vec<efficiency::ProcessInfo>, bool),
     /// Страница не загрузилась: (вкладка, вид ошибки для своей страницы ошибки).
@@ -272,8 +272,13 @@ struct Tab {
     retries: (String, u8, Option<Instant>),
     /// Язык страницы — чтобы предложить перевод.
     lang: String,
-    /// Страница переведена на месте (кнопка покажет «оригинал»).
+    /// Страница переведена на месте (кнопка покажет «оригинал»). Ставит только браузер
+    /// по команде пользователя — страница сама включить перевод не может.
     translated: bool,
+    /// Сколько пачек перевода сейчас в работе (не больше нескольких одновременно).
+    tr_inflight: u32,
+    /// Сколько просьб страница прислала за текущее окно (фоновые вкладки, перевод выделения).
+    quota: (Instant, u32),
     /// На странице поля карты / адреса — у адреса появляется кнопка автозаполнения.
     af_card: bool,
     af_address: bool,
@@ -312,6 +317,8 @@ impl Tab {
             retries: (String::new(), 0, None),
             lang: String::new(),
             translated: false,
+            tr_inflight: 0,
+            quota: (Instant::now(), 0),
             dark_script: Default::default(),
             boost_script: Default::default(),
             af_card: false,
@@ -429,6 +436,10 @@ struct App {
     /// Порт сервера в домашней сети (None — ещё не запущен).
     lan_port: Option<u16>,
     lan_group: Arc<Mutex<String>>,
+    /// Ключ связки для сервера в сети: пакеты телефона расшифровываются в его потоке.
+    lan_key: Arc<Mutex<Option<[u8; 32]>>>,
+    /// Растёт при включении/выключении связки: ответы диска от прошлой связки отбрасываются.
+    sync_gen: u64,
     lan_rev: Arc<std::sync::atomic::AtomicU64>,
     /// Отпечаток того, что нужно телефону, — вырос, значит телефону пора прийти.
     lan_fp: String,
@@ -619,7 +630,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ext_quiet: Default::default(),
         prewarm: None,
         update_ready: false,
-        last_update_check: Instant::now() - Duration::from_secs(3600) + Duration::from_secs(20),
+        last_update_check: instant_ago(Duration::from_secs(3600 - 20)),
         groups: Vec::new(),
         split: None,
         split_drag: false,
@@ -633,6 +644,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         last_sync: Instant::now(),
         lan_port: None,
         lan_group: Default::default(),
+        lan_key: Default::default(),
+        sync_gen: 0,
         lan_rev: Default::default(),
         lan_fp: String::new(),
         dav_busy: false,
@@ -713,7 +726,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // старый аккаунт через папку OneDrive (без номера связки) больше не используется
         if !account.group.is_empty() && !account.key.is_empty() {
             app.account = Some(account);
-            app.last_sync = Instant::now() - SYNC_EVERY + Duration::from_secs(4);
+            app.last_sync = instant_ago(SYNC_EVERY - Duration::from_secs(4));
             app.start_lan();
         }
     }
@@ -853,6 +866,13 @@ static SCALE_BITS: AtomicU64 = AtomicU64::new(0x3FF0_0000_0000_0000); // 1.0
 /// Прямоугольник в логических пикселях → физические. Края округляются каждый сам по себе:
 /// если округлять отдельно верх и высоту, при масштабе 125 % страница не доставала до
 /// низа окна на пиксель — там светилась белая полоска.
+/// «Столько-то назад» без паники: Instant на Windows отсчитывается от включения компьютера,
+/// и в первые минуты после него вычитание ушло бы в минус.
+fn instant_ago(duration: Duration) -> Instant {
+    let now = Instant::now();
+    now.checked_sub(duration).unwrap_or(now)
+}
+
 fn rect(x: f64, y: f64, width: f64, height: f64) -> Rect {
     let scale = f64::from_bits(SCALE_BITS.load(Ordering::Relaxed));
     let (x0, y0) = ((x * scale).round(), (y * scale).round());
@@ -1113,6 +1133,17 @@ impl App {
             Some((host, version)) => format!("http://rb.localhost/tabicon/{host}?v={version}"),
             None => tab.favicon.clone(),
         }
+    }
+
+    /// Не больше 20 просьб страницы за 10 секунд (фоновые вкладки, перевод выделения):
+    /// страница не откроет сотню вкладок и не завалит переводчик.
+    fn page_quota(&mut self, id: u32) -> bool {
+        let Some(tab) = self.tab_mut(id) else { return false };
+        if tab.quota.0.elapsed() > Duration::from_secs(10) {
+            tab.quota = (Instant::now(), 0);
+        }
+        tab.quota.1 += 1;
+        tab.quota.1 <= 20
     }
 
     fn active_tab(&self) -> Option<&Tab> {
@@ -1800,6 +1831,7 @@ impl App {
                     tab.pw_form = false;
                     tab.video = false;
                     tab.translated = false;
+                    tab.tr_inflight = 0;
                     tab.af_card = false;
                     tab.af_address = false;
                     self.dirty = true;
@@ -1849,6 +1881,9 @@ impl App {
             }
             UserEvent::ShotActive(id) => self.shot_active(id),
             UserEvent::PageTranslated(id, batch, result) => {
+                if let Some(tab) = self.tab_mut(id) {
+                    tab.tr_inflight = tab.tr_inflight.saturating_sub(1);
+                }
                 let list = match &result {
                     Ok(list) => json!(list),
                     Err(_) => Value::Null,
@@ -1930,19 +1965,26 @@ impl App {
             UserEvent::Panel(raw) => self.handle_panel(&raw),
             UserEvent::Page(id, url, raw) => self.handle_page(id, &url, &raw),
             UserEvent::ExtReady(result, tab) => self.extension_ready(result, tab),
-            UserEvent::LanSync(body, reply) => {
-                let _ = reply.send(self.lan_exchange(&body));
+            UserEvent::LanSync(bundle, reply) => {
+                let _ = reply.send(self.lan_exchange(bundle));
             }
-            UserEvent::DavFetched(result, manual) => self.dav_fetched(result, manual),
-            UserEvent::DavStored(result, hashes, manual, changed) => self.dav_stored(result, hashes, manual, changed),
-            UserEvent::DavEtag(etag) => {
+            UserEvent::DavFetched(_, _, gen) | UserEvent::DavStored(_, _, _, _, gen) | UserEvent::DavEtag(_, gen) | UserEvent::DavChecked(_, _, gen)
+                if gen != self.sync_gen =>
+            {
+                // ответ для связки, которую уже выключили или сменили
+                self.dav_busy = false;
+                self.dirty = true;
+            }
+            UserEvent::DavFetched(result, manual, _) => self.dav_fetched(result, manual),
+            UserEvent::DavStored(result, hashes, manual, changed, _) => self.dav_stored(result, hashes, manual, changed),
+            UserEvent::DavEtag(etag, _) => {
                 self.dav_busy = false;
                 let known = self.account.as_ref().and_then(|a| a.webdav.as_ref()).map(|d| d.etag.clone());
                 if etag.is_some() && etag != known {
                     self.sync_now(false);
                 }
             }
-            UserEvent::DavChecked(result, dav) => {
+            UserEvent::DavChecked(result, dav, _) => {
                 self.dav_busy = false;
                 self.dirty = true;
                 match result {
@@ -2971,10 +3013,17 @@ impl App {
                     self.navigate(self.active, &original);
                     return;
                 }
-                let script = if tab.translated { "window.__rbTrRestore && __rbTrRestore()" } else { "window.__rbTrPage && __rbTrPage()" };
+                let on = !tab.translated;
+                let script = if on { "window.__rbTrPage && __rbTrPage()" } else { "window.__rbTrRestore && __rbTrRestore()" };
                 if let Some(webview) = &tab.webview {
                     let _ = webview.evaluate_script(script);
                 }
+                let active = self.active;
+                if let Some(tab) = self.tab_mut(active) {
+                    tab.translated = on;
+                    tab.tr_inflight = 0;
+                }
+                self.dirty = true;
             }
             "dark_site" => {
                 // тёмная тема для сайта во вкладке: включить или выключить
@@ -3235,8 +3284,13 @@ impl App {
             "account_logout" => {
                 self.account = None;
                 self.sync_error = None;
+                self.sync_gen += 1;
+                self.dav_busy = false;
                 if let Ok(mut group) = self.lan_group.lock() {
                     group.clear();
+                }
+                if let Ok(mut key) = self.lan_key.lock() {
+                    *key = None;
                 }
                 self.save_account();
                 self.dirty = true;
@@ -4314,6 +4368,9 @@ impl App {
             }
             "open_bg" => {
                 let link = message["url"].as_str().unwrap_or("");
+                if !self.page_quota(id) {
+                    return;
+                }
                 if (link.starts_with("https://") || link.starts_with("http://")) && link.len() < 8000 {
                     self.new_background_tab(link);
                 }
@@ -4325,7 +4382,7 @@ impl App {
                 // выделенный текст — переводим в фоне, ответ вернётся в эту вкладку
                 let text: String = message["text"].as_str().unwrap_or("").chars().take(2000).collect();
                 let seq = message["seq"].as_u64().unwrap_or(0);
-                if text.trim().is_empty() {
+                if text.trim().is_empty() || !self.page_quota(id) {
                     return;
                 }
                 let proxy = self.proxy.clone();
@@ -4334,12 +4391,18 @@ impl App {
                 });
             }
             "tr_state" => {
-                if let Some(tab) = self.tab_mut(id) {
-                    tab.translated = message["on"].as_bool().unwrap_or(false);
-                    self.dirty = true;
+                // страница может только сообщить, что перевод снят; включает его браузер
+                if message["on"].as_bool() == Some(false) {
+                    if let Some(tab) = self.tab_mut(id) {
+                        tab.translated = false;
+                        self.dirty = true;
+                    }
                 }
             }
             "tr_batch" => {
+                // пачки — только пока пользователь включил перевод, и не больше 6 разом
+                let Some(tab) = self.tab_mut(id).filter(|t| t.translated && t.tr_inflight < 6) else { return };
+                tab.tr_inflight += 1;
                 let batch = message["id"].as_u64().unwrap_or(0);
                 let texts: Vec<String> = message["texts"]
                     .as_array()
@@ -5279,31 +5342,33 @@ const PAGE_TRANSLATE_SCRIPT: &str = r#"(() => {
 /// много строк в одном запросе). Порядок ответа — как у вопроса.
 fn translate_batch(texts: &[String]) -> Result<Vec<String>, String> {
     use std::os::windows::process::CommandExt;
+    use std::io::Write as _;
+    // текст страницы идёт curl через stdin — на диск он не попадает (важно и для InPrivate)
     let body: String = texts.iter().map(|t| format!("q={}", percent_encode(t))).collect::<Vec<_>>().join("&");
-    let file = std::env::temp_dir().join(format!("rb-tr-{}.txt", sync::hex(&sync::random_bytes::<6>())));
-    std::fs::write(&file, body).map_err(|e| e.to_string())?;
     let mut last = String::from("нет связи с переводчиком");
     for url in [
         "https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=auto&tl=ru&format=html",
         "https://translate.googleapis.com/translate_a/t?client=gtx&sl=auto&tl=ru&format=html",
     ] {
-        let output = std::process::Command::new("curl.exe")
+        let child = std::process::Command::new("curl.exe")
             .args(["-s", "-m", "20", "-X", "POST", "-H", "Content-Type: application/x-www-form-urlencoded;charset=UTF-8"])
-            .arg("--data-binary")
-            .arg(format!("@{}", file.display()))
-            .arg(url)
+            .args(["--data-binary", "@-", url])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
             .creation_flags(0x0800_0000)
-            .output();
-        let Ok(output) = output else { continue };
+            .spawn();
+        let Ok(mut child) = child else { return Err("нет curl.exe".into()) };
+        let sent = child.stdin.take().is_some_and(|mut stdin| stdin.write_all(body.as_bytes()).is_ok());
+        let Ok(output) = child.wait_with_output() else { continue };
+        if !sent {
+            continue;
+        }
         match parse_batch(&output.stdout, texts.len()) {
-            Some(list) => {
-                let _ = std::fs::remove_file(&file);
-                return Ok(list);
-            }
+            Some(list) => return Ok(list),
             None => last = "переводчик ответил непонятно".into(),
         }
     }
-    let _ = std::fs::remove_file(&file);
     Err(last)
 }
 
@@ -5656,11 +5721,14 @@ impl App {
     }
 
     /// Обмен с телефоном по Wi‑Fi: его пакет внутрь, в ответ — слитые разделы.
-    fn lan_exchange(&mut self, body: &[u8]) -> Option<Vec<u8>> {
+    fn lan_exchange(&mut self, remote: sync::Bundle) -> Option<Vec<u8>> {
         let account = self.account.clone()?;
         let key = self.account_key()?;
-        let remote = sync::decrypt(body, &key).ok()?;
         if remote.id.is_empty() {
+            return None;
+        }
+        // перехваченный и присланный заново старый пакет вернул бы удалённое — не принимаем
+        if account.peers.get(&remote.id).is_some_and(|p| remote.time < p.time) {
             return None;
         }
         let peer = format!("peer:{}", remote.id);
@@ -5672,7 +5740,7 @@ impl App {
         if let Some(acc) = &mut self.account {
             acc.bases.insert(peer, hashes);
             let name = if remote.device.is_empty() { "Телефон".to_string() } else { remote.device.clone() };
-            acc.peers.insert(remote.id.clone(), sync::Peer { name, seen: unix_now() });
+            acc.peers.insert(remote.id.clone(), sync::Peer { name, seen: unix_now(), time: remote.time });
             acc.synced = unix_now();
         }
         self.save_account();
@@ -5680,7 +5748,7 @@ impl App {
         self.dirty = true;
         if changed > 0 {
             // с телефона пришло новое — скоро и на диск, для других компьютеров
-            self.last_sync = Instant::now() - SYNC_EVERY + Duration::from_secs(3);
+            self.last_sync = instant_ago(SYNC_EVERY - Duration::from_secs(3));
         }
         let bundle = sync::Bundle {
             sections,
@@ -5716,13 +5784,14 @@ impl App {
         };
         self.dav_busy = true;
         let proxy = self.proxy.clone();
+        let gen = self.sync_gen;
         let file = sync::dav_file(&dav.url, &account.group);
         std::thread::spawn(move || {
             let result = sync::dav_get(&file, &dav.user, &pass).and_then(|found| match found {
                 Some((bytes, etag)) => sync::decrypt(&bytes, &key).map(|b| (Some(b), etag)),
                 None => Ok((None, String::new())),
             });
-            let _ = proxy.send_event(UserEvent::DavFetched(result, manual));
+            let _ = proxy.send_event(UserEvent::DavFetched(result, manual, gen));
         });
     }
 
@@ -5764,11 +5833,15 @@ impl App {
             Err(error) => return self.dav_stored(Err(error), hashes, manual, changed),
         };
         let proxy = self.proxy.clone();
+        let gen = self.sync_gen;
         let file = sync::dav_file(&dav.url, &account.group);
         std::thread::spawn(move || {
-            let result = sync::dav_put(&file, &dav.user, &pass, &bytes)
-                .map(|()| sync::dav_etag(&file, &dav.user, &pass).ok().flatten().unwrap_or_default());
-            let _ = proxy.send_event(UserEvent::DavStored(result, hashes, manual, changed));
+            // метка версии — из ответа на запись; отдельный запрос метки мог бы поймать
+            // уже чужую запись и пропустить её
+            let result = sync::dav_put(&file, &dav.user, &pass, &bytes).map(|etag| {
+                if etag.is_empty() { sync::dav_etag(&file, &dav.user, &pass).ok().flatten().unwrap_or_default() } else { etag }
+            });
+            let _ = proxy.send_event(UserEvent::DavStored(result, hashes, manual, changed, gen));
         });
     }
 
@@ -5820,9 +5893,10 @@ impl App {
         self.dav_checked = Instant::now();
         self.dav_busy = true;
         let proxy = self.proxy.clone();
+        let gen = self.sync_gen;
         std::thread::spawn(move || {
             let etag = sync::dav_etag(&sync::dav_file(&dav.url, &group), &dav.user, &pass).ok().flatten();
-            let _ = proxy.send_event(UserEvent::DavEtag(etag));
+            let _ = proxy.send_event(UserEvent::DavEtag(etag, gen));
         });
     }
 
@@ -5846,20 +5920,33 @@ impl App {
         if let Ok(mut group) = self.lan_group.lock() {
             *group = account.group.clone();
         }
+        let key = self.account_key();
+        if let Ok(mut slot) = self.lan_key.lock() {
+            *slot = key;
+        }
         if self.lan_port.is_some() || self.inprivate {
             return;
         }
         let proxy = Mutex::new(self.proxy.clone());
+        let lan_key = self.lan_key.clone();
         let lan = sync::Lan { group: self.lan_group.clone(), rev: self.lan_rev.clone() };
         self.lan_port = sync::serve(sync::bind_address(), lan, move |body| {
+            // расшифровка здесь, в потоке сервера: чужой пакет не доходит до окна и не тормозит его
+            let key = (*lan_key.lock().ok()?)?;
+            let bundle = sync::decrypt(&body, &key).ok()?;
             let (tx, rx) = std::sync::mpsc::channel();
-            proxy.lock().ok()?.send_event(UserEvent::LanSync(body, tx)).ok()?;
+            proxy.lock().ok()?.send_event(UserEvent::LanSync(bundle, tx)).ok()?;
             rx.recv_timeout(Duration::from_secs(20)).ok().flatten()
         });
     }
 
     /// Включить синхронизацию: новая связка или вход в чужую по коду.
     fn sync_enable(&mut self, pair: Option<sync::Pair>) {
+        if self.account.is_some() {
+            let _ = self.ui.evaluate_script("ui.accountError('Синхронизация уже включена — сначала выключите её')");
+            return;
+        }
+        self.sync_gen += 1;
         let (group, key) = match &pair {
             Some(pair) => (pair.g.clone(), base64_decode(&pair.k).unwrap_or_default()),
             None => (sync::hex(&sync::random_bytes::<8>()), sync::random_bytes::<32>().to_vec()),
@@ -5915,8 +6002,8 @@ impl App {
         let fail = |app: &mut App, text: &str| {
             let _ = app.ui.evaluate_script(&format!("ui.accountError({text:?})"));
         };
-        if !url.starts_with("https://") && !url.starts_with("http://") {
-            return fail(self, "Адрес диска начинается с https://");
+        if !sync::valid_dav_url(&url) {
+            return fail(self, "Нужен адрес https:// — по http пароль ушёл бы открытым текстом (http можно только в домашней сети)");
         }
         if user.trim().is_empty() || pass.is_empty() {
             return fail(self, "Укажите логин и пароль приложения");
@@ -5928,9 +6015,14 @@ impl App {
         self.dirty = true;
         let proxy = self.proxy.clone();
         let user = user.trim().to_string();
+        let gen = self.sync_gen;
+        let probe = format!("{}/rust-browser-check.txt", url.trim_end_matches('/'));
         std::thread::spawn(move || {
-            let result = sync::dav_etag(&file, &user, &pass).map(|_| ());
-            let _ = proxy.send_event(UserEvent::DavChecked(result, dav));
+            // пускает ли и даёт ли писать: пробный файл записать и удалить
+            let result = sync::dav_etag(&file, &user, &pass)
+                .and_then(|_| sync::dav_put(&probe, &user, &pass, b"rust-browser"))
+                .and_then(|_| sync::dav_delete(&probe, &user, &pass));
+            let _ = proxy.send_event(UserEvent::DavChecked(result, dav, gen));
         });
     }
 
